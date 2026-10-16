@@ -1,5 +1,36 @@
 # Sable Changelog
 
+## 2.1.0 (2026-10-16)
+
+### Features
+
+* Add Ctrl/Cmd+E, Ctrl/Cmd+G and Ctrl/Cmd+S shortcuts to toggle the emoji, GIF and sticker pickers. Inline code moves to Ctrl/Cmd+Shift+C.
+
+### Fixes
+
+* Fix Electron Linux packages and publish update manifests to Forgejo.
+* Follow the system light or dark mode live on the Linux desktop app
+* Add Default, System, and Custom font choices in Appearance. Fix theme overrides hiding font selections and monospaced font settings resetting after restart.
+* Made monospace font consistent and added code ligatures to inline and block code, as well as file previews
+* Ask an older tab to reload when a newer Sable opens, instead of both writing to local storage
+* Option to pin PMP picker to left side of composer
+* Room header actions are a keyboard toolbar, and settings pass accessibility checks
+* Include custom settings panels in search and show their setting names in shared links.
+* Sign-in and setup are quieter for screen readers
+* Stop counting thread messages in a room's unread badge
+
+* Add new UI sounds & ringtone
+
+* Added new audio player design
+
+* Keep usernames at top of the message in compact layout
+
+* Pause sync while the web app is hidden
+
+* Remove message groups from Compact layout
+
+* Show avatars in message headers in Compact layout
+
 ## 2.0.2 (2026-10-11)
 
 ### Fixes
