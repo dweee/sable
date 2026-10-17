@@ -312,7 +312,7 @@ are explicitly marked as upstream binary code.
 For Android in the shell, use `pnpm tauri android build` with the checked-in
 project and SDK; the upstream `pnpm android:build` convenience script manages
 Rust with rustup, whereas this shell provides immutable Rust targets directly.
-For iOS, select a separately installed Xcode and run `pnpm tauri ios init --ci`,
+For iOS, select a separately installed Xcode 26 or newer and run `pnpm tauri ios init --ci`,
 `pnpm ios:frameworks`, then `pnpm tauri ios build --no-sign --ci`.
 Xcode and the Windows SDK/MSVC toolchain are native vendor prerequisites, not
 Nix derivations. Windows source CI runs on Windows; WSL can use the web shell.
@@ -327,6 +327,15 @@ source for web/WASM, Linux CEF (x86_64 and aarch64), macOS universal, Windows
 x86_64 (MSI/NSIS), Android (arm64/armv7 FOSS APKs and universal APK/AAB), and
 iOS arm64. Every build produces artifacts; main pushes and `v*` tags publish
 the complete set with SHA256SUMS after all platform builds succeed.
+Manual workflow dispatch can verify just desktop, Android or iOS (with the
+shared web build); pushes and pull requests always verify every platform.
+
+iOS CI explicitly selects Xcode 26.3, which is installed on the
+[macOS 15 ARM runner](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md).
+The runner's default Xcode 16.4 lacks the LiveKit plugin's
+[`filteredBySensitiveParticipants`](https://developer.apple.com/documentation/callkit/cxerrorcodeincomingcallerror-swift.struct/filteredbysensitiveparticipants)
+and [`allowBluetoothHFP`](https://developer.apple.com/documentation/avfaudio/avaudiosession/categoryoptions-swift.struct/allowbluetoothhfp)
+APIs. The workflow checks the selected iOS SDK before compiling.
 
 Fork Android source artifacts are unsigned and need a signing key before
 installation or distribution. The iOS IPA is unsigned for AltStore/SideStore

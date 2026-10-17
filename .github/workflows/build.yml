@@ -5,6 +5,12 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to verify (pushes always build everything)
+        type: choice
+        default: all
+        options: [all, desktop, android, ios]
 permissions:
   contents: read
 concurrency:
@@ -49,6 +55,7 @@ jobs:
           if-no-files-found: error
   desktop:
     name: ${{ matrix.name }}
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'desktop'
     needs: web
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
@@ -122,6 +129,7 @@ jobs:
           if-no-files-found: error
   android:
     name: Android arm64 and armv7
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android'
     needs: web
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -182,9 +190,13 @@ jobs:
           if-no-files-found: error
   ios:
     name: iOS arm64 (unsigned)
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'ios'
     needs: web
     runs-on: macos-15
     timeout-minutes: 120
+    env:
+      # macos-15 defaults to Xcode 16.4, whose SDK predates LiveKit's APIs.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -199,6 +211,9 @@ jobs:
           install-mise-tools: 'false'
       - name: Provision iOS project
         run: |
+          xcodebuild -version
+          sdk=$(xcrun --sdk iphoneos --show-sdk-version)
+          test "${sdk%%.*}" -ge 26
           command -v pod >/dev/null || brew install cocoapods
           pnpm tauri ios init --ci
           pnpm ios:frameworks
