@@ -253,7 +253,9 @@ These downloads can be realized on every Nix host; mobile and Windows artifacts
 are not executable Nix applications.
 
 The initial Nix packages repackage the complete, immutable upstream nightly
-recorded with hashes in `nix/sources.json`. This deliberately retains the
+recorded with hashes in `nix/sources.json` and archived in this fork
+at the `bootstrap-v2-20261015` Forgejo release. The archive is the primary
+download URL; upstream is a fallback. This deliberately retains the
 separate `moe.sable.next.nightly` identity: upstream **stable** v2 packages
 reuse legacy's `moe.sable.client` identity for an in-place migration. Do not
 replace this pin with a stable build while preserving a legacy installation.

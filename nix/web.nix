@@ -11,7 +11,13 @@ in
     pname = "sable-web";
     inherit (release) version;
     src = fetchurl release.sources."web.tar.gz";
-    sourceRoot = ".";
+    unpackPhase = ''
+      runHook preUnpack
+      mkdir source
+      tar -xf "$src" -C source
+      cd source
+      runHook postUnpack
+    '';
     nativeBuildInputs = [jq];
     dontBuild = true;
     dontConfigure = true;

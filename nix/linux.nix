@@ -107,6 +107,7 @@ in
       gdk-pixbuf
       glib
       gtk3
+      pipewire
       stdenv.cc.cc.lib
     ];
 

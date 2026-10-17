@@ -42,7 +42,17 @@ in {
       wantedBy = ["multi-user.target"];
       after = ["network.target"];
       serviceConfig = {
-        ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd ${web} --addr ${cfg.listenAddress} --port ${toString cfg.port} --fallback index.html";
+        ExecStart = lib.escapeShellArgs [
+          "${pkgs.static-web-server}/bin/static-web-server"
+          "--host"
+          cfg.listenAddress
+          "--port"
+          (toString cfg.port)
+          "--root"
+          (toString web)
+          "--page-fallback"
+          "${web}/index.html"
+        ];
         DynamicUser = true;
         NoNewPrivileges = true;
         ProtectSystem = "strict";
