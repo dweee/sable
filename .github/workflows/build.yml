@@ -207,7 +207,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           rust: 'true'
-          rust-cache-key: ios
+          rust-cache-key: ios-xcode-26.3
           install-mise-tools: 'false'
       - name: Provision iOS project
         run: |
