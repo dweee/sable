@@ -330,7 +330,9 @@ the push mirror carries them to GitHub, where the complete set is published
 with SHA256SUMS after all platform builds succeed. Main pushes build artifacts
 without creating releases. The release job verifies that the tag exists at
 the built commit in canonical Forgejo, so a later mirror cannot prune a
-GitHub-only release tag. Re-running publication updates the existing assets.
+GitHub-only release tag. Asset filenames are normalized before checksumming,
+and publication verifies every uploaded asset digest and the checksum manifest
+against GitHub's release metadata. Re-running publication updates existing assets.
 Manual workflow dispatch can verify just desktop, Android or iOS (with the
 shared web build); pushes and pull requests always verify every platform.
 

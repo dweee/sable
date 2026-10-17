@@ -260,6 +260,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd artifacts
+          # GitHub replaces spaces in uploaded asset names with dots.
+          for artifact in ./*; do
+            name=${artifact##*/}
+            normalized=${name// /.}
+            if [ "$name" != "$normalized" ]; then
+              test ! -e "./$normalized"
+              mv -- "$artifact" "./$normalized"
+            fi
+          done
           sha256sum ./* > SHA256SUMS
           tag="$GITHUB_REF_NAME"
           prerelease=()
@@ -271,3 +280,11 @@ jobs:
           else
             gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" --title "Sable v2 $tag" --notes 'All supported platform builds passed. Android and iOS source artifacts are unsigned; re-sign before installing. This fork keeps a separate v2 application identity.' "${prerelease[@]}"
           fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            --jq '.assets[] | select(.name != "SHA256SUMS") | "\(.digest | sub("^sha256:"; ""))  \(.name)"' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/published-sha256"
+          sed 's@  \./@  @' SHA256SUMS | LC_ALL=C sort > "$RUNNER_TEMP/expected-sha256"
+          diff -u "$RUNNER_TEMP/expected-sha256" "$RUNNER_TEMP/published-sha256"
+          published_manifest=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            --jq '.assets[] | select(.name == "SHA256SUMS") | .digest')
+          test "$published_manifest" = "sha256:$(sha256sum SHA256SUMS | cut -d ' ' -f1)"
