@@ -341,6 +341,9 @@ Fork Android source artifacts are unsigned and need a signing key before
 installation or distribution. The iOS IPA is unsigned for AltStore/SideStore
 re-signing. The workflows do not need upstream release, Apple notarization,
 Android keystore, Sentry, Cloudflare, app-store, or registry secrets.
+Android attaches the release signing configuration only when a keystore is
+configured; a clean checkout can therefore package its unsigned release APKs
+and app bundle instead of failing on a missing `storeFile`.
 
 Fork source builds disable upstream automatic updates in both the frontend
 and native runtime, and their CI Tauri configuration clears the upstream

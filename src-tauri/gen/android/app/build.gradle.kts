@@ -72,7 +72,9 @@ android {
             isMinifyEnabled = false
         }
         getByName("release") {
-            signingConfig = signingConfigs.getByName("release")
+            // A checkout without a keystore produces unsigned fork artifacts.
+            // Gradle rejects an attached release config whose storeFile is unset.
+            signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
             isMinifyEnabled = true
             packaging {
                 jniLibs.useLegacyPackaging = true
