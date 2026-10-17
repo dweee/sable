@@ -24,7 +24,7 @@
       then nixpkgs-intel
       else nixpkgs;
     packagesFor = pkgs: let
-      artifacts = pkgs.callPackage ./nix/artifacts.nix {};
+      artifacts = import ./nix/artifacts.nix {inherit (pkgs) fetchurl;};
     in
       artifacts
       // {
