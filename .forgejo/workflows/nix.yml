@@ -1,0 +1,37 @@
+name: Nix packages
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  packages:
+    runs-on: nix
+    timeout-minutes: 90
+    container:
+      image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        sandbox = false
+        filter-syscalls = false
+        substituters = https://cache.nixos.org
+    steps:
+      - name: Check out exact revision
+        env:
+          SERVER: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          git init -q .
+          git remote add origin "$SERVER/$REPOSITORY.git"
+          git fetch -q --depth=1 origin "$REVISION"
+          git checkout -q --detach FETCH_HEAD
+      - name: Build Linux desktop, web and all downloadable artifacts
+        run: nix flake check --no-update-lock-file --max-jobs 2 --cores 4 -L
+      - name: Evaluate every supported Nix system
+        run: |
+          for system in x86_64-linux aarch64-linux x86_64-darwin aarch64-darwin; do
+            nix eval --raw ".#packages.$system.sable.drvPath"
+            nix eval --raw ".#devShells.$system.default.drvPath"
+          done

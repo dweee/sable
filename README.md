@@ -225,3 +225,108 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 [AGPL-3.0-or-later](LICENSE), with an [additional permission](LICENSE) for App Store executables under MPL 2.0. The Sable name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md).
+
+## Nix (this fork)
+
+The maintained fork is <https://git.monke.fail/d/sable>; pushes mirror to
+<https://github.com/dweee/sable>. Upstream remains
+<https://git.sable.moe/SableClient/Sable-next> (`git remote upstream`).
+The original upstream workflows are retained under `nix/upstream-workflows/`
+for reference. Active workflows build this fork without publishing to upstream
+registries, infrastructure, app stores or release repositories.
+
+Install on NixOS, Linux with Nix, or nix-darwin:
+
+```sh
+nix run git+https://git.monke.fail/d/sable.git
+nix build git+https://git.monke.fail/d/sable.git#sable-web
+```
+
+`packages` and `checks` cover `x86_64-linux`, `aarch64-linux`,
+`x86_64-darwin`, and `aarch64-darwin`. `sable` is the native desktop package;
+macOS uses the universal application. Intel macOS uses a separate 26.05
+nixpkgs pin because current unstable no longer supports that platform. `sable-web` is the static website and
+accepts a `conf` override merged into its existing `config.json`.
+`sable-windows` is an MSI download, `sable-android` is a universal APK,
+`sable-android-aab` is the Android App Bundle, and `sable-ios` is an IPA.
+These downloads can be realized on every Nix host; mobile and Windows artifacts
+are not executable Nix applications.
+
+The initial Nix packages repackage the complete, immutable upstream nightly
+recorded with hashes in `nix/sources.json`. This deliberately retains the
+separate `moe.sable.next.nightly` identity: upstream **stable** v2 packages
+reuse legacy's `moe.sable.client` identity for an in-place migration. Do not
+replace this pin with a stable build while preserving a legacy installation.
+The fork's source CI keeps `moe.sable.next`, never runs
+`prepare-v1-release.mjs`, and publishes a new release only after every source
+platform build succeeds. Nix package CI builds the pinned packages independently
+on all four Nix systems. Pinning source-built fork artifacts is a separate
+update to `nix/sources.json`, after verifying their identity and checksums.
+
+Flake modules:
+
+```nix
+inputs.sable = {
+  url = "git+https://git.monke.fail/d/sable.git";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+
+# NixOS or nix-darwin:
+imports = [ inputs.sable.nixosModules.sable ]; # darwinModules.sable on macOS
+programs.sable.enable = true;
+
+# Alternatively, Home Manager:
+# imports = [ inputs.sable.homeManagerModules.sable ];
+# programs.sable.enable = true;
+```
+
+For NixOS web hosting, import `nixosModules.sable-web`, enable
+`services.sable-web`, and set its typed `settings`, `listenAddress`, and `port`
+options. It binds to localhost by default. Alternatively, serve
+`(pkgs.sable-web.override { conf.homeserverList = [ "matrix.example.org" ]; })`
+directly with the existing Caddy/nginx SPA fallback. `config.json` is public;
+it must not contain secrets. The flake also provides `overlays.default`.
+
+### Source development
+
+```sh
+nix develop                         # Linux or macOS desktop/web toolchain
+pnpm install --frozen-lockfile
+pnpm build                          # Rust WASM + Svelte static website
+pnpm tauri dev                      # native system webview
+pnpm tauri:cef build                 # Linux CEF, upstream runtime
+nix develop .#android               # SDK 36, NDK 29, JDK 21 and both Rust ABIs
+nix develop .#ios                   # macOS only: device/simulator Rust targets
+```
+
+The shells pin Rust through `rust-toolchain.toml` and `rust-overlay`, pnpm
+through its npm integrity hash, and other tools through `flake.lock`.
+Android's SDK license must be accepted; the Android shell explicitly accepts
+it through Nix's `android_sdk.accept_license` setting. Native builds download
+Cargo/pnpm dependencies and platform frameworks; these development commands
+are not claimed to be sandboxed source derivations. The Nix desktop packages
+are explicitly marked as upstream binary code.
+
+For Android in the shell, use `pnpm tauri android build` with the checked-in
+project and SDK; the upstream `pnpm android:build` convenience script manages
+Rust with rustup, whereas this shell provides immutable Rust targets directly.
+For iOS, select a separately installed Xcode and run `pnpm tauri ios init --ci`,
+`pnpm ios:frameworks`, then `pnpm tauri ios build --no-sign --ci`.
+Xcode and the Windows SDK/MSVC toolchain are native vendor prerequisites, not
+Nix derivations. Windows source CI runs on Windows; WSL can use the web shell.
+
+### CI and releases
+
+`.forgejo/workflows/nix.yml` builds the Linux Nix packages on the existing
+`nix` runner. `.github/workflows/nix.yml` builds the packages and downloadable
+artifacts on both Linux architectures and both Mac architectures, and evaluates
+the development shells. `.github/workflows/build.yml` compiles the current
+source for web/WASM, Linux CEF (x86_64 and aarch64), macOS universal, Windows
+x86_64 (MSI/NSIS), Android (arm64/armv7 FOSS APKs and universal APK/AAB), and
+iOS arm64. Every build produces artifacts; main pushes and `v*` tags publish
+the complete set with SHA256SUMS after all platform builds succeed.
+
+Fork Android source artifacts are unsigned and need a signing key before
+installation or distribution. The iOS IPA is unsigned for AltStore/SideStore
+re-signing. The workflows do not need upstream release, Apple notarization,
+Android keystore, Sentry, Cloudflare, app-store, or registry secrets.

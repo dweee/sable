@@ -1,0 +1,228 @@
+name: Build every supported platform
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+  # Keep the v2 identity. Never invoke prepare-v1-release.mjs in this fork.
+  SABLE_BUILD_FLAVOR: fork
+jobs:
+  web:
+    name: Web and WASM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          build: 'true'
+      - name: Archive web bundle
+        run: tar -czf sable-web.tar.gz -C dist .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: web-assets
+          path: |
+            dist
+            .svelte-kit/output
+            src/generated/wasm
+          include-hidden-files: true
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release-web
+          path: sable-web.tar.gz
+          if-no-files-found: error
+  desktop:
+    name: ${{ matrix.name }}
+    needs: web
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64 CEF
+            runner: ubuntu-24.04
+            platform: linux-x86_64
+          - name: Linux aarch64 CEF
+            runner: ubuntu-24.04-arm
+            platform: linux-aarch64
+          - name: macOS universal (Intel and Apple Silicon)
+            runner: macos-15
+            platform: macos-universal
+          - name: Windows x86_64
+            runner: windows-2025
+            platform: windows-x86_64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: web-assets
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential file libayatana-appindicator3-dev libclang-dev libgtk-3-dev libpipewire-0.3-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev pkg-config
+      - uses: ./.github/actions/setup
+        with:
+          rust: 'true'
+          rust-cache-key: ${{ matrix.platform }}
+          install-mise-tools: 'false'
+      - name: Build Linux CEF distribution
+        if: runner.os == 'Linux'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          pnpm tauri:cef build --config src-tauri/tauri.ci.conf.json
+          bash scripts/cef/stage.sh target/cef-stage 'Sable v2'
+          install -m755 target/release/app target/cef-stage/sable-next
+          mkdir -p artifacts
+          tar -czf "artifacts/sable-$PLATFORM.tar.gz" -C target/cef-stage sable-next runtime share
+      - name: Build universal macOS distribution
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          pnpm tauri build --config src-tauri/tauri.ci.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}' --target universal-apple-darwin
+          mkdir -p artifacts
+          app=$(find target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -type d -print -quit)
+          test -n "$app"
+          tar -czf artifacts/sable-macos-universal.app.tar.gz -C "$(dirname "$app")" "$(basename "$app")"
+          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg artifacts/
+      - name: Build Windows installers
+        if: runner.os == 'Windows'
+        run: |
+          pnpm tauri build --config src-tauri/tauri.ci.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}' --bundles nsis,msi
+          mkdir -p artifacts
+          cp target/release/bundle/nsis/*.exe artifacts/
+          cp target/release/bundle/msi/*.msi artifacts/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release-${{ matrix.platform }}
+          path: artifacts/*
+          if-no-files-found: error
+  android:
+    name: Android arm64 and armv7
+    needs: web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: web-assets
+      - uses: ./.github/actions/setup
+        with:
+          rust: 'true'
+          rust-cache-key: android
+          install-mise-tools: 'false'
+      - name: Provision Android SDK and Rust targets
+        run: |
+          mise run tauri:setup:android
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          printf '\norg.gradle.workers.max=2\norg.gradle.jvmargs=-Xmx3g\n' >> src-tauri/gen/android/gradle.properties
+      - name: Build FOSS APKs for both ABIs
+        env:
+          SABLE_FOSS: '1'
+        run: |
+          mv src-tauri/capabilities/geolocation.json "$RUNNER_TEMP/geolocation.json"
+          pnpm tauri android build --config src-tauri/tauri.ci.conf.json --apk --split-per-abi --target aarch64 armv7 -- --no-default-features --features wry
+          mv "$RUNNER_TEMP/geolocation.json" src-tauri/capabilities/geolocation.json
+          mkdir -p artifacts
+          for pair in arm64:aarch64 arm:armv7; do
+            flavor=${pair%:*}; abi=${pair#*:}
+            apk=$(find "src-tauri/gen/android/app/build/outputs/apk/$flavor/release" -name '*.apk' -print -quit)
+            test -n "$apk"
+            cp "$apk" "artifacts/sable-android-$abi-foss-unsigned.apk"
+          done
+      - name: Build universal APK and Android App Bundle
+        run: |
+          pnpm tauri android build --config src-tauri/tauri.ci.conf.json --apk --aab --target aarch64 armv7
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/release -name '*.apk' -print -quit)
+          aab=$(find src-tauri/gen/android/app/build/outputs/bundle/universalRelease -name '*.aab' -print -quit)
+          test -n "$apk" && test -n "$aab"
+          cp "$apk" artifacts/sable-android-universal-unsigned.apk
+          cp "$aab" artifacts/sable-android-universal-unsigned.aab
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release-android
+          path: artifacts/*
+          if-no-files-found: error
+  ios:
+    name: iOS arm64 (unsigned)
+    needs: web
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: web-assets
+      - uses: ./.github/actions/setup
+        with:
+          rust: 'true'
+          rust-cache-key: ios
+          install-mise-tools: 'false'
+      - name: Provision iOS project
+        run: |
+          command -v pod >/dev/null || brew install cocoapods
+          pnpm tauri ios init --ci
+          pnpm ios:frameworks
+          rustup target add aarch64-apple-ios
+      - name: Build unsigned IPA
+        run: |
+          pnpm tauri ios build --config src-tauri/tauri.ci.conf.json --no-sign --ci
+          ipa=$(find src-tauri/gen/apple/build -name '*.ipa' -type f -print -quit)
+          test -n "$ipa"
+          mkdir -p artifacts
+          cp "$ipa" artifacts/sable-ios-arm64-unsigned.ipa
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release-ios
+          path: artifacts/*
+          if-no-files-found: error
+  release:
+    name: Publish complete platform set
+    needs: [web, desktop, android, ios]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: artifacts
+      - name: Publish checksums and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          sha256sum ./* > SHA256SUMS
+          tag="$GITHUB_REF_NAME"
+          prerelease=()
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            tag="fork-$GITHUB_SHA"
+            prerelease=(--prerelease)
+          fi
+          gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Sable v2 $tag" --notes 'All supported platform builds passed. Android and iOS source artifacts are unsigned; re-sign before installing. This fork keeps a separate v2 application identity.' "${prerelease[@]}"

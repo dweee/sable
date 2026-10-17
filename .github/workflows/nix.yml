@@ -1,0 +1,37 @@
+name: Nix packages
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  packages:
+    name: Nix ${{ matrix.system }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {system: x86_64-linux, runner: ubuntu-24.04}
+          - {system: aarch64-linux, runner: ubuntu-24.04-arm}
+          - {system: x86_64-darwin, runner: macos-15-intel}
+          - {system: aarch64-darwin, runner: macos-15}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and check packages and every downloadable platform artifact
+        run: nix flake check --no-update-lock-file -L
+      - name: Evaluate development shells
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix eval --raw ".#devShells.$SYSTEM.default.drvPath"
+          nix eval --raw ".#devShells.$SYSTEM.android.drvPath"
+          if [[ "$SYSTEM" == *-darwin ]]; then nix eval --raw ".#devShells.$SYSTEM.ios.drvPath"; fi
