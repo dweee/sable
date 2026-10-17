@@ -335,7 +335,9 @@ iOS CI explicitly selects Xcode 26.3, which is installed on the
 The runner's default Xcode 16.4 lacks the LiveKit plugin's
 [`filteredBySensitiveParticipants`](https://developer.apple.com/documentation/callkit/cxerrorcodeincomingcallerror-swift.struct/filteredbysensitiveparticipants)
 and [`allowBluetoothHFP`](https://developer.apple.com/documentation/avfaudio/avaudiosession/categoryoptions-swift.struct/allowbluetoothhfp)
-APIs. The workflow checks the selected iOS SDK before compiling.
+APIs. The workflow switches both `DEVELOPER_DIR` and the system `xcode-select`
+path because Tauri's mobile toolchain also uses the latter, and checks both
+iOS SDK selections before compiling.
 
 Fork Android source artifacts are unsigned and need a signing key before
 installation or distribution. The iOS IPA is unsigned for AltStore/SideStore

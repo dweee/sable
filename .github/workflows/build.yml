@@ -211,9 +211,13 @@ jobs:
           install-mise-tools: 'false'
       - name: Provision iOS project
         run: |
+          # Tauri's mobile tooling also consults the system xcode-select path.
+          sudo xcode-select --switch "$DEVELOPER_DIR"
           xcodebuild -version
           sdk=$(xcrun --sdk iphoneos --show-sdk-version)
           test "${sdk%%.*}" -ge 26
+          system_sdk=$(env -u DEVELOPER_DIR xcrun --sdk iphoneos --show-sdk-version)
+          test "${system_sdk%%.*}" -ge 26
           command -v pod >/dev/null || brew install cocoapods
           pnpm tauri ios init --ci
           pnpm ios:frameworks
