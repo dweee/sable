@@ -7,7 +7,10 @@ fileGroups: [{{join file-groups}}]
 packages:
   Sentry:
     url: https://github.com/getsentry/sentry-cocoa.git
-    exactVersion: 9.29.2
+    # Swift 6.2 selects Sentry's manifest with a KSCrash revision dependency.
+    # SwiftPM rejects that beneath a stable-version requirement. Keep exactly
+    # Sentry 9.29.2's code, using its immutable commit instead of a version pin.
+    revision: 8689e780a295dfdc6501ac0dbb502461e16d6551
 configs:
   debug: debug
   release: release

@@ -39,6 +39,8 @@
     shellHook = ''
       export PATH="$PWD/node_modules/.bin:$PATH"
       export SABLE_BUILD_FLAVOR=fork
+      export SABLE_DISABLE_UPDATER=1
+      export VITE_SABLE_DISABLE_UPDATER=1
       export VITE_APP_VERSION=2.0.2
     '';
   };
@@ -58,6 +60,8 @@ in
       // {
         packages = [(toolchain.override {targets = ["wasm32-unknown-unknown" "aarch64-linux-android" "armv7-linux-androideabi"];}) android.androidsdk pkgs.jdk21] ++ lib.remove toolchain common.packages;
         ANDROID_HOME = "${android.androidsdk}/libexec/android-sdk";
+        ANDROID_SDK_ROOT = "${android.androidsdk}/libexec/android-sdk";
+        NDK_HOME = "${android.androidsdk}/libexec/android-sdk/ndk/29.0.14206865";
         ANDROID_NDK_HOME = "${android.androidsdk}/libexec/android-sdk/ndk/29.0.14206865";
         JAVA_HOME = pkgs.jdk21.home;
       });

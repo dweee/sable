@@ -254,8 +254,8 @@ are not executable Nix applications.
 
 The initial Nix packages repackage the complete, immutable upstream nightly
 recorded with hashes in `nix/sources.json` and archived in this fork
-at the `bootstrap-v2-20261015` Forgejo release. The archive is the primary
-download URL; upstream is a fallback. This deliberately retains the
+at the `bootstrap-v2-20261015` releases in Forgejo and GitHub. GitHub's CDN
+is the primary download, with the Forgejo archive and upstream as fallbacks. This deliberately retains the
 separate `moe.sable.next.nightly` identity: upstream **stable** v2 packages
 reuse legacy's `moe.sable.client` identity for an in-place migration. Do not
 replace this pin with a stable build while preserving a legacy installation.
@@ -332,3 +332,16 @@ Fork Android source artifacts are unsigned and need a signing key before
 installation or distribution. The iOS IPA is unsigned for AltStore/SideStore
 re-signing. The workflows do not need upstream release, Apple notarization,
 Android keystore, Sentry, Cloudflare, app-store, or registry secrets.
+
+Fork source builds disable upstream automatic updates in both the frontend
+and native runtime, and their CI Tauri configuration clears the upstream
+updater endpoints. Updates come through Nix or manually selected fork releases;
+this prevents an upstream stable update from switching back to the legacy ID.
+
+iOS pins Sentry 9.29.2 by commit `8689e780a295dfdc6501ac0dbb502461e16d6551`.
+Its [Swift 6.2 manifest](https://github.com/getsentry/sentry-cocoa/blob/9.29.2/Package%40swift-6.2.swift)
+uses a KSCrash revision dependency, which SwiftPM rejects beneath a stable
+version requirement. The same issue remains in the 9.30.2 Swift 6.2 manifest;
+using the existing Sentry commit preserves the selected code and permits its
+revision dependency. The exact Sentry/KSCrash error was reproduced in this
+fork's first iOS CI run; an exact matching upstream issue/fix was not found.

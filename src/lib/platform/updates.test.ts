@@ -14,6 +14,7 @@ beforeEach(() => {
   mocks.isTauri.mockReturnValue(true);
   mocks.osType.mockReturnValue('android');
   vi.stubEnv('VITE_APP_VERSION', '1.2.3');
+  vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '0');
 });
 
 afterEach(() => {
@@ -59,4 +60,15 @@ test('mobile reports current when the manifest is not newer', async () => {
   const { checkForMobileUpdate } = await load();
 
   await expect(checkForMobileUpdate()).resolves.toBe(false);
+});
+
+test('fork builds never request or install upstream updates', async () => {
+  vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '1');
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  const { checkForMobileUpdate, checkForUpdate, supportsAutoUpdate } = await load();
+  expect(supportsAutoUpdate()).toBe(false);
+  await expect(checkForMobileUpdate()).resolves.toBe(false);
+  await expect(checkForUpdate()).resolves.toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
 });

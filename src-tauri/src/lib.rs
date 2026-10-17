@@ -837,7 +837,8 @@ fn spawn_event_pump<R: tauri::Runtime>(
 
 #[cfg(desktop)]
 fn auto_update_supported() -> bool {
-    !cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some()
+    option_env!("SABLE_DISABLE_UPDATER") != Some("1")
+        && (!cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some())
 }
 
 #[cfg(desktop)]

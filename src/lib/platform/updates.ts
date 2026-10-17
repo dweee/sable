@@ -23,6 +23,7 @@ export function subscribeToUpdates(listener: UpdateListener): () => void {
 }
 
 export function supportsAutoUpdate(): boolean {
+  if (import.meta.env.VITE_SABLE_DISABLE_UPDATER === '1') return false;
   return updatePlatform() === 'desktop' && window.__SABLE_AUTO_UPDATE__ !== false;
 }
 
@@ -52,6 +53,7 @@ function isNewerVersion(candidate: string, current: string): boolean {
 }
 
 export async function checkForMobileUpdate(): Promise<boolean> {
+  if (import.meta.env.VITE_SABLE_DISABLE_UPDATER === '1') return false;
   const current = import.meta.env.VITE_APP_VERSION;
   if (!current || current === 'dev') return false;
 
