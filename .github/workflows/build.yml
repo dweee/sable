@@ -237,11 +237,19 @@ jobs:
   release:
     name: Publish complete platform set
     needs: [web, desktop, android, ios]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24.21.0
+      - name: Verify the release tag exists in canonical Forgejo
+        run: node scripts/ci/verify-forgejo-release-tag.mjs https://git.monke.fail/d/sable "$GITHUB_REF_NAME" "$(git rev-parse HEAD)"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: release-*
@@ -255,8 +263,11 @@ jobs:
           sha256sum ./* > SHA256SUMS
           tag="$GITHUB_REF_NAME"
           prerelease=()
-          if [ "$GITHUB_REF_TYPE" != tag ]; then
-            tag="fork-$GITHUB_SHA"
+          if [[ "$tag" == *-* ]]; then
             prerelease=(--prerelease)
           fi
-          gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Sable v2 $tag" --notes 'All supported platform builds passed. Android and iOS source artifacts are unsigned; re-sign before installing. This fork keeps a separate v2 application identity.' "${prerelease[@]}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" ./* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" --title "Sable v2 $tag" --notes 'All supported platform builds passed. Android and iOS source artifacts are unsigned; re-sign before installing. This fork keeps a separate v2 application identity.' "${prerelease[@]}"
+          fi

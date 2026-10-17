@@ -325,8 +325,12 @@ artifacts on both Linux architectures and both Mac architectures, and evaluates
 the development shells. `.github/workflows/build.yml` compiles the current
 source for web/WASM, Linux CEF (x86_64 and aarch64), macOS universal, Windows
 x86_64 (MSI/NSIS), Android (arm64/armv7 FOSS APKs and universal APK/AAB), and
-iOS arm64. Every build produces artifacts; main pushes and `v*` tags publish
-the complete set with SHA256SUMS after all platform builds succeed.
+iOS arm64. Every build produces artifacts. Create `v*` release tags in Forgejo;
+the push mirror carries them to GitHub, where the complete set is published
+with SHA256SUMS after all platform builds succeed. Main pushes build artifacts
+without creating releases. The release job verifies that the tag exists at
+the built commit in canonical Forgejo, so a later mirror cannot prune a
+GitHub-only release tag. Re-running publication updates the existing assets.
 Manual workflow dispatch can verify just desktop, Android or iOS (with the
 shared web build); pushes and pull requests always verify every platform.
 
