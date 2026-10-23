@@ -1,0 +1,67 @@
+{
+  "targets": {
+    "x86_64-linux": [
+      {
+        "attribute": "packages.x86_64-linux.sable",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-linux.sable-web",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-linux.sable-windows",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-linux.sable-android",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-linux.sable-android-aab",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-linux.sable-ios",
+        "visibility": "private"
+      }
+    ],
+    "aarch64-linux": [
+      {
+        "attribute": "packages.aarch64-linux.sable",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-linux.sable-web",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-linux.sable-windows",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-linux.sable-android",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-linux.sable-android-aab",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-linux.sable-ios",
+        "visibility": "private"
+      }
+    ]
+  },
+  "excludedSystems": [
+    "aarch64-darwin",
+    "x86_64-darwin"
+  ],
+  "submodules": false,
+  "integrationInventory": false,
+  "version": 1,
+  "forge": "forgejo",
+  "repository": "d/sable",
+  "branch": "main",
+  "remote": "https://git.monke.fail/d/sable.git"
+}
