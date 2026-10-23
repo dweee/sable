@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "inputs": {
+    "nixpkgs": {
+      "source": "github:NixOS/nixpkgs"
+    },
+    "nixpkgs-intel": {
+      "source": "github:NixOS/nixpkgs/nixpkgs-26.05-darwin"
+    },
+    "rust-overlay": {
+      "source": "github:oxalica/rust-overlay"
+    }
+  }
+}
