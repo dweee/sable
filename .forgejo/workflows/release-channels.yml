@@ -22,7 +22,7 @@ name: Verified release channels
 permissions:
   contents: read
 concurrency:
-  group: verified-release-channels
+  group: ${{ github.event_name == 'pull_request' && format('verified-release-pr-{0}', github.ref) || 'verified-release-channels' }}
   cancel-in-progress: false
 jobs:
   test:
@@ -79,7 +79,7 @@ jobs:
     - test
     outputs:
       proof: ${{ steps.release.outputs.proof }}
-    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main')) }}
     steps:
     - name: Checkout exact source without a Node dependency
       env:
@@ -120,7 +120,7 @@ jobs:
         filter-syscalls = false
     container:
       image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main'))
       }}
     steps:
     - name: Checkout exact source without a Node dependency
@@ -163,7 +163,7 @@ jobs:
     - test
     outputs:
       proof: ${{ steps.release.outputs.proof }}
-    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main')) }}
     steps:
     - name: Checkout exact source without a Node dependency
       env:
@@ -194,7 +194,7 @@ jobs:
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/configure-attic-read.py --cleanup
   retain_aarch64_linux:
-    runs-on: braco
+    runs-on: nix
     timeout-minutes: 360
     env:
       NIX_CONFIG: |
@@ -202,7 +202,9 @@ jobs:
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    container:
+      image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main'))
       }}
     steps:
     - name: Checkout exact source without a Node dependency
@@ -249,7 +251,7 @@ jobs:
     - build_aarch64_linux
     permissions:
       contents: write
-    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main')) }}
     steps:
     - name: Checkout exact source without a Node dependency
       env:
