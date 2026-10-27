@@ -59,6 +59,7 @@
   ],
   "submodules": false,
   "integrationInventory": false,
+  "githubCounterpartCi": true,
   "version": 1,
   "forge": "forgejo",
   "repository": "d/sable",

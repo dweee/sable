@@ -39,9 +39,22 @@ Required repository configuration:
 - Optional `UPDATE_TOKEN` is a repository-scoped app/PAT. On GitHub, use it when
   generated PRs must trigger further workflows; default GITHUB_TOKEN PRs do not.
 - Optional `CHANNEL_TOKEN` can identify a separate protected-branch publisher.
-- Forgejo requires the existing native `nix` and `braco` Linux runners. Flakey
+- Forgejo requires the existing native `nix` and native aarch64 Linux runners. Flakey
   and private inputs never go to GitHub. Already-public GitHub owning repos may
   use their existing native hosted Darwin builders independently.
+- Forgejo jobs on the `nix` runner (x86_64 Linux build and the x86_64 Linux and
+  Darwin retention jobs) set `ATTIC_SERVER` to the Attic host's runner-network
+  address, so cache reads skip the public reverse proxy. The helpers accept only
+  that address, the tailnet address of the same listener, or the public URL, send
+  the token to one host only, and keep proofs independent of the transport. The
+  braco aarch64 build and retention jobs, Darwin builds and all uploads use the
+  public HTTPS URL. The aarch64 Linux retention job runs on braco, which executes
+  one job at a time: it queues behind other repositories' aarch64 jobs.
+- Schedules keep their cadence (release channels nightly, input updates every six
+  hours) but start at a per-repository offset derived from a SHA-256 of
+  `owner/name`: release channels at a minute in 02:00-06:59 UTC, input updates at a
+  minute in each six-hour slot starting at hour 0-5 UTC. The offset is stable, so
+  repositories no longer fire in the same minute.
 - Forgejo may supply `GH_READ_TOKEN` for authenticated public metadata reads.
   Private input readers belong only on Forgejo; configure them before input jobs.
 
@@ -49,3 +62,11 @@ The helper source lives in dave-fork-ci/ci. `channel-tool-hashes.json` identifie
 the installed bytes. Update the controller first, then regenerate/review copies
 with `install-channel-automation.py`; do not silently download a moving script
 into a credentialed publisher.
+
+This repository sets `githubCounterpartCi`: a GitHub Actions counterpart already
+builds and checks it, so no Forgejo `nix.yml` is generated (an existing copy is
+removed) and the release workflow does not run for pull requests. Pushes to the
+source branch that only touch the paths listed under `paths-ignore` in
+`release-channels.yml` skip the workflow; `tested` stays at its last verified
+commit until the next qualifying push, the nightly run or an owner dispatch
+publishes the current head. Confirm that no ignored path feeds a package.
