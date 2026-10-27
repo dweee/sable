@@ -7,6 +7,18 @@ on:
 permissions:
   contents: read
 jobs:
+  publisher-tests:
+    name: Attic publisher tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Run the credential-free publisher tests
+        run: |
+          python3 ci/test-push-attic.py
+          python3 ci/test-attic-plan.py
   packages:
     name: Nix ${{ matrix.system }}
     runs-on: ${{ matrix.runner }}

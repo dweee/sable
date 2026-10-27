@@ -12,6 +12,34 @@ import time
 from urllib.parse import urlsplit
 
 
+TRANSIENT = re.compile(
+    r"InternalServerError|HTTP 502 Bad Gateway|Connection pool timed out|"
+    r"Connection timed out \(os error 110\)")
+PUBLICATION_SECONDS = 7200
+
+
+def push(args, *, paths, env, deadline, secret):
+    for attempt in range(5):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(args, PUBLICATION_SECONDS)
+        result = subprocess.run(args, input="\n".join(paths) + "\n", text=True,
+                                env=env, check=False, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=remaining)
+        diagnostic = result.stdout or ""
+        print(diagnostic.replace(secret, "[redacted]"), end="", flush=True)
+        if result.returncode == 0:
+            return
+        if attempt == 4 or not TRANSIENT.search(diagnostic):
+            raise subprocess.CalledProcessError(result.returncode, args)
+        delay = 15 * 2 ** attempt
+        if time.monotonic() + delay >= deadline:
+            raise subprocess.TimeoutExpired(args, PUBLICATION_SECONDS)
+        print(f"Attic transient upload error; retry {attempt + 2}/5 in {delay}s.",
+              file=sys.stderr, flush=True)
+        time.sleep(delay)
+
+
 def publish(outputs):
     endpoint = os.environ.get("ATTIC_ENDPOINT", "")
     cache = os.environ.get("ATTIC_CACHE", "")
@@ -24,6 +52,8 @@ def publish(outputs):
         raise ValueError("ATTIC_ENDPOINT must be an HTTPS server URL without credentials, query or fragment")
     # Accessing port also validates a malformed or out-of-range port.
     _ = parsed.port
+    if endpoint.rstrip("/") != "https://attic.monke.fail" or cache != "flakey":
+        raise ValueError("Only the private flakey destination is allowed")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", cache):
         raise ValueError("ATTIC_CACHE must name the existing destination cache")
     if not token.strip():
@@ -39,6 +69,7 @@ def publish(outputs):
     # login, put the token in process arguments, or modify the runner's Nix config.
     child_env = {key: value for key, value in os.environ.items() if key != "ATTIC_TOKEN"}
     started = time.monotonic()
+    deadline = started + PUBLICATION_SECONDS
     with tempfile.TemporaryDirectory(prefix="attic-ci-", dir=os.environ.get("RUNNER_TEMP")) as temporary:
         config_dir = Path(temporary) / "attic"
         config_dir.mkdir(mode=0o700)
@@ -49,10 +80,16 @@ def publish(outputs):
             config.write("endpoint = " + json.dumps(endpoint.rstrip("/") + "/") + "\n")
             config.write("token = " + json.dumps(token) + "\n")
         child_env["XDG_CONFIG_HOME"] = temporary
-        # Attic follows runtime closures by default. Only this manifest's roots
-        # are selected; the rest of the runner store is never enumerated.
-        subprocess.run([binary, "push", "--jobs", "1", "--stdin", "ci:" + cache],
-                       input="\n".join(paths) + "\n", text=True, env=child_env, check=True)
+        # Selected roots must have narinfo in flakey even if they already
+        # carry an upstream signature. Limit this override to manifest roots.
+        push([binary, "push", "--jobs", "1", "--no-closure",
+              "--ignore-upstream-cache-filter", "--stdin", "ci:" + cache],
+             paths=paths, env=child_env, deadline=deadline, secret=token)
+        # Keep normal upstream filtering for runtime dependencies. The rest of
+        # the runner store is never enumerated, and either upload failing fails
+        # publication rather than reporting an incompletely cached package.
+        push([binary, "push", "--jobs", "1", "--stdin", "ci:" + cache],
+             paths=paths, env=child_env, deadline=deadline, secret=token)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a") as output:
@@ -69,6 +106,9 @@ def main():
     except subprocess.CalledProcessError as error:
         print("Attic publication failed; this build is not successfully cached.", file=sys.stderr)
         return error.returncode if error.returncode > 0 else 1
+    except subprocess.TimeoutExpired:
+        print("Attic publication exceeded its total upload deadline; publication failed.", file=sys.stderr)
+        return 1
     except (ValueError, OSError):
         # Avoid echoing credentials, URL values or server responses in validation errors.
         print("Attic publication configuration or output manifest is invalid; see ci/ATTIC.md.", file=sys.stderr)
