@@ -13,7 +13,7 @@ name: Verified release channels
     - COPYING*
     - DCO
   schedule:
-  - cron: 43 3 * * *
+  - cron: 13 5 * * *
   workflow_dispatch:
     inputs:
       channel:
@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   test:
-    runs-on: nix
+    runs-on: nix-light
     timeout-minutes: 360
     env:
       NIX_CONFIG: |
@@ -80,6 +80,7 @@ jobs:
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+      ATTIC_SERVER: http://172.29.0.1:8080
     container:
       image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
     needs:
@@ -126,6 +127,7 @@ jobs:
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+      ATTIC_SERVER: http://172.29.0.1:8080
     container:
       image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main'
@@ -203,7 +205,7 @@ jobs:
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/configure-attic-read.py --cleanup
   retain_aarch64_linux:
-    runs-on: nix
+    runs-on: braco
     timeout-minutes: 360
     env:
       NIX_CONFIG: |
@@ -211,8 +213,6 @@ jobs:
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
-    container:
-      image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main'
       || (github.event_name == 'schedule' && github.ref == 'main')) }}
     steps:
