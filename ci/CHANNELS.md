@@ -49,3 +49,11 @@ The helper source lives in dave-fork-ci/ci. `channel-tool-hashes.json` identifie
 the installed bytes. Update the controller first, then regenerate/review copies
 with `install-channel-automation.py`; do not silently download a moving script
 into a credentialed publisher.
+
+This repository sets `githubCounterpartCi`: a GitHub Actions counterpart already
+builds and checks it, so no Forgejo `nix.yml` is generated (an existing copy is
+removed) and the release workflow does not run for pull requests. Pushes to the
+source branch that only touch the paths listed under `paths-ignore` in
+`release-channels.yml` skip the workflow; `tested` stays at its last verified
+commit until the next qualifying push, the nightly run or an owner dispatch
+publishes the current head. Confirm that no ignored path feeds a package.
