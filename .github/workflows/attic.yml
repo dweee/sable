@@ -1,0 +1,96 @@
+name: Attic cache
+# Publishes the Sable outputs the fleet installs to the private flakey cache.
+# There is no pull_request trigger: the push credential only ever reaches a
+# default-branch push or a manual dispatch. See ci/ATTIC.md.
+"on":
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and describe the outputs, upload nothing
+        type: boolean
+        default: true
+      packages:
+        description: Space-separated package attributes (default is what the fleet installs)
+        type: string
+        default: sable sable-web
+permissions:
+  contents: read
+concurrency:
+  group: attic-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  check:
+    name: Publisher checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Run the credential-free publisher tests
+        run: |
+          python3 ci/test-push-attic.py
+          python3 ci/test-attic-plan.py
+  publish:
+    name: Cache ${{ matrix.system }}
+    needs: check
+    if: ${{ github.repository == 'dweee/sable' && github.ref == 'refs/heads/main' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # The systems the private fleet installs Sable on. Nothing there uses
+        # Intel macOS, so that system is checked by nix.yml but not uploaded.
+        include:
+          - {system: x86_64-linux, runner: ubuntu-24.04}
+          - {system: aarch64-linux, runner: ubuntu-24.04-arm}
+          - {system: aarch64-darwin, runner: macos-15}
+    env:
+      # Upload only after the owner enables it, and never from a dry-run dispatch.
+      PUBLISH: ${{ vars.ATTIC_PUSH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)) }}
+      ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT || 'https://attic.monke.fail' }}
+      ATTIC_CACHE: ${{ vars.ATTIC_CACHE || 'flakey' }}
+      PACKAGES: ${{ inputs.packages || 'sable sable-web' }}
+      SYSTEM: ${{ matrix.system }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            accept-flake-config = false
+      - name: Build the fleet outputs from the committed flake.lock
+        run: python3 ci/attic-plan.py --system "$SYSTEM" --packages "$PACKAGES" --directory "$RUNNER_TEMP/attic"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: attic-manifest-${{ matrix.system }}
+          path: ${{ runner.temp }}/attic/manifest.json
+          retention-days: 30
+          if-no-files-found: error
+      - name: Dry run the publisher
+        if: ${{ env.PUBLISH != 'true' }}
+        env:
+          ATTIC_BIN: ${{ github.workspace }}/ci/attic-dry-run.sh
+          ATTIC_TOKEN: dry-run-placeholder
+        run: python3 ci/push-attic.py --outputs "$RUNNER_TEMP/attic/outputs.txt"
+      - name: Install the Attic client pinned by flake.lock
+        id: attic
+        if: ${{ env.PUBLISH == 'true' }}
+        run: |
+          set -euo pipefail
+          client=$(nix build --inputs-from . 'nixpkgs#attic-client' --no-update-lock-file --no-write-lock-file --no-link --print-out-paths)
+          test -x "$client/bin/attic"
+          echo "binary=$client/bin/attic" >> "$GITHUB_OUTPUT"
+      - name: Publish to Attic
+        if: ${{ env.PUBLISH == 'true' }}
+        env:
+          ATTIC_BIN: ${{ steps.attic.outputs.binary }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          test -n "$ATTIC_TOKEN" || { echo '::error::The ATTIC_TOKEN secret is not set'; exit 1; }
+          python3 ci/push-attic.py --outputs "$RUNNER_TEMP/attic/outputs.txt"

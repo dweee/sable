@@ -36,8 +36,15 @@ Required repository configuration:
   unrelated automation writes; allow only the release workflow identity.
 - Supply a repository-scoped `ATTIC_TOKEN` (or `FLAKEY_ATTIC_TOKEN`) with pull/push
   access to the existing `flakey` cache. No private Forgejo inputs go to GitHub.
-- Optional `UPDATE_TOKEN` is a repository-scoped app/PAT. On GitHub, use it when
-  generated PRs must trigger further workflows; default GITHUB_TOKEN PRs do not.
+- `inputCheckWorkflows` lists reviewed GitHub native workflows with workflow_dispatch.
+  The updater explicitly dispatches them on the immutable update branch, including
+  when using GITHUB_TOKEN. Each workflow must keep cache publication and secrets
+  restricted to the trusted source branch. The updater requires Actions write.
+- Optional `UPDATE_TOKEN` is a repository-scoped app/PAT; default GITHUB_TOKEN
+  PRs do not emit further pull_request workflow events.
+- A new update candidate supersedes older marked input-only PRs for the same
+  target branch after check dispatch succeeds. Branches are immutable and never
+  force-pushed; candidates containing source fixes are preserved for review.
 - Optional `CHANNEL_TOKEN` can identify a separate protected-branch publisher.
 - Forgejo requires the existing native `nix` and native aarch64 Linux runners. Flakey
   and private inputs never go to GitHub. Already-public GitHub owning repos may
@@ -55,6 +62,10 @@ Required repository configuration:
   `owner/name`: release channels at a minute in 02:00-06:59 UTC, input updates at a
   minute in each six-hour slot starting at hour 0-5 UTC. The offset is stable, so
   repositories no longer fire in the same minute.
+- On Forgejo, `UPDATE_TOKEN` belongs to the restricted `flakey-updater` account. A
+  restricted account has no implicit repository access (the API answers 404), so
+  the owner must grant it write access to this repository once, with an admin
+  token: `ci/ensure-updater-access.py --repository OWNER/NAME` in dave-fork-ci.
 - Forgejo may supply `GH_READ_TOKEN` for authenticated public metadata reads.
   Private input readers belong only on Forgejo; configure them before input jobs.
 
