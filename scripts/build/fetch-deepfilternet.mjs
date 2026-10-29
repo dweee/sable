@@ -7,7 +7,9 @@ const assetsDir = join(import.meta.dirname, '../../static/deepfilternet3');
 const assets = [
   {
     path: 'v3/pkg/df_bg.wasm',
-    url: 'https://cdn.mezon.ai/AI/models/datas/noise_suppression/deepfilternet3/v3/pkg/df_bg.wasm',
+    // The upstream CDN currently returns 403. This immutable source is
+    // byte-identical to the original v3 asset and remains hash-verified below.
+    url: 'https://raw.githubusercontent.com/fluxerapp/fluxer/3cec27ba57b965b9bfddd8d21bb2683056fba55c/fluxer_static/libs/deepfilternet3/v3/pkg/df_bg.wasm',
     sha256: '440b5d12b6ea7d95008736f844221d7874ee15de5cb10d3015002470fdba0432',
   },
   {
