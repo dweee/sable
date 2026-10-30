@@ -14,8 +14,11 @@ jobs:
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        extra-experimental-features = parallel-eval
+        eval-cores = 2
+      NIX_REMOTE: daemon
     container:
-      image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+      image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
     outputs:
       revision: ${{ steps.selection.outputs.revision }}
     steps:
@@ -32,6 +35,17 @@ jobs:
         git remote add origin "$SERVER/$REPO.git"
         git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
         git checkout -q --detach FETCH_HEAD
+    - name: Start isolated Determinate daemon
+      run: |-
+        set -eu
+        nix --version | grep -F 'Determinate Nix 3.24.1'
+        env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
+        daemon=$!
+        for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 $daemon; sleep 1; done
+        test -S /nix/var/nix/daemon-socket/socket
+        test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
+        nix store info --store daemon --json
+        printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
     - name: Regression tests and complete inventory policy
       run: |-
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/test-release-channel.py
@@ -40,7 +54,6 @@ jobs:
     - name: Select immutable revision
       id: selection
       env:
-        REVISION: ${{ inputs.revision || github.sha }}
-        CHANNEL: ${{ inputs.channel || 'tested' }}
+        REVISION: ${{ github.sha }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 -c 'import os,re; s=os.environ["REVISION"]; assert re.fullmatch("[a-f0-9]{40}",s); open(os.environ["GITHUB_OUTPUT"],"a").write("revision="+s+"\n")'

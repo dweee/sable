@@ -64,5 +64,10 @@
   "forge": "forgejo",
   "repository": "d/sable",
   "branch": "main",
-  "remote": "https://git.monke.fail/d/sable.git"
+  "remote": "https://git.monke.fail/d/sable.git",
+  "forgejoDeterminateImage": "sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a",
+  "forgejoDeterminateLabels": [
+    "nix",
+    "nix-light"
+  ]
 }
