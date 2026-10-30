@@ -7,6 +7,10 @@ const assetsDir = join(import.meta.dirname, '../../static/deepfilternet3');
 const assets = [
   {
     path: 'v3/pkg/df_bg.wasm',
+    // The upstream CDN began returning 403 in October 2026. Keep a verified
+    // copy in the repository so builds do not depend on that host; the URL
+    // remains as a provenance fallback.
+    bundled: join(import.meta.dirname, '../../assets/deepfilternet3/v3/pkg/df_bg.wasm'),
     url: 'https://cdn.mezon.ai/AI/models/datas/noise_suppression/deepfilternet3/v3/pkg/df_bg.wasm',
     sha256: '440b5d12b6ea7d95008736f844221d7874ee15de5cb10d3015002470fdba0432',
   },
@@ -17,13 +21,17 @@ const assets = [
   },
 ];
 
-/** @param {{ path: string; url: string; sha256: string }} asset */
-async function provision({ path, url, sha256: expected }) {
+/** @param {{ path: string, bundled?: string, url: string, sha256: string }} asset */
+async function provision({ path, bundled, url, sha256: expected }) {
   const target = join(assetsDir, path);
   const existing = await readFile(target).catch(() => undefined);
   if (existing && sha256(existing) === expected) return;
 
-  const bytes = await downloadVerified(url, expected);
+  const local = bundled && await readFile(bundled).catch(() => undefined);
+  const bytes = local && sha256(local) === expected
+    ? local
+    : await downloadVerified(url, expected);
+
   await mkdir(dirname(target), { recursive: true });
   await writeFile(`${target}.tmp`, bytes);
   await rename(`${target}.tmp`, target);

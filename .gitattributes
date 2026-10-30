@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Vendored binary assets
+*.wasm binary
