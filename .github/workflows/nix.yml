@@ -35,9 +35,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        if: ${{ matrix.system != 'x86_64-darwin' }}
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes parallel-eval
+            eval-cores = 2
+            accept-flake-config = false
+      # Determinate does not support Intel macOS.
       - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+        if: ${{ matrix.system == 'x86_64-darwin' }}
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify Determinate client and daemon
+        if: ${{ matrix.system != 'x86_64-darwin' }}
+        run: |
+          nix --version | grep -F 'Determinate Nix 3.24.1'
+          nix store info --store daemon --json
       - name: Build and check packages and every downloadable platform artifact
         run: nix flake check --no-update-lock-file -L
       - name: Evaluate development shells
