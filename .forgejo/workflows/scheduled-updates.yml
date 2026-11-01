@@ -105,11 +105,6 @@ jobs:
         test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
         nix store info --store daemon --json
         printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
-    - name: Show tracked changes that would fail the clean-checkout check
-      run: |-
-        git status --porcelain --untracked-files=no | head -50
-        git diff --stat | tail -5
-        git config --get-regexp '^core\.' || true
     - name: Resolve every tracked input and validate the exact candidate
       env:
         GH_TOKEN: ${{ secrets.GH_READ_TOKEN }}
