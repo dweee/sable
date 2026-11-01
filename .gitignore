@@ -76,3 +76,7 @@ storybook-static
 # Rendered by scripts/ci/render-flatpak-nightly.mjs
 packaging/flatpak/nightly/moe.sable.next.Nightly.yml
 packaging/flatpak/nightly/moe.sable.next.Nightly.metainfo.xml
+
+# Python bytecode (a tracked .pyc made the updater's clean-checkout check fail)
+__pycache__/
+*.pyc
