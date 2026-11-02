@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
+sys.dont_write_bytecode = True  # see release-channel.py
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('channel', ROOT / 'ci/release-channel.py')
 channel = importlib.util.module_from_spec(spec)

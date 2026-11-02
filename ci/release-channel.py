@@ -15,7 +15,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
+# Never write bytecode: consumers once tracked ci/__pycache__ and the rewrite
+# dirtied the checkout that the clean-checkout checks require.
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_ATTIC = 'https://attic.monke.fail'
 # The Attic host's address on the Forgejo runner network, reachable only from
@@ -67,6 +71,10 @@ def phase(label):
 class CommandFailure(RuntimeError):
     """A fixed diagnostic category, never raw subprocess output or arguments."""
 
+    def __init__(self, message, category=None):
+        super().__init__(message)
+        self.category = category
+
 
 def failure_category(diagnostic):
     patterns = [
@@ -76,7 +84,10 @@ def failure_category(diagnostic):
         ('cache-missing-output', r'incomplete cache publication|required cache output is missing'),
         ('cache-signature', r'lacks a signature|is not signed|invalid signature|no trusted signature'),
         ('authorization', r'HTTP[^\n]*(?:401|403)|unauthorized|forbidden|authentication failed'),
-        ('transport', r'unexpected eof|http/2|framing|connection reset|timed out|timeout|internalservererror|HTTP[^\n]*50[0-9]'),
+        ('daemon-unavailable', r"remote store 'daemon'|cannot connect to socket|daemon-socket"),
+        ('transport', r'unexpected eof|http/2|framing|connection reset|timed out|timeout|internalservererror|HTTP[^\n]*50[0-9]|'
+                      r'could not resolve host|resolving timed out|temporary failure in name resolution|connection refused|'
+                      r'couldn.t connect|failed to connect|ssl connect error|partial file|transfer closed'),
         ('missing-input-or-output', r'HTTP[^\n]*404|does not exist|no such file'),
         ('evaluation', r'evaluation aborted|attribute[^\n]*missing|syntax error|infinite recursion|assertion'),
         ('build', r'builder for[^\n]*failed|ninja[^\n]*stopped|failed with exit code'),
@@ -94,19 +105,85 @@ def safe_detail(diagnostic):
     return text[:300]
 
 
-def run(*args, env=None):
+# Only transport-class failures of idempotent `nix` commands are retried. Hash,
+# signature, authorization, evaluation and build failures are never retried.
+TRANSPORT_RETRY_DELAYS = (20, 60, 120)
+RETRYABLE = {'transport', 'daemon-unavailable'}
+DAEMON_SOCKET = Path('/nix/var/nix/daemon-socket/socket')
+
+
+def daemon_healthy():
     try:
-        result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
-    except subprocess.TimeoutExpired:
-        raise CommandFailure('command deadline exceeded') from None
-    if result.returncode:
-        # Nix diagnostics may contain private paths or authenticated URLs. Emit
-        # the classification, the status and a redacted tail of Nix error lines.
-        diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
-        message = failure_category(diagnostic) + ' (exit ' + str(result.returncode) + ')'
-        detail = safe_detail(diagnostic)
-        raise CommandFailure(message + (': ' + detail if detail else ''))
-    return result.stdout.strip()
+        return subprocess.run(['nix', 'store', 'info', '--store', 'daemon', '--json'], cwd=ROOT, text=True,
+                              capture_output=True, timeout=90).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def ensure_daemon():
+    """Verify the job's isolated Nix daemon; restart it once or fail with a clear category."""
+    if os.environ.get('NIX_REMOTE') != 'daemon' or daemon_healthy():
+        return
+    print('Isolated Nix daemon is unhealthy; restarting it', file=sys.stderr, flush=True)
+    log = open('/tmp/nix-daemon.log', 'ab')
+    env = {k: v for k, v in os.environ.items() if k != 'NIX_REMOTE'}
+    try:
+        child = subprocess.Popen(['nix-daemon'], stdout=log, stderr=log, env=env, start_new_session=True)
+    except OSError:
+        raise CommandFailure('daemon-unavailable: nix-daemon could not be started', 'daemon-unavailable') from None
+    for _ in range(30):
+        if DAEMON_SOCKET.exists() and child.poll() is None:
+            break
+        time.sleep(1)
+    if child.poll() is None and daemon_healthy():
+        print('Isolated Nix daemon restarted', file=sys.stderr, flush=True)
+        return
+    raise CommandFailure('daemon-unavailable: the isolated Nix daemon is down and could not be restarted '
+                         '(see /tmp/nix-daemon.log on the runner)', 'daemon-unavailable')
+
+
+def with_transport_retries(args, attempt, sleep=time.sleep):
+    """Call attempt() again after transport-class failures of `nix` commands."""
+    delays = iter(TRANSPORT_RETRY_DELAYS if args and Path(str(args[0])).name == 'nix' else ())
+    while True:
+        try:
+            return attempt()
+        except CommandFailure as error:
+            delay = next(delays, None)
+            if delay is None or error.category not in RETRYABLE:
+                raise
+            print('Retrying after ' + error.category + ' failure in ' + str(delay) + 's', file=sys.stderr, flush=True)
+            sleep(delay)
+            ensure_daemon()
+
+
+def run(*args, env=None):
+    def attempt():
+        try:
+            result = subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True, timeout=6*3600)
+        except subprocess.TimeoutExpired:
+            raise CommandFailure('command deadline exceeded') from None
+        if result.returncode:
+            # Nix diagnostics may contain private paths or authenticated URLs. Emit
+            # the classification, the status and a redacted tail of Nix error lines.
+            diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
+            category = failure_category(diagnostic)
+            message = category + ' (exit ' + str(result.returncode) + ')'
+            detail = safe_detail(diagnostic)
+            raise CommandFailure(message + (': ' + detail if detail else ''), category)
+        return result.stdout.strip()
+    return with_transport_retries(args, attempt)
+
+
+def dirty_tracked_paths(limit=20):
+    """Names (never contents) of tracked files that differ from HEAD."""
+    try:
+        result = subprocess.run(['git', 'status', '--porcelain', '-z', '--untracked-files=no'], cwd=ROOT, text=True,
+                                capture_output=True, timeout=300)
+    except (subprocess.SubprocessError, OSError):
+        return []
+    names = [entry[3:] for entry in result.stdout.split('\0') if len(entry) > 3]
+    return names[:limit] + (['... and ' + str(len(names) - limit) + ' more'] if len(names) > limit else [])
 
 
 def digest(value):
@@ -424,6 +501,8 @@ def retain(system):
 def source():
     sha = run('git', 'rev-parse', 'HEAD')
     if not SHA.fullmatch(sha) or run('git', 'status', '--porcelain', '--untracked-files=no'):
+        print('Tracked files that differ from the release commit: ' + (', '.join(dirty_tracked_paths()) or '(none listed)'),
+              file=sys.stderr)
         raise ValueError('Release source changed')
     return sha
 
@@ -574,18 +653,22 @@ def promote(channel, revision, proofs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['build', 'promote', 'policy', 'retain'])
+    parser.add_argument('action', choices=['build', 'promote', 'policy', 'retain', 'daemon'])
     parser.add_argument('--system')
     parser.add_argument('--channel', choices=['tested', 'stable'], default='tested')
     parser.add_argument('--revision')
     parser.add_argument('--proofs', default='{}')
     args = parser.parse_args()
     try:
-        if args.action == 'build':
+        if args.action == 'daemon':
+            ensure_daemon()
+        elif args.action == 'build':
+            ensure_daemon()
             build(args.system)
         elif args.action == 'promote':
             promote(args.channel, args.revision, json.loads(args.proofs))
         elif args.action == 'retain':
+            ensure_daemon()
             retain(args.system)
         else:
             print(json.dumps(policy(), sort_keys=True))
