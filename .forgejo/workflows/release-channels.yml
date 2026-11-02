@@ -13,7 +13,7 @@ name: Verified release channels
     - COPYING*
     - DCO
   schedule:
-  - cron: 13 5 * * *
+  - cron: 1 14 * * *
   workflow_dispatch:
     inputs:
       channel:
@@ -36,11 +36,15 @@ jobs:
     runs-on: nix-light
     timeout-minutes: 360
     env:
+      PYTHONDONTWRITEBYTECODE: '1'
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
@@ -88,11 +92,15 @@ jobs:
     runs-on: nix
     timeout-minutes: 360
     env:
+      PYTHONDONTWRITEBYTECODE: '1'
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
@@ -149,11 +157,15 @@ jobs:
     runs-on: nix
     timeout-minutes: 360
     env:
+      PYTHONDONTWRITEBYTECODE: '1'
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
@@ -205,11 +217,15 @@ jobs:
     runs-on: braco
     timeout-minutes: 360
     env:
+      PYTHONDONTWRITEBYTECODE: '1'
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
     needs:
     - test
     outputs:
@@ -249,11 +265,15 @@ jobs:
     runs-on: braco
     timeout-minutes: 360
     env:
+      PYTHONDONTWRITEBYTECODE: '1'
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main'
       || (github.event_name == 'schedule' && github.ref == 'main')) }}
     steps:
@@ -288,11 +308,15 @@ jobs:
     runs-on: nix
     timeout-minutes: 360
     env:
+      PYTHONDONTWRITEBYTECODE: '1'
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon

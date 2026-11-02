@@ -9,11 +9,15 @@ jobs:
     runs-on: nix-light
     timeout-minutes: 360
     env:
+      PYTHONDONTWRITEBYTECODE: '1'
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
         sandbox = false
         filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
