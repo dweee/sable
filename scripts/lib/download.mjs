@@ -4,10 +4,28 @@ import { createHash } from 'node:crypto';
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 /**
+ * Tries each URL in order and returns the first body that matches the checksum.
+ * @param {string | string[]} urls
+ * @param {string} expected
+ */
+export async function downloadVerified(urls, expected) {
+  const failures = [];
+  for (const url of [urls].flat()) {
+    try {
+      return await downloadOne(url, expected);
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+      console.warn(`Download failed, trying the next source: ${failures.at(-1)}`);
+    }
+  }
+  throw new Error(failures.join('\n'));
+}
+
+/**
  * @param {string} url
  * @param {string} expected
  */
-export async function downloadVerified(url, expected) {
+async function downloadOne(url, expected) {
   console.log(`Downloading ${url}`);
   const response = await fetch(url);
   if (!response.ok) {
