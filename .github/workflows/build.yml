@@ -234,6 +234,21 @@ jobs:
           name: release-ios
           path: artifacts/*
           if-no-files-found: error
+  # Stable, always-running aggregate: the required status check for this repository.
+  test:
+    name: test
+    if: ${{ always() }}
+    needs: [web, desktop, android, ios]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform job to have passed or been skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null
+
   release:
     name: Publish complete platform set
     needs: [web, desktop, android, ios]
