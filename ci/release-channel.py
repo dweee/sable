@@ -109,6 +109,10 @@ def safe_detail(diagnostic):
 # signature, authorization, evaluation and build failures are never retried.
 TRANSPORT_RETRY_DELAYS = (20, 60, 120)
 RETRYABLE = {'transport', 'daemon-unavailable'}
+# Read-only commands that only fetch metadata or sources may retry any transport
+# failure. For every other `nix` command (builds) only a daemon that could not be
+# reached is retried: that failed before any work was done.
+READ_ONLY = {'eval', 'path-info', 'copy', 'store'}
 DAEMON_SOCKET = Path('/nix/var/nix/daemon-socket/socket')
 
 
@@ -142,18 +146,20 @@ def ensure_daemon():
                          '(see /tmp/nix-daemon.log on the runner)', 'daemon-unavailable')
 
 
-def with_transport_retries(args, attempt, sleep=time.sleep):
+def with_transport_retries(args, attempt, sleep=None):
     """Call attempt() again after transport-class failures of `nix` commands."""
-    delays = iter(TRANSPORT_RETRY_DELAYS if args and Path(str(args[0])).name == 'nix' else ())
+    is_nix = bool(args) and Path(str(args[0])).name == 'nix'
+    retryable = RETRYABLE if is_nix and len(args) > 1 and args[1] in READ_ONLY else {'daemon-unavailable'}
+    delays = iter(TRANSPORT_RETRY_DELAYS if is_nix else ())
     while True:
         try:
             return attempt()
         except CommandFailure as error:
             delay = next(delays, None)
-            if delay is None or error.category not in RETRYABLE:
+            if delay is None or error.category not in retryable:
                 raise
             print('Retrying after ' + error.category + ' failure in ' + str(delay) + 's', file=sys.stderr, flush=True)
-            sleep(delay)
+            (sleep or time.sleep)(delay)
             ensure_daemon()
 
 
@@ -168,6 +174,11 @@ def run(*args, env=None):
             # the classification, the status and a redacted tail of Nix error lines.
             diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
             category = failure_category(diagnostic)
+            # Evaluation runs with builds disabled, so "Cannot build" there means a
+            # source or substitute could not be fetched, not a genuine build failure.
+            if (len(args) > 1 and args[1] == 'eval' and category in {'command-failed', 'build'}
+                    and re.search(r"cannot build '", diagnostic, re.I)):
+                category = 'transport'
             message = category + ' (exit ' + str(result.returncode) + ')'
             detail = safe_detail(diagnostic)
             raise CommandFailure(message + (': ' + detail if detail else ''), category)
@@ -294,7 +305,8 @@ def remote_env(env, directory):
                 NIX_CONFIG=env.get('NIX_CONFIG', '') + '\nsubstituters =\nextra-substituters =\n'
                 'trusted-public-keys = ' + KEY + ' ' + UPSTREAM_KEY + '\nextra-trusted-public-keys =\n'
                 'require-sigs = true\nfallback = false\nnarinfo-cache-negative-ttl = 0\n'
-                'narinfo-cache-positive-ttl = 86400\ndownload-attempts = 3\n')
+                'narinfo-cache-positive-ttl = 86400\ndownload-attempts = 5\n'
+                'http2 = ' + ('true' if os.environ.get('ATTIC_HTTP2') == 'true' else 'false') + '\n')
 
 
 def verify(roots, expected, env):
