@@ -7,9 +7,10 @@ const assetsDir = join(import.meta.dirname, '../../static/deepfilternet3');
 const assets = [
   {
     path: 'v3/pkg/df_bg.wasm',
-    // The upstream CDN answers HTTP 403 to some clients, so a release asset on this fork is tried first.
+    // The upstream CDN answers HTTP 403 to some clients. This commit-pinned copy is
+    // byte-identical to the v3 asset, so try it first; the hash below still gates both.
     urls: [
-      'https://github.com/dweee/sable/releases/download/assets-deepfilternet3/df_bg-up.wasm',
+      'https://raw.githubusercontent.com/fluxerapp/fluxer/3cec27ba57b965b9bfddd8d21bb2683056fba55c/fluxer_static/libs/deepfilternet3/v3/pkg/df_bg.wasm',
       'https://cdn.mezon.ai/AI/models/datas/noise_suppression/deepfilternet3/v3/pkg/df_bg.wasm',
     ],
     sha256: '440b5d12b6ea7d95008736f844221d7874ee15de5cb10d3015002470fdba0432',
