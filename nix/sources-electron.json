@@ -1,0 +1,12 @@
+{
+  "version": "2.3.5-nightly.261104175330.gfc9fc6cc17e0",
+  "tag": "nightly-2.3.5-nightly.261104175330.gfc9fc6cc17e0",
+  "sources": {
+    "linux-x86_64.tar.gz": {
+      "hash": "sha256-OHHw7ttH5DCX8UWZ8bSeG/uqFS996CTX/3YHFlvXM4I=",
+      "urls": [
+        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.3.5-nightly.261104175330.gfc9fc6cc17e0/sable-2.3.5-nightly.261104175330.gfc9fc6cc17e0-x64.tar.gz"
+      ]
+    }
+  }
+}
