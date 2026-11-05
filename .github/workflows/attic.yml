@@ -34,9 +34,12 @@ jobs:
           python3 ci/test-push-attic.py
           python3 ci/test-attic-plan.py
   publish:
+    permissions:
+      contents: read
+      id-token: write
     name: Cache ${{ matrix.system }}
     needs: check
-    if: ${{ github.repository == 'dweee/sable' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && github.repository == 'dweee/sable' && github.ref == 'refs/heads/main' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -83,9 +86,11 @@ jobs:
         if: ${{ env.PUBLISH == 'true' }}
         run: |
           set -euo pipefail
-          client=$(nix build --inputs-from . 'nixpkgs#attic-client' --no-update-lock-file --no-write-lock-file --no-link --print-out-paths)
+          client=$(nix build --inputs-from . 'nixpkgs#attic-client' --no-update-lock-file --no-write-lock-file --out-link "${RUNNER_TEMP:-/tmp}/attic-client" --print-out-paths)
           test -x "$client/bin/attic"
           echo "binary=$client/bin/attic" >> "$GITHUB_OUTPUT"
+      - name: Install pinned Niks3 publisher
+        run: bash ci/install-niks3.sh
       - name: Publish to Attic
         if: ${{ env.PUBLISH == 'true' }}
         env:
@@ -94,3 +99,6 @@ jobs:
         run: |
           test -n "$ATTIC_TOKEN" || { echo '::error::The ATTIC_TOKEN secret is not set'; exit 1; }
           python3 ci/push-attic.py --outputs "$RUNNER_TEMP/attic/outputs.txt"
+      - name: Publish to Niks3 with GitHub OIDC and verify S3 integrity
+        if: ${{ env.PUBLISH == 'true' }}
+        run: python3 ci/push-niks3.py --outputs "$RUNNER_TEMP/attic/outputs.txt"

@@ -34,7 +34,12 @@ Required repository configuration:
 - Enable Actions and permit the repository workflow token to create branches,
   tags, PRs and monitoring issues. Protect `tested`/`stable` against human or
   unrelated automation writes; allow only the release workflow identity.
-- Supply a repository-scoped `ATTIC_TOKEN` (or `FLAKEY_ATTIC_TOKEN`) with pull/push
+- Forgejo requires repository-scoped `FLAKEY_NIKS3_READ_NETRC` and
+  `FLAKEY_NIKS3_WRITE_TOKEN`. Niks3 is its substitute and verified release cache;
+  existing Attic secrets and historical objects remain.
+- GitHub requires no Niks3 static secrets: trusted publishers request write-only
+  OIDC with audience `https://niks3.monke.fail`. Both cache uploads gate releases.
+- GitHub: supply a repository-scoped `ATTIC_TOKEN` (or `FLAKEY_ATTIC_TOKEN`) with pull/push
   access to the existing `flakey` cache. No private Forgejo inputs go to GitHub.
 - `inputCheckWorkflows` lists reviewed GitHub native workflows with workflow_dispatch.
   The updater explicitly dispatches them on the immutable update branch, including

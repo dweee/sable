@@ -1,0 +1,30 @@
+name: Niks3 OIDC publication proof
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            accept-flake-config = false
+      - name: Install immutable Niks3 client
+        run: bash ci/install-niks3.sh
+      - name: Realise a small public output without private credentials
+        run: nix build --option accept-flake-config false --no-link --print-out-paths github:NixOS/nixpkgs/1d060086d60cb76a40cf37109f979d88a5bd6396#hello > outputs.txt
+      - name: Publish real closure through write-only GitHub OIDC
+        run: python3 ci/push-niks3.py --outputs outputs.txt
