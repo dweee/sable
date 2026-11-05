@@ -104,7 +104,6 @@ jobs:
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
-      ATTIC_SERVER: http://172.29.0.1:8080
     container:
       image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
     needs:
@@ -140,19 +139,20 @@ jobs:
         printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
     - name: Configure job-local private cache reader
       env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
+        NIKS3_WRITE_TOKEN: ${{ secrets.FLAKEY_NIKS3_WRITE_TOKEN }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py
+        python3 ci/configure-niks3.py
+    - name: Install pinned Niks3 publisher
+      run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/release-channel.py build --system x86_64-linux
     - name: Remove cache reader
       if: ${{ always() }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py --cleanup
+        python3 ci/configure-niks3.py --cleanup
   retain_x86_64_linux:
     runs-on: nix
     timeout-minutes: 360
@@ -169,7 +169,6 @@ jobs:
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
-      ATTIC_SERVER: http://172.29.0.1:8080
     container:
       image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main'
@@ -201,9 +200,9 @@ jobs:
         printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
     - name: Configure job-local private reader
       env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py
+        python3 ci/configure-niks3.py
     - name: Verify advertised/recent releases independently of current builds
       env:
         SOURCE_TOKEN: ${{ github.token }}
@@ -212,7 +211,7 @@ jobs:
     - name: Remove private reader
       if: ${{ always() }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py --cleanup
+        python3 ci/configure-niks3.py --cleanup
   build_aarch64_linux:
     runs-on: braco
     timeout-minutes: 360
@@ -248,19 +247,20 @@ jobs:
         git checkout -q --detach FETCH_HEAD
     - name: Configure job-local private cache reader
       env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
+        NIKS3_WRITE_TOKEN: ${{ secrets.FLAKEY_NIKS3_WRITE_TOKEN }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py
+        python3 ci/configure-niks3.py
+    - name: Install pinned Niks3 publisher
+      run: bash ci/install-niks3.sh
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
-      env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/release-channel.py build --system aarch64-linux
     - name: Remove cache reader
       if: ${{ always() }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py --cleanup
+        python3 ci/configure-niks3.py --cleanup
   retain_aarch64_linux:
     runs-on: braco
     timeout-minutes: 360
@@ -292,9 +292,9 @@ jobs:
         git checkout -q --detach FETCH_HEAD
     - name: Configure job-local private reader
       env:
-        ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN || secrets.FLAKEY_ATTIC_TOKEN }}
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py
+        python3 ci/configure-niks3.py
     - name: Verify advertised/recent releases independently of current builds
       env:
         SOURCE_TOKEN: ${{ github.token }}
@@ -303,7 +303,7 @@ jobs:
     - name: Remove private reader
       if: ${{ always() }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-attic-read.py --cleanup
+        python3 ci/configure-niks3.py --cleanup
   promote:
     runs-on: nix
     timeout-minutes: 360
