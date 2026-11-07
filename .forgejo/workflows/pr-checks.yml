@@ -53,6 +53,7 @@ jobs:
     - name: Regression tests and complete inventory policy
       run: |-
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/test-release-channel.py
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/test-push-niks3.py
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/test-update-automation.py
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py policy
     - name: Select immutable revision

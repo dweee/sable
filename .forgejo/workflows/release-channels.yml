@@ -80,6 +80,7 @@ jobs:
     - name: Regression tests and complete inventory policy
       run: |-
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/test-release-channel.py
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/test-push-niks3.py
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/test-update-automation.py
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py policy
     - name: Select immutable revision
@@ -304,6 +305,232 @@ jobs:
       if: ${{ always() }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/configure-niks3.py --cleanup
+  build_aarch64_darwin:
+    runs-on: darwin-aarch64
+    timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = false
+        sandbox = false
+        filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
+    needs:
+    - test
+    outputs:
+      proof: ${{ steps.release.outputs.proof }}
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule'
+      && github.ref == 'main')) }}
+    steps:
+    - name: Checkout exact source without a Node dependency
+      env:
+        TOKEN: ${{ github.token }}
+        SERVER: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ needs.test.outputs.revision }}
+      run: |
+        test -n "${NATIVE_BUILD_ADMISSION_COMMAND:-}"
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        set -eu
+        auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
+        git init -q .
+        git remote add origin "$SERVER/$REPO.git"
+        git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
+        git checkout -q --detach FETCH_HEAD
+    - name: Configure job-local private cache reader
+      env:
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
+        NIKS3_WRITE_TOKEN: ${{ secrets.FLAKEY_NIKS3_WRITE_TOKEN }}
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+    - name: Install pinned Niks3 publisher
+      run: bash ci/install-niks3.sh
+    - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
+      id: release
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py build --system aarch64-darwin
+    - name: Remove cache reader
+      if: ${{ always() }}
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py --cleanup
+  retain_aarch64_darwin:
+    runs-on: nix
+    timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = false
+        sandbox = false
+        filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
+        extra-experimental-features = parallel-eval
+        eval-cores = 2
+      NIX_REMOTE: daemon
+    container:
+      image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main'
+      || (github.event_name == 'schedule' && github.ref == 'main')) }}
+    steps:
+    - name: Checkout exact source without a Node dependency
+      env:
+        TOKEN: ${{ github.token }}
+        SERVER: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -eu
+        auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
+        git init -q .
+        git remote add origin "$SERVER/$REPO.git"
+        git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
+        git checkout -q --detach FETCH_HEAD
+    - name: Start isolated Determinate daemon
+      run: |-
+        set -eu
+        nix --version | grep -F 'Determinate Nix 3.24.1'
+        env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
+        daemon=$!
+        for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 $daemon; sleep 1; done
+        test -S /nix/var/nix/daemon-socket/socket
+        test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
+        nix store info --store daemon --json
+        printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
+    - name: Configure job-local private reader
+      env:
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/configure-niks3.py
+    - name: Verify advertised/recent releases independently of current builds
+      env:
+        SOURCE_TOKEN: ${{ github.token }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/release-channel.py retain --system aarch64-darwin
+    - name: Remove private reader
+      if: ${{ always() }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/configure-niks3.py --cleanup
+  build_x86_64_darwin:
+    runs-on: darwin-x86_64
+    timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = false
+        sandbox = false
+        filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
+    needs:
+    - test
+    outputs:
+      proof: ${{ steps.release.outputs.proof }}
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule'
+      && github.ref == 'main')) }}
+    steps:
+    - name: Checkout exact source without a Node dependency
+      env:
+        TOKEN: ${{ github.token }}
+        SERVER: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ needs.test.outputs.revision }}
+      run: |
+        test -n "${NATIVE_BUILD_ADMISSION_COMMAND:-}"
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        set -eu
+        auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
+        git init -q .
+        git remote add origin "$SERVER/$REPO.git"
+        git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
+        git checkout -q --detach FETCH_HEAD
+    - name: Configure job-local private cache reader
+      env:
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
+        NIKS3_WRITE_TOKEN: ${{ secrets.FLAKEY_NIKS3_WRITE_TOKEN }}
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+    - name: Install pinned Niks3 publisher
+      run: bash ci/install-niks3.sh
+    - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
+      id: release
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py build --system x86_64-darwin
+    - name: Remove cache reader
+      if: ${{ always() }}
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py --cleanup
+  retain_x86_64_darwin:
+    runs-on: nix
+    timeout-minutes: 360
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = false
+        sandbox = false
+        filter-syscalls = false
+        connect-timeout = 20
+        stalled-download-timeout = 120
+        download-attempts = 5
+        extra-experimental-features = parallel-eval
+        eval-cores = 2
+      NIX_REMOTE: daemon
+    container:
+      image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main'
+      || (github.event_name == 'schedule' && github.ref == 'main')) }}
+    steps:
+    - name: Checkout exact source without a Node dependency
+      env:
+        TOKEN: ${{ github.token }}
+        SERVER: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -eu
+        auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
+        git init -q .
+        git remote add origin "$SERVER/$REPO.git"
+        git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
+        git checkout -q --detach FETCH_HEAD
+    - name: Start isolated Determinate daemon
+      run: |-
+        set -eu
+        nix --version | grep -F 'Determinate Nix 3.24.1'
+        env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
+        daemon=$!
+        for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 $daemon; sleep 1; done
+        test -S /nix/var/nix/daemon-socket/socket
+        test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
+        nix store info --store daemon --json
+        printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
+    - name: Configure job-local private reader
+      env:
+        NIKS3_READ_NETRC: ${{ secrets.FLAKEY_NIKS3_READ_NETRC }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/configure-niks3.py
+    - name: Verify advertised/recent releases independently of current builds
+      env:
+        SOURCE_TOKEN: ${{ github.token }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/release-channel.py retain --system x86_64-darwin
+    - name: Remove private reader
+      if: ${{ always() }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/configure-niks3.py --cleanup
   promote:
     runs-on: nix
     timeout-minutes: 360
@@ -326,6 +553,8 @@ jobs:
     - test
     - build_x86_64_linux
     - build_aarch64_linux
+    - build_aarch64_darwin
+    - build_x86_64_darwin
     permissions:
       contents: write
     if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule'
@@ -359,7 +588,8 @@ jobs:
       env:
         CHANNEL_TOKEN: ${{ secrets.CHANNEL_TOKEN || github.token }}
         RELEASE_PROOFS: '{"x86_64-linux": "${{ needs.build_x86_64_linux.outputs.proof }}", "aarch64-linux": "${{
-          needs.build_aarch64_linux.outputs.proof }}"}'
+          needs.build_aarch64_linux.outputs.proof }}", "aarch64-darwin": "${{ needs.build_aarch64_darwin.outputs.proof
+          }}", "x86_64-darwin": "${{ needs.build_x86_64_darwin.outputs.proof }}"}'
         REVISION: ${{ needs.test.outputs.revision }}
         CHANNEL: ${{ inputs.channel || 'tested' }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
