@@ -51,12 +51,61 @@
         "attribute": "packages.aarch64-linux.sable-ios",
         "visibility": "private"
       }
+    ],
+    "aarch64-darwin": [
+      {
+        "attribute": "packages.aarch64-darwin.sable",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.sable-web",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.sable-windows",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.sable-android",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.sable-android-aab",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.sable-ios",
+        "visibility": "private"
+      }
+    ],
+    "x86_64-darwin": [
+      {
+        "attribute": "packages.x86_64-darwin.sable",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-darwin.sable-web",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-darwin.sable-windows",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-darwin.sable-android",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-darwin.sable-android-aab",
+        "visibility": "private"
+      },
+      {
+        "attribute": "packages.x86_64-darwin.sable-ios",
+        "visibility": "private"
+      }
     ]
   },
-  "excludedSystems": [
-    "aarch64-darwin",
-    "x86_64-darwin"
-  ],
+  "excludedSystems": [],
   "submodules": false,
   "integrationInventory": false,
   "githubCounterpartCi": true,
