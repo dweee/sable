@@ -265,6 +265,21 @@ platform build succeeds. Nix package CI builds the pinned packages independently
 on all four Nix systems. Pinning source-built fork artifacts is a separate
 update to `nix/sources.json`, after verifying their identity and checksums.
 
+Upstream dropped the Tauri desktop shell for Electron (Linux desktop is
+Electron-only from v2.1.0). On `x86_64-linux`, `sable` repackages the
+upstream Electron **nightly** `.deb` pinned in `nix/sources-electron.json`.
+The pinned sha512 is the one published in that nightly's `nightly-linux.yml`;
+nightlies often ship without `SHA256SUMS` or without a tarball listed there.
+The `.deb`'s `package-type` marker is removed so the app never tries to
+update itself with `pkexec dpkg`. Electron nightlies keep the
+`moe.sable.next.nightly` identity and data directory, so the identity rule above
+still holds. `aarch64-linux` stays on the Tauri/CEF build (`nix/linux-tauri.nix`)
+because no arm64 Electron nightly with a verifiable checksum and the call key
+fixes has been pinned yet.
+macOS, web, and the mobile and Windows downloads keep the `nix/sources.json` pin.
+The Electron package is fetched from upstream only and is not archived in this
+fork yet.
+
 Flake modules:
 
 ```nix
