@@ -144,16 +144,22 @@ jobs:
         NIKS3_WRITE_TOKEN: ${{ secrets.FLAKEY_NIKS3_WRITE_TOKEN }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/configure-niks3.py
-    - name: Install pinned Niks3 publisher
-      run: bash ci/install-niks3.sh
+    - name: Install pinned Niks3 publisher and retain its build dependencies
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        bash ci/install-niks3.sh --retain-bootstrap
+    - name: Publish bootstrap client and completed build dependencies
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
+        --outputs niks3-bootstrap-outputs.txt
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/release-channel.py build --system x86_64-linux
     - name: Remove cache reader
       if: ${{ always() }}
-      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   retain_x86_64_linux:
     runs-on: nix
     timeout-minutes: 360
@@ -211,8 +217,9 @@ jobs:
         python3 ci/release-channel.py retain --system x86_64-linux
     - name: Remove private reader
       if: ${{ always() }}
-      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   build_aarch64_linux:
     runs-on: braco
     timeout-minutes: 360
@@ -252,16 +259,22 @@ jobs:
         NIKS3_WRITE_TOKEN: ${{ secrets.FLAKEY_NIKS3_WRITE_TOKEN }}
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/configure-niks3.py
-    - name: Install pinned Niks3 publisher
-      run: bash ci/install-niks3.sh
+    - name: Install pinned Niks3 publisher and retain its build dependencies
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        bash ci/install-niks3.sh --retain-bootstrap
+    - name: Publish bootstrap client and completed build dependencies
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
+        --outputs niks3-bootstrap-outputs.txt
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
         python3 ci/release-channel.py build --system aarch64-linux
     - name: Remove cache reader
       if: ${{ always() }}
-      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   retain_aarch64_linux:
     runs-on: braco
     timeout-minutes: 360
@@ -303,8 +316,9 @@ jobs:
         python3 ci/release-channel.py retain --system aarch64-linux
     - name: Remove private reader
       if: ${{ always() }}
-      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   build_aarch64_darwin:
     runs-on: darwin-aarch64
     timeout-minutes: 360
@@ -347,8 +361,14 @@ jobs:
       run: |-
         "$NATIVE_BUILD_ADMISSION_COMMAND"
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
-    - name: Install pinned Niks3 publisher
-      run: bash ci/install-niks3.sh
+    - name: Install pinned Niks3 publisher and retain its build dependencies
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c bash ci/install-niks3.sh --retain-bootstrap
+    - name: Publish bootstrap client and completed build dependencies
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
+        --outputs niks3-bootstrap-outputs.txt
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       run: |-
@@ -356,9 +376,9 @@ jobs:
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py build --system aarch64-darwin
     - name: Remove cache reader
       if: ${{ always() }}
-      run: |-
-        "$NATIVE_BUILD_ADMISSION_COMMAND"
-        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   retain_aarch64_darwin:
     runs-on: nix
     timeout-minutes: 360
@@ -416,8 +436,9 @@ jobs:
         python3 ci/release-channel.py retain --system aarch64-darwin
     - name: Remove private reader
       if: ${{ always() }}
-      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   build_x86_64_darwin:
     runs-on: darwin-x86_64
     timeout-minutes: 360
@@ -460,8 +481,14 @@ jobs:
       run: |-
         "$NATIVE_BUILD_ADMISSION_COMMAND"
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
-    - name: Install pinned Niks3 publisher
-      run: bash ci/install-niks3.sh
+    - name: Install pinned Niks3 publisher and retain its build dependencies
+      run: |-
+        "$NATIVE_BUILD_ADMISSION_COMMAND"
+        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c bash ci/install-niks3.sh --retain-bootstrap
+    - name: Publish bootstrap client and completed build dependencies
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
+        --outputs niks3-bootstrap-outputs.txt
     - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
       id: release
       run: |-
@@ -469,9 +496,9 @@ jobs:
         nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py build --system x86_64-darwin
     - name: Remove cache reader
       if: ${{ always() }}
-      run: |-
-        "$NATIVE_BUILD_ADMISSION_COMMAND"
-        nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   retain_x86_64_darwin:
     runs-on: nix
     timeout-minutes: 360
@@ -529,8 +556,9 @@ jobs:
         python3 ci/release-channel.py retain --system x86_64-darwin
     - name: Remove private reader
       if: ${{ always() }}
-      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-        python3 ci/configure-niks3.py --cleanup
+      run: nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
+        accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/configure-niks3.py
+        --cleanup
   promote:
     runs-on: nix
     timeout-minutes: 360
