@@ -4,8 +4,7 @@
   fetchurl,
   autoPatchelfHook,
   makeWrapper,
-  makeDesktopItem,
-  copyDesktopItems,
+  dpkg,
   wrapGAppsHook3,
   addDriverRunpath,
   alsa-lib,
@@ -48,8 +47,10 @@
   # Tauri/CEF shell was removed in 0d820d595. Nightlies keep the
   # moe.sable.next.nightly identity, so this does not touch the legacy
   # moe.sable.client data that stable v2 builds migrate in place.
+  # The .deb, not the x64 tarball: the nightly's updater manifest publishes
+  # a sha512 for the .deb only, so its hash is verified against upstream.
   release = builtins.fromJSON (builtins.readFile ./sources-electron.json);
-  source = release.sources."linux-x86_64.tar.gz";
+  source = release.sources."linux-amd64.deb";
 
   # dlopened at runtime: GL/Vulkan drivers, tray icon, notifications,
   # keyring, Wayland and call audio.
@@ -64,21 +65,6 @@
     systemdLibs
     wayland
   ];
-
-  desktopItem = makeDesktopItem {
-    name = "moe.sable.next.electron.Nightly";
-    desktopName = "Sable Nightly";
-    genericName = "Matrix Client";
-    comment = "Sable v2 Matrix client";
-    exec = "sable %U";
-    icon = "sable";
-    startupWMClass = "Sable Nightly";
-    categories = ["Network" "InstantMessaging" "Chat"];
-    mimeTypes = [
-      "x-scheme-handler/moe.sable.next"
-      "x-scheme-handler/matrix"
-    ];
-  };
 in
   stdenv.mkDerivation {
     inherit pname version;
@@ -88,7 +74,7 @@ in
     nativeBuildInputs = [
       autoPatchelfHook
       makeWrapper
-      copyDesktopItems
+      dpkg
       wrapGAppsHook3
     ];
 
@@ -120,7 +106,12 @@ in
       systemdLibs
     ];
 
-    desktopItems = [desktopItem];
+    unpackPhase = ''
+      runHook preUnpack
+      # Plain tar drops the setuid bit the sandbox would reject.
+      dpkg-deb --fsys-tarfile $src | tar -x --no-same-owner --no-same-permissions
+      runHook postUnpack
+    '';
 
     dontConfigure = true;
     dontBuild = true;
@@ -130,19 +121,18 @@ in
       runHook preInstall
 
       mkdir -p $out/lib/sable $out/bin
-      cp -r . $out/lib/sable/
+      cp -r "opt/Sable Nightly/." $out/lib/sable/
+      cp -r usr/share $out/share
+      substituteInPlace $out/share/applications/moe.sable.next.electron.Nightly.desktop \
+        --replace-fail 'Exec="/opt/Sable Nightly/sable-nightly"' 'Exec=sable'
+      # "deb" makes electron-updater try to install updates with pkexec dpkg;
+      # without it the app treats itself as a tarball and never self-updates.
+      rm -f $out/lib/sable/resources/package-type
       # The other architecture's screen-audio helper cannot be patched here.
       rm -f $out/lib/sable/resources/app.asar.unpacked/dist/venmic-arm64.node
       # A setuid helper cannot live in the store; Electron uses the user
       # namespace sandbox instead.
       rm -f $out/lib/sable/chrome-sandbox
-
-      for size in 192 512; do
-        install -Dm644 resources/dist/icons/logo-''${size}x''${size}.png \
-          $out/share/icons/hicolor/''${size}x''${size}/apps/sable.png
-      done
-      install -Dm644 resources/dist/icons/logo.svg \
-        $out/share/icons/hicolor/scalable/apps/sable.svg
 
       runHook postInstall
     '';

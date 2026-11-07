@@ -1,11 +1,11 @@
 {
-  "version": "2.3.5-nightly.261104175330.gfc9fc6cc17e0",
-  "tag": "nightly-2.3.5-nightly.261104175330.gfc9fc6cc17e0",
+  "version": "2.3.6-nightly.261106110551.g56c49a09c966",
+  "tag": "nightly-2.3.6-nightly.261106110551.g56c49a09c966",
   "sources": {
-    "linux-x86_64.tar.gz": {
-      "hash": "sha256-OHHw7ttH5DCX8UWZ8bSeG/uqFS996CTX/3YHFlvXM4I=",
+    "linux-amd64.deb": {
+      "hash": "sha512-FX0qqj6m6HNB1xkx0OUAyJCw8GQxAsHAghYOb8sPeZHRFjPGObagOoc358W3HWTaUY6KDJjotWz09vys9xBuIA==",
       "urls": [
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.3.5-nightly.261104175330.gfc9fc6cc17e0/sable-2.3.5-nightly.261104175330.gfc9fc6cc17e0-x64.tar.gz"
+        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.3.6-nightly.261106110551.g56c49a09c966/sable-2.3.6-nightly.261106110551.g56c49a09c966-amd64.deb"
       ]
     }
   }
