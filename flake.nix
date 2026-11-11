@@ -2,7 +2,7 @@
   description = "Sable v2: desktop, web, mobile artifacts and native development tooling";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/c2a25b1b1a69ed1a23f20a49e3bf77b57720bb2a";
+    nixpkgs.url = "github:NixOS/nixpkgs/4d7618e1acce0d46f526b2bf71a5755b2b0f773c";
     # Unstable dropped Intel macOS; retain the supported 26.05 package set.
     nixpkgs-intel.url = "github:NixOS/nixpkgs/57f1c8965649ce5bcac5118a0d2e41f1fbdc56e5";
     rust-overlay = {
