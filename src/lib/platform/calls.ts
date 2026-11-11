@@ -1,12 +1,17 @@
 import type {
   NativeCallCapabilities,
-  SystemCallAction,
+  SystemCallAction as NativeSystemCallAction,
 } from '@sableclient/tauri-plugin-livekit-mobile';
 
-import { addPluginListener, invoke, isTauri } from '@tauri-apps/api/core';
+import { isTauri } from '@tauri-apps/api/core';
 import { type as osType } from '@tauri-apps/plugin-os';
 
-import { isNativeMobile } from './os';
+import { isIos, isNativeMobile } from './os';
+
+export type SystemCallAction = NativeSystemCallAction & {
+  notificationEventId?: string;
+  hasVideo?: boolean;
+};
 
 export function hasNativeCalls(): boolean {
   try {
@@ -14,6 +19,17 @@ export function hasNativeCalls(): boolean {
   } catch {
     return false;
   }
+}
+
+let nativeCallAudio = false;
+
+export function setNativeCallAudio(active: boolean): void {
+  nativeCallAudio = active;
+}
+
+/** Web Audio started in the WebView during a native iOS call can take over the call's audio session. */
+export function nativeCallOwnsAudio(): boolean {
+  return nativeCallAudio && isIos();
 }
 
 export async function nativeCallCapabilities(): Promise<NativeCallCapabilities | null> {
@@ -83,33 +99,4 @@ export async function fulfillSystemAnswer(uuid: string): Promise<void> {
   await plugin?.fulfillAnswerCall(uuid).catch((error: unknown) => {
     console.debug('[sable call] system answer not fulfilled', error);
   });
-}
-
-function hasVoipPush(): boolean {
-  return isTauri() && osType() === 'ios';
-}
-
-export async function nativeVoipToken(): Promise<string | null> {
-  if (!hasVoipPush()) return null;
-  try {
-    return await invoke<string | null>('plugin:livekit-mobile|get_voip_token');
-  } catch {
-    return null;
-  }
-}
-
-export async function watchVoipToken(handler: (token: string) => void): Promise<() => void> {
-  if (!hasVoipPush()) return () => {};
-  try {
-    const listener = await addPluginListener<{ token: string }>(
-      'livekit-mobile',
-      'voipTokenUpdated',
-      (event) => {
-        handler(event.token);
-      }
-    );
-    return () => void listener.unregister();
-  } catch {
-    return () => {};
-  }
 }

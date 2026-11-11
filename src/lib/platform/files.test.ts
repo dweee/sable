@@ -9,11 +9,13 @@ import {
   saveUrl,
   saveFile,
   saveImageToPhotos,
+  saveVideoToPhotos,
   savesNatively,
   shareFile,
   sharesNatively,
   withResolvedMime,
 } from './files';
+import type { ElectronBridge } from './electron';
 
 const mocks = vi.hoisted(() => ({
   androidFs: {
@@ -52,6 +54,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
 }));
 vi.mock('@tauri-apps/api/path', () => ({
   appCacheDir: mocks.appCacheDir,
+  downloadDir: () => Promise.resolve('/dl'),
   join: (...parts: string[]) => Promise.resolve(parts.join('/')),
 }));
 vi.mock('@choochmeque/tauri-plugin-sharekit-api', () => ({ shareFile: mocks.shareNative }));
@@ -94,13 +97,42 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function stubElectron(bridge: Partial<ElectronBridge>): void {
+  vi.stubGlobal('sableElectron', bridge satisfies Partial<ElectronBridge>);
+}
+
+test.each([
+  ['darwin', true],
+  ['win32', false],
+  ['linux', false],
+] as const)('Electron native sharing on %s is %s', (platform, supported) => {
+  stubElectron({ platform });
+  expect(sharesNatively()).toBe(supported);
+});
+
+test('Electron passes file bytes to its native share bridge', async () => {
+  const share = vi.fn().mockResolvedValue(undefined);
+  stubElectron({ platform: 'darwin', shareFile: share });
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]))));
+
+  await expect(shareFile('blob:wave', 'wave.png')).resolves.toBe('saved');
+  expect(share).toHaveBeenCalledWith({ name: 'wave.png', bytes: new Uint8Array([1, 2, 3]) });
+  expect(mocks.shareNative).not.toHaveBeenCalled();
+});
+
+test('Electron share failures are reported as failures', async () => {
+  stubElectron({ platform: 'darwin', shareFile: vi.fn().mockRejectedValue(new Error('failed')) });
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1]))));
+  await expect(shareFile('blob:wave', 'wave.png')).resolves.toBe('failed');
+});
+
 test('the web build keeps the browser download, having no native dialog', () => {
   expect(savesNatively()).toBe(false);
 });
 
 test('a picked path yields its basename on either separator', () => {
-  expect(fileNameFromPath('/home/erwan/holiday.png', 0)).toBe('holiday.png');
-  expect(fileNameFromPath('C:\\Users\\erwan\\holiday.png', 0)).toBe('holiday.png');
+  expect(fileNameFromPath('/home/kris/holiday.png', 0)).toBe('holiday.png');
+  expect(fileNameFromPath('C:\\Users\\kris\\holiday.png', 0)).toBe('holiday.png');
 });
 
 test('a path with no basename still names the attachment', () => {
@@ -117,9 +149,16 @@ test('an archive and an animated png carry the type their handler needs', () => 
   expect(mimeFromName('wave.apng')).toBe('image/apng');
 });
 
+test('native files use maintained MIME mappings beyond the media formats', () => {
+  expect(mimeFromName('notes.md')).toBe('text/markdown');
+  expect(mimeFromName('app.webmanifest')).toBe('application/manifest+json');
+  expect(mimeFromName('voice.opus')).toBe('audio/opus');
+});
+
 test('an unknown or absent extension falls back to a generic type', () => {
   expect(mimeFromName('archive.zzz')).toBe('application/octet-stream');
   expect(mimeFromName('README')).toBe('application/octet-stream');
+  expect(mimeFromName('png')).toBe('application/octet-stream');
 });
 
 test.each(['', 'application/octet-stream', 'application/ogg'])(
@@ -147,6 +186,12 @@ test('a wildcard accept expands to every extension of that type', () => {
 
 test('an exact accept matches only that type', () => {
   expect(filtersFor('application/pdf')?.[0].extensions).toEqual(['pdf']);
+});
+
+test('native filters include MIME aliases and deduplicate explicit extensions', () => {
+  const extensions = filtersFor('image/jpeg,.JPG,.camera')?.[0].extensions;
+  expect(extensions).toEqual(['jpg', 'jpeg', 'jpe', 'camera']);
+  expect(filtersFor('.pdf')?.[0].extensions).toEqual(['pdf']);
 });
 
 test('accepting anything leaves the dialog unfiltered', () => {
@@ -249,6 +294,22 @@ test('Android saves downloads to the public Downloads collection', async () => {
   expect(mocks.androidFs.scanPublicFile).toHaveBeenCalledWith({ uri: 'content://downloads/file' });
 });
 
+test('Android names a download with no extension after its bytes and drops path characters (#1139)', async () => {
+  mocks.isTauri.mockReturnValue(true);
+  mocks.osType.mockReturnValue('android');
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(png)));
+
+  await expect(saveFile('blob:avatar', 'she/her')).resolves.toBe('saved');
+
+  expect(mocks.androidFs.createNewPublicFile).toHaveBeenCalledWith(
+    'Download',
+    'she_her.png',
+    'image/png',
+    { isPending: true, requestPermission: true }
+  );
+});
+
 test('Android saves images to the public Pictures collection', async () => {
   mocks.isTauri.mockReturnValue(true);
   mocks.osType.mockReturnValue('android');
@@ -263,6 +324,60 @@ test('Android saves images to the public Pictures collection', async () => {
     'photo.jpg',
     'image/jpeg',
     { isPending: true, requestPermission: true }
+  );
+});
+
+test('Android retries a public image under a new name when MediaStore refuses the first (#1165)', async () => {
+  mocks.isTauri.mockReturnValue(true);
+  mocks.osType.mockReturnValue('android');
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]))));
+  vi.spyOn(Date, 'now').mockReturnValue(1000);
+  mocks.androidFs.createNewPublicImageFile
+    .mockRejectedValueOnce(new Error('Failed to build unique file'))
+    .mockResolvedValueOnce({ uri: 'content://pictures/second' });
+
+  await expect(saveImageToPhotos('https://example.org/image.png', 'image.png')).resolves.toBe(
+    'saved'
+  );
+
+  expect(mocks.androidFs.createNewPublicImageFile).toHaveBeenLastCalledWith(
+    'Pictures',
+    'image-1000.png',
+    'image/png',
+    { isPending: true, requestPermission: true }
+  );
+  expect(mocks.androidFs.writeFile).toHaveBeenCalledWith(
+    { uri: 'content://pictures/second' },
+    new Uint8Array([1, 2, 3])
+  );
+});
+
+test('Android retries the whole save when MediaStore runs out of names on publishing (#1441)', async () => {
+  mocks.isTauri.mockReturnValue(true);
+  mocks.osType.mockReturnValue('android');
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]))));
+  vi.spyOn(Date, 'now').mockReturnValue(1000);
+  mocks.androidFs.createNewPublicImageFile
+    .mockResolvedValueOnce({ uri: 'content://pictures/first' })
+    .mockResolvedValueOnce({ uri: 'content://pictures/second' });
+  mocks.androidFs.setPublicFilePending.mockRejectedValueOnce(
+    new Error('Failed to build unique file')
+  );
+
+  await expect(saveImageToPhotos('https://example.org/image.png', 'image.png')).resolves.toBe(
+    'saved'
+  );
+
+  expect(mocks.androidFs.removeFile).toHaveBeenCalledWith({ uri: 'content://pictures/first' });
+  expect(mocks.androidFs.createNewPublicImageFile).toHaveBeenLastCalledWith(
+    'Pictures',
+    'image-1000.png',
+    'image/png',
+    { isPending: true, requestPermission: true }
+  );
+  expect(mocks.androidFs.setPublicFilePending).toHaveBeenLastCalledWith(
+    { uri: 'content://pictures/second' },
+    false
   );
 });
 
@@ -297,6 +412,19 @@ test('iOS sends image bytes to the native Photos command', async () => {
   });
 });
 
+test('iOS sends video bytes and their media type to Photos', async () => {
+  mocks.isTauri.mockReturnValue(true);
+  mocks.osType.mockReturnValue('ios');
+  mocks.invoke.mockResolvedValue(undefined);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]))));
+  await expect(saveVideoToPhotos('blob:video', 'clip.mov', 'video/quicktime')).resolves.toBe(
+    'saved'
+  );
+  expect(mocks.invoke).toHaveBeenCalledWith('save_media_to_photos', new Uint8Array([1, 2, 3]), {
+    headers: { filename: 'clip.mov', 'mime-type': 'video%2Fquicktime' },
+  });
+});
+
 test('iOS carries a non-ASCII filename a header value cannot hold', async () => {
   mocks.isTauri.mockReturnValue(true);
   mocks.osType.mockReturnValue('ios');
@@ -313,18 +441,15 @@ test('iOS carries a non-ASCII filename a header value cannot hold', async () => 
   for (const value of Object.values(headers)) expect(value).toMatch(/^[ -~]*$/);
 });
 
-test('the share sheet is native everywhere it exists, and nowhere on the web', async () => {
+test('the share sheet is native everywhere it exists, and nowhere on the web', () => {
   mocks.isTauri.mockReturnValue(false);
-  expect(await sharesNatively()).toBe(false);
+  expect(sharesNatively()).toBe(false);
 
   mocks.isTauri.mockReturnValue(true);
-  for (const os of ['android', 'ios', 'macos', 'windows']) {
+  for (const os of ['android', 'ios']) {
     mocks.osType.mockReturnValue(os);
-    expect(await sharesNatively()).toBe(true);
+    expect(sharesNatively()).toBe(true);
   }
-
-  mocks.osType.mockReturnValue('linux');
-  expect(await sharesNatively()).toBe(false);
 });
 
 test('sharing writes the media to the cache and hands over a file URL', async () => {
@@ -356,12 +481,11 @@ test('a name iOS could not parse as a URL is reduced to one that it can', async 
   );
 });
 
-test('the sheet anchors from the top on iPad and from the bottom on macOS', async () => {
+test('the sheet anchors from the top of the shared item', async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn(() => Promise.resolve(new Response(new Uint8Array([1]))))
   );
-  vi.stubGlobal('window', { innerHeight: 800 });
   const anchor: DOMRect = {
     x: 20,
     y: 60,
@@ -379,13 +503,6 @@ test('the sheet anchors from the top on iPad and from the bottom on macOS', asyn
   expect(mocks.shareNative).toHaveBeenLastCalledWith(
     '/cache/outgoing-share/holiday.png',
     expect.objectContaining({ position: { x: 20, y: 60 } })
-  );
-
-  mocks.osType.mockReturnValue('macos');
-  expect(await shareFile('blob:media', 'holiday.png', 'image/png', anchor)).toBe('saved');
-  expect(mocks.shareNative).toHaveBeenLastCalledWith(
-    '/cache/outgoing-share/holiday.png',
-    expect.objectContaining({ position: { x: 20, y: 700 } })
   );
 });
 
@@ -422,19 +539,6 @@ test('the staged copy is removed once Android or iOS has taken its own', async (
   mocks.fsRemove.mockClear();
   expect(await shareFile('blob:media', 'holiday.png')).toBe('failed');
   expect(mocks.fsRemove).toHaveBeenCalledWith('/cache/outgoing-share/holiday.png');
-});
-
-test('the staged file stays on macOS and Windows, where the sheet reads it in place', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(() => Promise.resolve(new Response(new Uint8Array([1]))))
-  );
-
-  for (const os of ['macos', 'windows']) {
-    mocks.osType.mockReturnValue(os);
-    await shareFile('blob:media', 'holiday.png');
-  }
-  expect(mocks.fsRemove).not.toHaveBeenCalled();
 });
 
 test('a failed cleanup does not turn a share into a failure', async () => {
@@ -508,4 +612,72 @@ test('a browser saves a url through a download link', async () => {
 
   expect(link).toMatchObject({ href: 'blob:clip', download: 'clip.mp4' });
   expect(link.click).toHaveBeenCalledOnce();
+});
+
+test('Electron saves natively, having a dialog of its own', () => {
+  expect(savesNatively()).toBe(false);
+
+  stubElectron({});
+
+  expect(savesNatively()).toBe(true);
+});
+
+test('Electron opens the native dialog and hands back the files', async () => {
+  const pick = vi
+    .fn<ElectronBridge['pickFiles']>()
+    .mockResolvedValue([{ name: 'photo.jpg', bytes: new Uint8Array([1, 2, 3]) }]);
+  stubElectron({ pickFiles: pick });
+
+  const files = await pickFiles('image/*');
+
+  expect(pick).toHaveBeenCalledOnce();
+  const request = pick.mock.calls[0][0];
+  expect(request.multiple).toBe(true);
+  expect(request.filters.flatMap((filter) => filter.extensions)).toContain('jpg');
+  expect(files?.map(({ name, type }) => ({ name, type }))).toEqual([
+    { name: 'photo.jpg', type: 'image/jpeg' },
+  ]);
+});
+
+test('a cancelled Electron dialog leaves the caller without files', async () => {
+  stubElectron({ pickFiles: vi.fn().mockResolvedValue([]) });
+
+  expect(await pickFiles('image/*')).toEqual([]);
+});
+
+test('a refused Electron pick reports the failure rather than throwing', async () => {
+  stubElectron({ pickFiles: vi.fn().mockRejectedValue(new Error('no dialog')) });
+  const onFailure = vi.fn();
+
+  await expect(pickFiles('image/*', onFailure)).resolves.toEqual([]);
+  expect(onFailure).toHaveBeenCalled();
+});
+
+test('Electron saves through the native dialog', async () => {
+  const save = vi.fn().mockResolvedValue({ path: '/tmp/wave.png' });
+  stubElectron({ saveFile: save });
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]))));
+
+  await expect(saveFile('blob:wave', 'wave.png')).resolves.toBe('saved');
+
+  expect(save).toHaveBeenCalledWith(
+    expect.objectContaining({ name: 'wave.png', askLocation: true })
+  );
+});
+
+test('a cancelled Electron save is not reported as a failure', async () => {
+  stubElectron({ saveFile: vi.fn().mockResolvedValue(null) });
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1]))));
+
+  await expect(saveFile('blob:wave', 'wave.png')).resolves.toBe('cancelled');
+});
+
+test('an Electron download skips the dialog when it is not asked about', async () => {
+  const save = vi.fn().mockResolvedValue({ path: '/dl/wave.png' });
+  stubElectron({ saveFile: save });
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]))));
+
+  await expect(saveFile('blob:wave', 'wave.png', false)).resolves.toBe('saved');
+
+  expect(save).toHaveBeenCalledWith(expect.objectContaining({ askLocation: false }));
 });

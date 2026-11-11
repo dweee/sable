@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { panelIn, panelOut, usePanelStage } from '#lib/ui/motion.js';
   import type { MemberView, TimelineItemView } from '#src/generated/protocol';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import XIcon from 'phosphor-svelte/lib/XIcon';
@@ -6,9 +7,9 @@
   import BackIcon from 'phosphor-svelte/lib/CaretLeftIcon';
 
   import { page } from '$app/state';
+  import { readText, writeText } from '#lib/platform/local-json.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { personaSpaces } from '#lib/features/composer/persona-spaces.js';
-  import { readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
   import { i18n } from '#lib/i18n.js';
   import type { MatrixLink } from '#lib/rooms/matrix-link.js';
   import { usePersonaStore } from '#lib/personas/personas.svelte.js';
@@ -22,8 +23,9 @@
   import ConversationComposer from './ConversationComposer.svelte';
   import InlineEdit from './InlineEdit.svelte';
   import { Conversation } from './conversation.svelte.js';
-  import { timelineMediaItems } from '../media/media-items.js';
-  import MediaViewer from '../media/MediaViewer.svelte';
+  import { donateSentMessage } from '#lib/features/share/donate-sent-message.js';
+  import { timelineMediaItems } from '#lib/ui/media/media-items.js';
+  import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
   import { replyPreviewBody } from '../messages/reply-preview.js';
   import TimelineList from '../timeline/TimelineList.svelte';
   import {
@@ -75,18 +77,18 @@
     onMatrixLink,
     onCopyLink,
   }: Props = $props();
+  const stage = usePanelStage();
 
   let composer = $state<ConversationComposer>();
   let timelineList = $state<TimelineList>();
   let panel = $state<HTMLElement>();
   const widthStorageKey = 'sable-thread-panel-width';
-  const storedWidth = Number.parseFloat(localStorage.getItem(widthStorageKey) ?? '');
+  const storedWidth = Number.parseFloat(readText(widthStorageKey) ?? '');
   let width = $state(Number.isFinite(storedWidth) ? clampThreadPanelWidth(storedWidth) : 27.5);
   const swipe = new SwipeBack({
     width: () => panel?.clientWidth ?? 0,
     onDismiss: () => onClose(),
   });
-  let mediaEventId = $state<string | null>(null);
 
   const core = useCoreClient();
   const personas = usePersonaStore();
@@ -101,12 +103,19 @@
     encrypted: () => encrypted,
     threadRoot: untrack(() => rootEventId),
     beforeSend: () => returnToThread(),
+    afterSend: (id) => donateSentMessage(core, roomList.byId(id)),
   });
 
   function returnToThread(): Promise<void> {
     return timeline.mode.kind === 'focused'
       ? timeline.startThread(roomId, rootEventId)
       : Promise.resolve();
+  }
+
+  function jumpToEvent(eventId: string): void {
+    if (!timelineList?.jumpToEvent(eventId)) {
+      focusEventId = eventId;
+    }
   }
 
   $effect(() => {
@@ -154,7 +163,9 @@
     timeline.items.find((item) => item.event_id === rootEventId) ?? rootMessage
   );
   let topic = $derived(
-    original ? replyPreviewBody(original.content).replace(/\s+/g, ' ').trim() : ''
+    original
+      ? (original.forum_title ?? replyPreviewBody(original.content).replace(/\s+/g, ' ').trim())
+      : ''
   );
 
   function requestHistory(): Promise<boolean> {
@@ -169,7 +180,6 @@
     await core.rpc.timeline.markRead({
       room_id: roomId,
       event_id: eventId,
-      private_receipt: readReceiptIsPrivate(),
       thread_root: rootEventId,
       subscription: timeline.subscriptionId,
       fully_read: false,
@@ -193,6 +203,8 @@
 
 <section
   bind:this={panel}
+  in:panelIn|global={{ cover: !sidePanel, stage }}
+  out:panelOut|global={{ cover: !sidePanel, stage }}
   class={['thread-view', { 'side-panel': sidePanel, swiping: swipe.swiping }]}
   style:width={sidePanel ? `${width}rem` : undefined}
   style:transform={swipe.transform}
@@ -245,7 +257,7 @@
           Number.parseFloat(getComputedStyle(document.documentElement).fontSize)
         )}
       onResize={(next) => (width = clampThreadPanelWidth(next))}
-      onCommit={() => localStorage.setItem(widthStorageKey, String(width))}
+      onCommit={() => writeText(widthStorageKey, String(width))}
     />
   {/if}
 
@@ -261,7 +273,8 @@
     {timeline}
     {focusEventId}
     threadRootId={rootEventId}
-    onRetryLoad={() => timeline.startThread(roomId, rootEventId)}
+    onRetryLoad={() => timeline.retry()}
+    onJumpToEvent={jumpToEvent}
     onJumpToLive={timeline.mode.kind === 'focused' ? () => void returnToThread() : undefined}
     {roomId}
     {members}
@@ -274,7 +287,10 @@
     {onMatrixLink}
     onMentionUser={(userId, name) => composer?.insertMention(userId, name)}
     {onCopyLink}
-    onOpenMedia={(eventId) => (mediaEventId = eventId)}
+    onOpenMedia={(eventId) =>
+      mediaViewerState.openPanel(timelineMediaItems(timeline.items), eventId, (target) => {
+        timelineList?.jumpToEvent(target);
+      })}
     onRequestHistory={requestHistory}
     onRequestFuture={requestFuture}
     onRead={markRead}
@@ -307,13 +323,6 @@
     />
   </div>
 </section>
-{#if mediaEventId}
-  <MediaViewer
-    items={timelineMediaItems(timeline.items)}
-    selectedEventId={mediaEventId}
-    onClose={() => (mediaEventId = null)}
-  />
-{/if}
 
 <style>
   .thread-view {
@@ -357,7 +366,7 @@
     padding-bottom: max(var(--space-200), var(--edge-inset-bottom));
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .thread-composer {
       --composer-band: calc(var(--sidebar-footer-height) - 2 * var(--space-300));
 

@@ -14,6 +14,14 @@ inputs:
     description: rust-cache's shared-key.
     required: false
     default: 'wasm'
+  rust-cache-targets:
+    description: Cache compiled Cargo dependencies.
+    required: false
+    default: 'false'
+  rust-cache-save:
+    description: Allow cache writes outside main.
+    required: false
+    default: 'false'
   install-mise-tools:
     description: Whether to install tools declared in .mise/config.toml.
     required: false
@@ -28,15 +36,18 @@ runs:
     - name: Set up Node.js
       uses: https://github.com/actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
-        node-version: 24.21.0
+        node-version: 26.13.0
         cache: pnpm
 
     - name: Set up mise
-      uses: https://github.com/jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      uses: https://github.com/jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
       with:
-        version: '2026.10.4'
+        version: '2026.10.25'
         github_token: ''
         cache: true
+        # Include tools installed by later steps.
+        cache_save_post: ${{ inputs.install-mise-tools == 'false' }}
+        cache_key_prefix: ${{ inputs.install-mise-tools == 'false' && 'mise-deferred-v1' || 'mise-v1' }}
         env: false
         install: ${{ inputs.install-mise-tools }}
 
@@ -58,26 +69,26 @@ runs:
 
     - name: Set up Rust
       if: ${{ inputs.rust == 'true' || (inputs.build == 'true' && steps.wasm.outputs.cache-hit != 'true') }}
-      uses: https://github.com/dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      uses: https://github.com/dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
       with:
-        toolchain: 1.99.0
+        toolchain: 1.99.1
         targets: wasm32-unknown-unknown
         components: llvm-tools
 
     - name: Install sccache
       if: ${{ inputs.rust == 'true' || (inputs.build == 'true' && steps.wasm.outputs.cache-hit != 'true') }}
-      uses: https://github.com/taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+      uses: https://github.com/taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
       with:
         tool: sccache@0.18.0
 
     - name: Cache Rust artifacts
       if: ${{ inputs.rust == 'true' || (inputs.build == 'true' && steps.wasm.outputs.cache-hit != 'true') }}
-      uses: https://github.com/Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      uses: https://github.com/Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         shared-key: ${{ inputs.rust-cache-key }}
         cache-on-failure: true
-        cache-targets: false
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        cache-targets: ${{ inputs.rust-cache-targets }}
+        save-if: ${{ github.ref == 'refs/heads/main' || inputs.rust-cache-save == 'true' }}
 
     - name: Install JavaScript dependencies
       shell: bash
@@ -116,4 +127,8 @@ runs:
       if: ${{ inputs.build == 'true' }}
       shell: bash
       working-directory: ${{ github.workspace }}
-      run: node scripts/ci/upload-sentry-sourcemaps.mjs dist
+      run: |
+        node scripts/ci/upload-sentry-sourcemaps.mjs dist
+        if [ -n "${VITE_SENTRY_DSN:-}" ]; then
+          pnpm exec sentry-cli debug-files upload src/generated/wasm/debug
+        fi

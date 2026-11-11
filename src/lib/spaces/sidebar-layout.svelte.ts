@@ -3,10 +3,11 @@ import { SvelteSet } from 'svelte/reactivity';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { t } from '#lib/i18n.js';
+import { setSidebarSpaceOrder } from '#lib/rooms/permalink.js';
 import { readJson, writeJson } from '#lib/platform/local-json.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 
-import { isFolder, sameLayout, type SidebarItem } from './sidebar-layout.js';
+import { isFolder, layoutSpaceIds, sameLayout, type SidebarItem } from './sidebar-layout.js';
 
 const OPEN_FOLDERS_KEY = 'sable-open-space-folders';
 
@@ -26,12 +27,16 @@ export class SpaceSidebar {
   private core: CoreClient | null = null;
   private unsubscribeEvents: (() => void) | null = null;
   private generation = 0;
+  private revision = 0;
+  private loaded = false;
   private pending: { items: SidebarItem[]; stored: boolean } | null = null;
 
   async start(core: CoreClient): Promise<void> {
     const generation = ++this.generation;
+    const revision = this.revision;
     this.core = core;
     this.pending = null;
+    this.loaded = false;
 
     this.unsubscribeEvents?.();
     this.unsubscribeEvents = core.subscribeEvents((event) => {
@@ -42,7 +47,7 @@ export class SpaceSidebar {
 
     try {
       const items = await core.rpc.spaces.sidebar();
-      if (generation === this.generation) this.setItems(items);
+      if (generation === this.generation && revision === this.revision) this.setItems(items);
     } catch (error) {
       console.debug('[sable nav] space layout unavailable', error);
     }
@@ -53,6 +58,7 @@ export class SpaceSidebar {
     this.core = null;
     this.items = [];
     this.pending = null;
+    this.loaded = false;
     this.unsubscribeEvents?.();
     this.unsubscribeEvents = null;
   }
@@ -60,6 +66,10 @@ export class SpaceSidebar {
   write(items: SidebarItem[]): void {
     const core = this.core;
     if (core === null) return;
+    if (!this.loaded) {
+      toasts.error(t('errors.actionFailed'));
+      return;
+    }
 
     const previous = this.items;
     const previousOpen = [...this.openFolders];
@@ -93,6 +103,13 @@ export class SpaceSidebar {
     this.persistOpenFolders();
   }
 
+  collapseAllFolders(): void {
+    if (this.openFolders.size === 0) return;
+
+    this.openFolders.clear();
+    this.persistOpenFolders();
+  }
+
   private receive(items: SidebarItem[]): void {
     const pending = this.pending;
     if (pending !== null) {
@@ -105,7 +122,10 @@ export class SpaceSidebar {
   }
 
   private setItems(items: SidebarItem[]): void {
+    this.revision += 1;
+    this.loaded = true;
     this.items = items;
+    setSidebarSpaceOrder(layoutSpaceIds(items));
 
     // eslint-disable-next-line svelte/prefer-svelte-reactivity
     const folderIds = new Set(items.filter(isFolder).map((folder) => folder.id));

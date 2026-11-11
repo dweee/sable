@@ -1286,7 +1286,7 @@ test('a message the reader sends from the bottom is followed on every frame', as
   timeline,
   core,
   installRoomCore,
-  isMobile,
+  hasTouch,
 }) => {
   await installRoomCore('ready');
   await page.setViewportSize({ width: 900, height: 420 });
@@ -1316,7 +1316,8 @@ test('a message the reader sends from the bottom is followed on every frame', as
         .poll(() => app.composer.evaluate((node) => node.getBoundingClientRect().height))
         .toBeGreaterThan(initialComposerHeight);
     }
-    if (send.method === 'button' || isMobile) await app.sendMessage.click();
+    // Enter adds a line on touch screens, so only a keyboard-first browser sends with it.
+    if (send.method === 'button' || hasTouch) await app.sendMessage.click();
     else await app.composer.press('Enter');
     await expect
       .poll(
@@ -1360,7 +1361,7 @@ test('a message the reader sends from the bottom is followed on every frame', as
               diffs: [
                 {
                   op: 'set',
-                  index: Number(row.dataset.index),
+                  index: window.__e2eTimelineIndexOf(subscription, echo.id),
                   value: {
                     ...echo,
                     event_id: `$${echo.id}`,
@@ -1413,8 +1414,7 @@ test('deleting the last composer character keeps following latest', async ({
           kind: 'message',
           body: linkBody,
           html: 'A link preview <a href="https://example.test/article">https://example.test/article</a>',
-          emote: false,
-          notice: false,
+          msgtype: 'text',
           edited: false,
         },
       },
@@ -1527,8 +1527,7 @@ test('follows sent links after scrolling back to the bottom in Firefox', async (
           kind: 'message',
           body,
           html: 'Firefox regression <a href="https://example.test/article">https://example.test/article</a>',
-          emote: false,
-          notice: false,
+          msgtype: 'text',
           edited: false,
         },
       },

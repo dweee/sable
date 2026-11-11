@@ -1,13 +1,12 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { crc32, deflateSync, inflateSync } from 'node:zlib';
+import { PNG } from 'pngjs';
 
 const root = join(import.meta.dirname, '../..');
 const outDir = join(root, 'src-tauri', 'icons', 'installer');
 const iconPath = join(root, 'src-tauri', 'icons', 'icon.png');
 
 const BG = [0x24, 0x23, 0x2c, 255];
-const WIX_TEXT_BG = [255, 255, 255, 255];
 const ACCENT = [0x99, 0x87, 0xf7, 255];
 const MUTED = [0x40, 0x3f, 0x4c, 255];
 const ARROW = [0xbd, 0xb6, 0xec, 180];
@@ -219,79 +218,7 @@ function flattenRgb(img, i) {
 }
 
 function decodePng(buffer) {
-  if (buffer.subarray(0, 8).compare(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) !== 0) {
-    throw new Error('not a PNG');
-  }
-  let offset = 8;
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  const idat = [];
-  while (offset + 8 <= buffer.length) {
-    const length = buffer.readUInt32BE(offset);
-    const type = buffer.subarray(offset + 4, offset + 8).toString('binary');
-    const data = buffer.subarray(offset + 8, offset + 8 + length);
-    offset += 12 + length;
-    if (type === 'IHDR') {
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
-      bitDepth = data[8];
-      colorType = data[9];
-    } else if (type === 'IDAT') {
-      idat.push(data);
-    } else if (type === 'IEND') {
-      break;
-    }
-  }
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
-    throw new Error(`unsupported PNG (bitDepth=${bitDepth} colorType=${colorType})`);
-  }
-  const channels = colorType === 6 ? 4 : 3;
-  const inflated = inflateSync(Buffer.concat(idat));
-  const stride = width * channels;
-  const rgba = Buffer.alloc(width * height * 4);
-  let src = 0;
-  let prev = Buffer.alloc(stride);
-  for (let y = 0; y < height; y += 1) {
-    const filter = inflated[src++];
-    const row = Buffer.from(inflated.subarray(src, src + stride));
-    src += stride;
-    applyPngFilter(filter, row, prev, channels);
-    for (let x = 0; x < width; x += 1) {
-      const di = (y * width + x) * 4;
-      const si = x * channels;
-      rgba[di] = row[si];
-      rgba[di + 1] = row[si + 1];
-      rgba[di + 2] = row[si + 2];
-      rgba[di + 3] = channels === 4 ? row[si + 3] : 255;
-    }
-    prev = row;
-  }
-  return { width, height, data: rgba };
-}
-
-function applyPngFilter(filter, row, prev, channels) {
-  for (let i = 0; i < row.length; i += 1) {
-    const left = i >= channels ? row[i - channels] : 0;
-    const up = prev[i];
-    const upLeft = i >= channels ? prev[i - channels] : 0;
-    if (filter === 1) row[i] = (row[i] + left) & 255;
-    else if (filter === 2) row[i] = (row[i] + up) & 255;
-    else if (filter === 3) row[i] = (row[i] + ((left + up) >> 1)) & 255;
-    else if (filter === 4) row[i] = (row[i] + paeth(left, up, upLeft)) & 255;
-    else if (filter !== 0) throw new Error(`unsupported PNG filter ${filter}`);
-  }
-}
-
-function paeth(a, b, c) {
-  const p = a + b - c;
-  const pa = Math.abs(p - a);
-  const pb = Math.abs(p - b);
-  const pc = Math.abs(p - c);
-  if (pa <= pb && pa <= pc) return a;
-  if (pb <= pc) return b;
-  return c;
+  return PNG.sync.read(buffer);
 }
 
 function encodeBmp(img) {
@@ -323,40 +250,17 @@ function encodeBmp(img) {
 }
 
 function encodePng(img) {
-  const stride = img.width * 3;
-  const raw = Buffer.alloc((stride + 1) * img.height);
-  for (let y = 0; y < img.height; y += 1) {
-    const rowStart = y * (stride + 1);
-    raw[rowStart] = 0;
-    for (let x = 0; x < img.width; x += 1) {
-      const [r, g, b] = flattenRgb(img, (y * img.width + x) * 4);
-      const di = rowStart + 1 + x * 3;
-      raw[di] = r;
-      raw[di + 1] = g;
-      raw[di + 2] = b;
-    }
+  const data = Buffer.alloc(img.width * img.height * 3);
+  for (let pixel = 0; pixel < img.width * img.height; pixel += 1) {
+    const [red, green, blue] = flattenRgb(img, pixel * 4);
+    data[pixel * 3] = red;
+    data[pixel * 3 + 1] = green;
+    data[pixel * 3 + 2] = blue;
   }
-
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(img.width, 0);
-  ihdr.writeUInt32BE(img.height, 4);
-  ihdr[8] = 8;
-  ihdr[9] = 2;
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', deflateSync(raw, { level: 9 })),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ]);
-}
-
-function pngChunk(type, data) {
-  const typeBuf = Buffer.from(type, 'ascii');
-  const length = Buffer.alloc(4);
-  length.writeUInt32BE(data.length, 0);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
-  return Buffer.concat([length, typeBuf, data, crc]);
+  return PNG.sync.write(
+    { width: img.width, height: img.height, data },
+    { inputColorType: 2, colorType: 2, filterType: 0, deflateLevel: 9 }
+  );
 }
 
 async function writeAsset(name, img, encode) {
@@ -376,17 +280,6 @@ async function main() {
   fillRect(sidebar, 0, 0, 163, 5, ACCENT);
   pasteLogo(sidebar, logo, 96, 82, 120);
   await writeAsset('nsis-sidebar.bmp', sidebar, encodeBmp);
-
-  const banner = solid(493, 58, WIX_TEXT_BG);
-  fillRect(banner, 0, 0, 5, 57, ACCENT);
-  pasteLogo(banner, logo, 44, 453, 29);
-  await writeAsset('wix-banner.bmp', banner, encodeBmp);
-
-  const dialog = solid(493, 312, WIX_TEXT_BG);
-  fillRect(dialog, 0, 0, 163, 311, BG);
-  fillRect(dialog, 0, 0, 163, 5, ACCENT);
-  pasteLogo(dialog, logo, 120, 82, 140);
-  await writeAsset('wix-dialog.bmp', dialog, encodeBmp);
 
   const dmg = solid(660, 400);
   fillRect(dmg, 0, 0, 659, 3, ACCENT);

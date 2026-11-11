@@ -4,7 +4,8 @@ import type { RoomPermissionsView } from '#src/generated/protocol';
 import { render, screen, within } from '@testing-library/svelte';
 import { userEvent } from '@testing-library/user-event';
 import { tick, type ComponentProps } from 'svelte';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { Window as HappyDOMWindow } from 'happy-dom';
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 
 import type { RoomListItemView } from '#src/generated/protocol';
 
@@ -13,7 +14,7 @@ vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
 
 import { visit } from '#lib/test-support/app-state.js';
-import { navigated } from '#lib/test-support/app-navigation.js';
+import { goto, navigated } from '#lib/test-support/app-navigation.js';
 vi.mock('$app/paths', () => ({
   resolve: (path: string, params: Record<string, string> = {}) => {
     const resolved = (path.startsWith('/') ? path : `/${path}`).replace(
@@ -28,9 +29,15 @@ vi.mock('#lib/rooms/room-list.svelte.js', () => ({
   roomPathParam: (room: RoomListItemView) => encodeURIComponent(room.room_id),
   findRoomByPathId: (rooms: RoomListItemView[], pathId: string) =>
     rooms.find((room) => room.room_id === pathId || room.canonical_alias === pathId),
-  useRoomList: () => ({ rooms: listed, quietRoomIds: new Set() }),
+  useRoomList: () => ({
+    rooms: listed,
+    quietRoomIds: new Set(),
+    section: () => undefined,
+    byId: (roomId: string) => listed.find((room) => room.room_id === roomId),
+  }),
 }));
 vi.mock('#lib/core/context.js');
+vi.mock('#lib/ui/MediaImage.svelte', () => import('./MediaImageProbe.test.svelte'));
 
 import { core } from '#lib/core/__mocks__/context.js';
 import type { SidebarFolder } from '#lib/spaces/sidebar-layout.js';
@@ -44,8 +51,10 @@ import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
 import NavigationRail from './NavigationRail.svelte';
 import { LONG_PRESS_MS } from '#lib/ui/long-press.svelte.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
+import { setBridgedSpace } from '#lib/rooms/bridged-spaces.svelte.js';
 import { withCounts } from '#lib/rooms/summary-fixtures.js';
 import { savedSpacePaths, spaceNavigationHref } from './space-paths.js';
+import { reads as mediaImageReads } from './media-image-reads.test-support.js';
 
 beforeEach(() => {
   visit('/home');
@@ -53,6 +62,8 @@ beforeEach(() => {
 
 afterEach(() => {
   localStorage.clear();
+  listed.length = 0;
+  goto.mockClear();
   setPreference('showHome', false);
   setPreference('showSearch', true);
 });
@@ -63,9 +74,9 @@ function renderRail(
   return render(NavigationRail, options, { wrapper: TooltipProvider });
 }
 const user = userEvent.setup();
-const tab = (name: string) => screen.getByRole('link', { name });
+const tab = (name: string) => screen.getByRole('treeitem', { name });
 const linkTo = (href: string) =>
-  screen.queryAllByRole('link').find((link) => link.getAttribute('href') === href) ?? null;
+  screen.queryAllByRole('treeitem').find((link) => link.getAttribute('href') === href) ?? null;
 const spaceOrder = () =>
   [...document.querySelectorAll('.rail-slot a')].map((link) => link.getAttribute('aria-label'));
 
@@ -85,6 +96,7 @@ function space(roomId = '!space:example.org', name = 'Space'): RoomListItemView 
     canonical_alias: null,
     name,
     topic: null,
+    topic_html: null,
     avatar_url: null,
     is_direct: false,
     direct_targets: [],
@@ -100,6 +112,7 @@ function space(roomId = '!space:example.org', name = 'Space'): RoomListItemView 
     supports_restricted: true,
     supports_knock_restricted: true,
     space_children: [],
+    bridge: null,
     unread: 0,
     notifying: 0,
     highlight: 0,
@@ -177,7 +190,7 @@ test('search leaves the rail when the preference is off', async () => {
   setPreference('showSearch', false);
   await tick();
 
-  expect(screen.queryByRole('link', { name: 'common.searchMessages' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('treeitem', { name: 'common.searchMessages' })).not.toBeInTheDocument();
 });
 
 test('uses a dot for ordinary unread messages outside spaces', async () => {
@@ -195,6 +208,7 @@ test('shows unread direct rooms as individual avatars', async () => {
     canonical_alias: null,
     name: 'Alice',
     topic: null,
+    topic_html: null,
     avatar_url: null,
     is_direct: true,
     direct_targets: [],
@@ -210,6 +224,7 @@ test('shows unread direct rooms as individual avatars', async () => {
     supports_restricted: true,
     supports_knock_restricted: true,
     space_children: [],
+    bridge: null,
     unread: 2,
     notifying: 2,
     highlight: 0,
@@ -250,6 +265,48 @@ test('badges a space with its mentions and dots one with only unread messages', 
   expect(tab('nav.unspaced')).toHaveAccessibleDescription('');
 });
 
+test('a space where someone is in voice says so, and one with your call keeps its own mark', async () => {
+  renderRail({
+    props: {
+      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+      voiceSpaces: new Set(['!a:example.org', '!b:example.org']),
+      callSpaces: new Set(['!b:example.org']),
+      mobile: true,
+    },
+  });
+  await tick();
+
+  expect(tab('Alpha').querySelector('.call-mark.others')).toBeInTheDocument();
+  expect(tab('Alpha')).toHaveAccessibleDescription('nav.voiceActive');
+  expect(tab('Beta').querySelector('.call-mark.others')).not.toBeInTheDocument();
+  expect(tab('Beta').querySelector('.call-mark')).toBeInTheDocument();
+});
+
+test('a space badge follows unread changes without re-running its avatar', async () => {
+  const alpha = { ...space('!a:example.org', 'Alpha'), avatar_url: 'mxc://example.org/alpha' };
+  const { rerender } = renderRail({
+    props: {
+      spaces: [alpha],
+      spaceUnread: new Map([['!a:example.org', { unread: 1, highlight: 0 }]]),
+      mobile: true,
+    },
+  });
+  await tick();
+  const reads = mediaImageReads.count;
+
+  await rerender({
+    spaces: [alpha],
+    spaceUnread: new Map([['!a:example.org', { unread: 2, highlight: 1 }]]),
+    mobile: true,
+  });
+  await tick();
+
+  expect(within(tab('Alpha')).getByText('1').closest('.unread-badge')).toHaveClass(
+    'unread-badge-count'
+  );
+  expect(mediaImageReads.count).toBe(reads);
+});
+
 test('outlines every tab but a space avatar', async () => {
   renderRail({ spaces: [space('!a:example.org', 'Alpha')], mobile: true });
   await tick();
@@ -263,7 +320,6 @@ test('opens a space on its lobby when there is nothing to restore', () => {
     spaceNavigationHref(
       '/space/!space%3Aexample.org',
       undefined,
-      false,
       '/space/!space%3Aexample.org/lobby'
     )
   ).toBe('/space/!space%3Aexample.org/lobby');
@@ -271,7 +327,6 @@ test('opens a space on its lobby when there is nothing to restore', () => {
     spaceNavigationHref(
       '/space/!space%3Aexample.org',
       '/home/!room%3Aexample.org',
-      false,
       '/space/!space%3Aexample.org/lobby'
     )
   ).toBe('/space/!space%3Aexample.org/lobby');
@@ -329,7 +384,6 @@ test('restores a space to its last desktop route', () => {
     spaceNavigationHref(
       '/space/!space%3Aexample.org',
       '/space/!space%3Aexample.org/!room%3Aexample.org?event=%24event',
-      false,
       '/space/!space%3Aexample.org/lobby'
     )
   ).toBe('/space/!space%3Aexample.org/!room%3Aexample.org?event=%24event');
@@ -337,7 +391,6 @@ test('restores a space to its last desktop route', () => {
     spaceNavigationHref(
       '/space/!space%3Aexample.org',
       '/home/!room%3Aexample.org',
-      false,
       '/space/!space%3Aexample.org/lobby'
     )
   ).toBe('/space/!space%3Aexample.org/lobby');
@@ -393,15 +446,109 @@ test('opens the lobby when a search route was saved by an older client', async (
   expect(tab('Space')).toHaveAttribute('href', '/space/!space%3Aexample.org/lobby');
 });
 
-test('opens a space root on mobile even when it has a saved route', async () => {
-  localStorage.setItem(
-    'sable-space-paths',
-    JSON.stringify({ '!space:example.org': '/space/!space%3Aexample.org/!room%3Aexample.org' })
-  );
+function onPhone(): void {
+  const happyDOM = (window as unknown as HappyDOMWindow).happyDOM;
+  const size = { width: window.innerWidth, height: window.innerHeight };
+  happyDOM.setViewport({ width: 390, height: 844 });
+  onTestFinished(() => {
+    happyDOM.setViewport(size);
+  });
+}
+
+const spaceRoom = '/space/!space%3Aexample.org/!room%3Aexample.org';
+
+function rememberSpaceRoom(): void {
+  listed.push(space('!room:example.org', 'Room'));
+  localStorage.setItem('sable-space-paths', JSON.stringify({ '!space:example.org': spaceRoom }));
+}
+
+test('opens the last room of a space behind the open drawer on mobile', async () => {
+  onPhone();
+  rememberSpaceRoom();
+  renderRail({ spaces: [space()], mobile: true });
+  await tick();
+
+  expect(tab('Space')).toHaveAttribute('href', spaceRoom);
+  await user.click(tab('Space'));
+
+  expect(goto).toHaveBeenCalledWith(spaceRoom, { replace: false, state: { mobileDrawer: 'open' } });
+});
+
+test('replaces the room behind the drawer when switching tabs from a room on mobile', async () => {
+  onPhone();
+  rememberSpaceRoom();
+  visit('/rooms/!other%3Aexample.org', { roomId: '!other:example.org' });
+  renderRail({ spaces: [space()], mobile: true });
+  await tick();
+
+  await user.click(tab('Space'));
+
+  expect(goto).toHaveBeenCalledWith(spaceRoom, { replace: true, state: { mobileDrawer: 'open' } });
+});
+
+test('does not navigate again when the remembered room is already behind the drawer', async () => {
+  onPhone();
+  rememberSpaceRoom();
+  visit(spaceRoom, { spaceId: '!space:example.org', roomId: '!room:example.org' });
+  renderRail({ spaces: [space()], mobile: true });
+  await tick();
+
+  await user.click(tab('Space'));
+
+  expect(goto).not.toHaveBeenCalled();
+});
+
+test('leaves modified clicks on a remembered room to the browser on mobile', async () => {
+  rememberSpaceRoom();
+  renderRail({ spaces: [space()], mobile: true });
+  await tick();
+  const link = tab('Space');
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true });
+
+  link.dispatchEvent(click);
+
+  expect(click.defaultPrevented).toBe(false);
+  expect(goto).not.toHaveBeenCalled();
+});
+
+test('opens a space root on mobile when its remembered room was left', async () => {
+  listed.push({ ...space('!room:example.org', 'Room'), state: 'left' });
+  localStorage.setItem('sable-space-paths', JSON.stringify({ '!space:example.org': spaceRoom }));
   renderRail({ spaces: [space()], mobile: true });
   await tick();
 
   expect(tab('Space')).toHaveAttribute('href', '/space/!space%3Aexample.org');
+});
+
+test.each(['lobby', 'create-room'])(
+  'opens a space root on mobile when its saved route is the %s page',
+  async (view) => {
+    localStorage.setItem(
+      'sable-space-paths',
+      JSON.stringify({ '!space:example.org': `/space/!space%3Aexample.org/${view}` })
+    );
+    renderRail({ spaces: [space()], mobile: true });
+    await tick();
+
+    expect(tab('Space')).toHaveAttribute('href', '/space/!space%3Aexample.org');
+  }
+);
+
+test('records only room routes on mobile', async () => {
+  renderRail({ spaces: [space()], mobile: true });
+  await tick();
+
+  visit('/space/!space%3Aexample.org/!room%3Aexample.org', {
+    spaceId: '!space:example.org',
+    roomId: '!room:example.org',
+  });
+  navigated();
+  visit('/space/!space%3Aexample.org', { spaceId: '!space:example.org' });
+  navigated();
+
+  expect(savedSpacePaths()).toEqual({
+    '!space:example.org': '/space/!space%3Aexample.org/!room%3Aexample.org',
+  });
 });
 
 test('orders spaces by the stored layout and appends unplaced ones', async () => {
@@ -423,7 +570,13 @@ test('shows a collapsed folder as one tab, with the names of the spaces inside',
     props: {
       spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
       layout: [
-        { kind: 'folder', id: 'f', name: null, content: ['!a:example.org', '!b:example.org'] },
+        {
+          kind: 'folder',
+          id: 'f',
+          name: null,
+          icon: null,
+          content: ['!a:example.org', '!b:example.org'],
+        },
       ],
       spaceUnread: new Map([['!b:example.org', { unread: 3, highlight: 0 }]]),
       openFolders: new Set<string>(),
@@ -433,12 +586,12 @@ test('shows a collapsed folder as one tab, with the names of the spaces inside',
   });
   await tick();
 
-  const folder = screen.getByRole('button', { name: 'nav.folderExpand:Alpha, Beta' });
+  const folder = screen.getByRole('treeitem', { name: 'nav.folderExpand:Alpha, Beta' });
   expect(folder).toHaveAttribute('aria-expanded', 'false');
   expect(folder.querySelectorAll('.folder-tile')).toHaveLength(2);
   expect(folder.querySelector('.unread-badge-dot')).toBeInTheDocument();
   expect(folder).toHaveAccessibleDescription('nav.unreadMessages:3');
-  expect(screen.queryByRole('link', { name: 'Alpha' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('treeitem', { name: 'Alpha' })).not.toBeInTheDocument();
 
   await user.click(folder);
   expect(toggled).toEqual(['f']);
@@ -450,7 +603,13 @@ test('shows the spaces of an open folder, and a way to shut it', async () => {
     props: {
       spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
       layout: [
-        { kind: 'folder', id: 'f', name: 'Work', content: ['!a:example.org', '!b:example.org'] },
+        {
+          kind: 'folder',
+          id: 'f',
+          name: 'Work',
+          icon: null,
+          content: ['!a:example.org', '!b:example.org'],
+        },
       ],
       openFolders: new Set(['f']),
       onToggleFolder: (folderId: string) => toggled.push(folderId),
@@ -459,10 +618,10 @@ test('shows the spaces of an open folder, and a way to shut it', async () => {
   });
   await tick();
 
-  expect(screen.queryByRole('button', { name: /^nav\.folderExpand/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('treeitem', { name: /^nav\.folderExpand/ })).not.toBeInTheDocument();
   expect(spaceOrder()).toEqual(['Alpha', 'Beta']);
 
-  const collapse = screen.getByRole('button', { name: 'nav.folderCollapse:Work' });
+  const collapse = screen.getByRole('treeitem', { name: 'nav.folderCollapse:Work' });
   expect(collapse).toHaveAttribute('aria-expanded', 'true');
   expect(collapse).not.toHaveClass('selection-open');
   await user.click(collapse);
@@ -475,7 +634,13 @@ test('marks every space in a folder as read even when no badge is shown', async 
     props: {
       spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
       layout: [
-        { kind: 'folder', id: 'f', name: null, content: ['!a:example.org', '!b:example.org'] },
+        {
+          kind: 'folder',
+          id: 'f',
+          name: null,
+          icon: null,
+          content: ['!a:example.org', '!b:example.org'],
+        },
       ],
       onMarkFolderRead: (folder: SidebarFolder) => marked.push(...folder.content),
       mobile: true,
@@ -483,7 +648,7 @@ test('marks every space in a folder as read even when no badge is shown', async 
   });
   await tick();
 
-  await openMenu(screen.getByRole('button', { name: 'nav.folderExpand:Alpha, Beta' }));
+  await openMenu(screen.getByRole('treeitem', { name: 'nav.folderExpand:Alpha, Beta' }));
   await user.click(screen.getByRole('menuitem', { name: 'common.markAsRead' }));
 
   expect(marked).toEqual(['!a:example.org', '!b:example.org']);
@@ -494,7 +659,13 @@ test('a space that left the room list drops out of its folder', async () => {
     props: {
       spaces: [space('!a:example.org', 'Alpha')],
       layout: [
-        { kind: 'folder', id: 'f', name: null, content: ['!a:example.org', '!gone:example.org'] },
+        {
+          kind: 'folder',
+          id: 'f',
+          name: null,
+          icon: null,
+          content: ['!a:example.org', '!gone:example.org'],
+        },
       ],
       openFolders: new Set(['f']),
       mobile: true,
@@ -510,7 +681,7 @@ test('offers a way out of a folder holding a single space', async () => {
   renderRail({
     props: {
       spaces: [space('!a:example.org', 'Alpha')],
-      layout: [{ kind: 'folder', id: 'f', name: null, content: ['!a:example.org'] }],
+      layout: [{ kind: 'folder', id: 'f', name: null, icon: null, content: ['!a:example.org'] }],
       openFolders: new Set(['f']),
       onRemoveFromFolder: (roomId: string, folderId: string) => removed.push([roomId, folderId]),
       mobile: true,
@@ -536,7 +707,7 @@ test('a folder whose spaces are all unresolved renders nothing', async () => {
     props: {
       spaces: [space('!a:example.org', 'Alpha')],
       layout: [
-        { kind: 'folder', id: 'f', name: null, content: ['!gone:example.org'] },
+        { kind: 'folder', id: 'f', name: null, icon: null, content: ['!gone:example.org'] },
         { kind: 'space', room_id: '!a:example.org' },
       ],
       mobile: true,
@@ -544,7 +715,7 @@ test('a folder whose spaces are all unresolved renders nothing', async () => {
   });
   await tick();
 
-  expect(screen.queryByRole('button', { name: /^nav\.folderExpand/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('treeitem', { name: /^nav\.folderExpand/ })).not.toBeInTheDocument();
   expect(spaceOrder()).toEqual(['Alpha']);
 });
 
@@ -599,15 +770,14 @@ test('long-pressing a top-level space opens its options menu', async () => {
 });
 
 test('restores the direct tab to its last desktop chat', () => {
-  expect(spaceNavigationHref('/direct', '/direct/!dm%3Aexample.org', false, '/direct')).toBe(
+  expect(spaceNavigationHref('/direct', '/direct/!dm%3Aexample.org', '/direct')).toBe(
     '/direct/!dm%3Aexample.org'
   );
-  expect(spaceNavigationHref('/direct', '/home/!room%3Aexample.org', false, '/direct')).toBe(
-    '/direct'
-  );
+  expect(spaceNavigationHref('/direct', '/home/!room%3Aexample.org', '/direct')).toBe('/direct');
 });
 
-test('opens the direct root on mobile even when it has a saved chat', async () => {
+test('restores the direct tab to its last chat on mobile', async () => {
+  listed.push(space('!dm:example.org', 'DM'));
   localStorage.setItem(
     'sable-space-paths',
     JSON.stringify({ direct: '/direct/!dm%3Aexample.org' })
@@ -615,8 +785,7 @@ test('opens the direct root on mobile even when it has a saved chat', async () =
   renderRail({ spaces: [], mobile: true });
   await tick();
 
-  expect(tab('common.directMessages')).toHaveAttribute('href', '/direct');
-  expect(linkTo('/direct/!dm%3Aexample.org')).not.toBeInTheDocument();
+  expect(tab('common.directMessages')).toHaveAttribute('href', '/direct/!dm%3Aexample.org');
 });
 
 test('records the active desktop direct chat', async () => {
@@ -672,6 +841,21 @@ test('a space opened through the rooms tab does not become the rooms tab target'
   expect(savedSpacePaths().rooms).toBe('/rooms');
 });
 
+test('a space opened through the rooms tab on mobile does not become the rooms tab target', async () => {
+  listed.push(space('!space:example.org'));
+  renderRail({ spaces: [], mobile: true });
+  await tick();
+
+  visit('/rooms/!space%3Aexample.org', { roomId: '!space:example.org' });
+  navigated();
+  visit('/space/!space%3Aexample.org/lobby', { spaceId: '!space:example.org' });
+  navigated();
+  await tick();
+
+  expect(tab('nav.unspaced')).toHaveAttribute('href', '/rooms');
+  expect(savedSpacePaths().rooms).toBe('/rooms');
+});
+
 test('a space joined by address does not become the rooms tab target', async () => {
   listed.push({ ...space('!space:example.org'), canonical_alias: '#space:example.org' });
   renderRail({ spaces: [] });
@@ -697,7 +881,7 @@ test('offers join by address from the add button', async () => {
   });
   await tick();
 
-  await user.click(screen.getByRole('button', { name: 'nav.add' }));
+  await user.click(screen.getByRole('treeitem', { name: 'nav.add' }));
 
   await vi.waitFor(() => {
     expect(labels(screen.getAllByRole('menuitem'))).toEqual([
@@ -711,4 +895,84 @@ test('offers join by address from the add button', async () => {
   await user.click(screen.getByRole('menuitem', { name: 'nav.joinWithAddress' }));
 
   expect(visited).toEqual(['/explore#explore-join-by-address']);
+});
+
+test('the rail is a navigation landmark holding one tree with a single tab stop', async () => {
+  renderRail({
+    props: {
+      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+      layout: [],
+      mobile: true,
+    },
+  });
+  await tick();
+
+  const navigation = screen.getByRole('navigation', { name: 'nav.navigation' });
+  const tree = within(navigation).getByRole('tree', { name: 'nav.navigation' });
+  const stops = within(tree)
+    .getAllByRole('treeitem')
+    .filter((item) => item.tabIndex === 0);
+  expect(stops).toHaveLength(1);
+});
+
+test('arrows walk the rail and an open folder nests its spaces one level down', async () => {
+  const toggled: string[] = [];
+  renderRail({
+    props: {
+      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+      layout: [
+        {
+          kind: 'folder',
+          id: 'f',
+          name: 'Work',
+          icon: null,
+          content: ['!a:example.org', '!b:example.org'],
+        },
+      ],
+      openFolders: new Set(['f']),
+      onToggleFolder: (folderId: string) => toggled.push(folderId),
+      mobile: true,
+    },
+  });
+  await tick();
+
+  expect(tab('Alpha')).toHaveAttribute('aria-level', '2');
+  expect(screen.getAllByRole('group')).toHaveLength(1);
+  const collapse = screen.getByRole('treeitem', { name: 'nav.folderCollapse:Work' });
+  collapse.focus();
+  await user.keyboard('{ArrowDown}');
+  expect(tab('Alpha')).toHaveFocus();
+  await user.keyboard('{ArrowLeft}');
+  expect(collapse).toHaveFocus();
+  await user.keyboard('{ArrowLeft}');
+  expect(toggled).toEqual(['f']);
+});
+
+test('a space marked as bridged carries the network of its rooms', async () => {
+  const bridged = {
+    ...space('!a:example.org', 'Alpha'),
+    space_children: [
+      {
+        room_id: '!child:example.org',
+        via: [],
+        order: null,
+        origin_server_ts: 0,
+        suggested: false,
+      },
+    ],
+  };
+  listed.push({
+    ...space('!child:example.org', 'Child'),
+    room_kind: null,
+    bridge: { network: 'Discord', avatar_url: null },
+  });
+  setBridgedSpace('!a:example.org', true);
+  onTestFinished(() => {
+    setBridgedSpace('!a:example.org', false);
+  });
+  renderRail({ props: { spaces: [bridged, space('!b:example.org', 'Beta')] } });
+  await tick();
+
+  expect(within(tab('Alpha')).getByRole('img', { name: 'nav.bridgedFrom:Discord' })).toBeVisible();
+  expect(within(tab('Beta')).queryByRole('img', { name: /bridgedFrom/ })).toBeNull();
 });

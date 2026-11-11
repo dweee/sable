@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import type { Snippet } from 'svelte';
 
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
 
   import BottomSheet from './BottomSheet.svelte';
   import DialogFrame from './DialogFrame.svelte';
@@ -11,12 +10,13 @@
     open?: boolean;
     label: string;
     closeLabel: string;
+    expandable?: boolean;
     children: Snippet<[boolean]>;
   }
 
-  let { open = $bindable(false), label, closeLabel, children }: Props = $props();
+  let { open = $bindable(false), label, closeLabel, expandable, children }: Props = $props();
 
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   let desktop = $derived(appLayout.current);
 </script>
 
@@ -25,7 +25,7 @@
     {@render children(true)}
   </DialogFrame>
 {:else}
-  <BottomSheet bind:open {label} {closeLabel}>
+  <BottomSheet bind:open {label} {closeLabel} {expandable}>
     {@render children(false)}
   </BottomSheet>
 {/if}

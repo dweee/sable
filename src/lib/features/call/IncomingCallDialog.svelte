@@ -1,8 +1,6 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import { i18n } from '#lib/i18n.js';
   import { useCoreClient } from '#lib/core/context.js';
-  import { isRecord } from '#lib/guards.js';
   import PhoneIcon from 'phosphor-svelte/lib/PhoneIcon';
   import PhoneDisconnectIcon from 'phosphor-svelte/lib/PhoneDisconnectIcon';
   import VideoCameraIcon from 'phosphor-svelte/lib/VideoCameraIcon';
@@ -10,7 +8,7 @@
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
 
   import type { IncomingCall } from './incoming-calls.svelte.js';
 
@@ -27,35 +25,34 @@
   let profile = $state.raw<{ name: string; avatar: string | null } | null>(null);
   let senderName = $derived(profile?.name ?? call?.senderName ?? call?.sender ?? '');
   let senderAvatar = $derived(profile?.avatar ?? null);
+  let revision = $state(0);
+
+  $effect(() =>
+    core.onProfileChanged((userId) => {
+      if (userId === call?.sender) revision += 1;
+    })
+  );
 
   $effect(() => {
     const incoming = call;
+    void revision;
     profile = null;
     if (!incoming) return;
 
     let current = true;
-    void core.rpc.room_state
-      .event({
-        room_id: incoming.roomId,
-        event_type: 'm.room.member',
-        state_key: incoming.sender,
-      })
-      .then(
-        (content) => {
-          if (!current || !isRecord(content)) return;
-          profile = {
-            name: typeof content.displayname === 'string' ? content.displayname : incoming.sender,
-            avatar: typeof content.avatar_url === 'string' ? content.avatar_url : null,
-          };
-        },
-        (error: unknown) => console.debug('[sable call] caller profile unavailable', error)
-      );
+    void core.rpc.members.member({ room_id: incoming.roomId, user_id: incoming.sender }).then(
+      (member) => {
+        if (!current || !member) return;
+        profile = { name: member.display_name ?? incoming.sender, avatar: member.avatar_url };
+      },
+      (error: unknown) => console.debug('[sable call] caller profile unavailable', error)
+    );
     return () => {
       current = false;
     };
   });
 
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   let open = $derived(call !== null);
   let variant = $derived(appLayout.current ? ('sheet' as const) : ('fullscreen' as const));
 </script>

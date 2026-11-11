@@ -19,8 +19,7 @@ function item(id: string, options: Partial<TimelineItemView> = {}): TimelineItem
       kind: 'message',
       body: id,
       html: id,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -38,6 +37,7 @@ function item(id: string, options: Partial<TimelineItemView> = {}): TimelineItem
     mention: options.mention ?? 'none',
     forwarded: options.forwarded ?? null,
     forum_title: options.forum_title ?? null,
+    shield: options.shield ?? null,
   });
 }
 

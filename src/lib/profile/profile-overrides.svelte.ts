@@ -1,8 +1,8 @@
 import type {
-  AvatarEditView,
-  FieldEdit,
   ProfileOverrideView,
   ProfileOverridesView,
+  Rpc,
+  RpcParams,
   SealStateView,
 } from '#src/generated/protocol';
 
@@ -19,11 +19,7 @@ export interface OverrideColors {
   dark: string | null;
 }
 
-export interface OverrideEdit {
-  display_name: FieldEdit;
-  avatar: AvatarEditView;
-  color: FieldEdit;
-}
+export type OverrideEdit = Omit<RpcParams<Rpc['account']['setProfileOverride']>, 'user_id'>;
 
 export type Protection = SealStateView;
 
@@ -50,18 +46,6 @@ class ProfileOverrides {
 
   of(userId: string): ProfileOverrideView | undefined {
     return this.entries.get(userId);
-  }
-
-  name(userId: string, fallback: string): string {
-    const name = this.entries.get(userId)?.display_name;
-    if (name === undefined || name.kind === 'unset') return fallback;
-    return name.kind === 'set' ? name.value : userId;
-  }
-
-  avatar(userId: string, fallback: string | null): string | null {
-    const avatar = this.entries.get(userId)?.avatar;
-    if (avatar === undefined || avatar.kind === 'unset') return fallback;
-    return avatar.kind === 'set' ? avatar.value : null;
   }
 
   colors(userId: string): OverrideColors | null | undefined {

@@ -15,11 +15,11 @@ import type {
 vi.mock('#lib/core/context.js');
 
 import { core as baseCore } from '#lib/core/__mocks__/context.js';
-import { CoreError } from '#src/transport';
+import { CoreError, transportFailure } from '#src/transport';
 
 const core = Object.assign(baseCore, {
   session: { user_id: '@me:example.org' },
-  userRelations: vi.fn<() => Promise<{ mutualRooms: MutualRoomView[]; ignored: boolean }>>(),
+  userRelations: vi.fn<() => Promise<{ mutual_rooms: MutualRoomView[]; ignored: boolean }>>(),
   setUserIgnored: vi.fn<() => Promise<void>>(),
 });
 Object.assign(core.rpc.rooms, { createDm: vi.fn<() => Promise<string>>() });
@@ -67,10 +67,13 @@ import { preferences } from '#lib/settings/preferences.svelte.js';
 
 import MentionProfileCard from './MentionProfileCard.svelte';
 import MemberIdentityRow from './MemberIdentityRow.svelte';
+import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.ts';
 
 const emptyProfile: ProfileView = {
   user_id: '@alice:example.org',
   display_name: null,
+  real_name: null,
+  real_avatar_url: null,
   avatar_url: null,
   bio: null,
   hero_color: null,
@@ -87,11 +90,11 @@ const emptyProfile: ProfileView = {
   legacy_fields: [],
 };
 
-core.userRelations.mockResolvedValue({ mutualRooms: [], ignored: false });
+core.userRelations.mockResolvedValue({ mutual_rooms: [], ignored: false });
 
 const user = userEvent.setup();
 
-test('keeps pronouns out of the member list and the profile card', async () => {
+test('shows pronouns on the profile card but not in the member list', async () => {
   const profile = {
     ...emptyProfile,
     display_name: 'Alice',
@@ -109,7 +112,15 @@ test('keeps pronouns out of the member list and the profile card', async () => {
     expect(document.querySelector('.member-identity-row')).toHaveTextContent('Alice');
   });
   expect(document.querySelector('.sender-identity-pronoun')).toBeNull();
-  expect(document.querySelector('.profile-pronoun-pill')).toBeNull();
+  expect(document.querySelector('.profile-pronoun-pill')).toHaveTextContent('they/them');
+
+  try {
+    preferences.showPronouns = false;
+    await tick();
+    expect(document.querySelector('.profile-pronoun-pill')).toHaveTextContent('they/them');
+  } finally {
+    preferences.showPronouns = true;
+  }
 });
 
 async function press(element: Element | null | undefined): Promise<void> {
@@ -130,6 +141,8 @@ test('keeps the clicked room member identity when the global profile loads', asy
       member: {
         user_id: '@alice:example.org',
         display_name: 'Room Alice',
+        real_name: 'Room Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join',
@@ -157,6 +170,8 @@ test.each(['New Alice', null])(
       user_id: emptyProfile.user_id,
       display_name,
       avatar_url: null,
+      real_name: display_name,
+      real_avatar_url: null,
       power_level: 0,
       membership: 'join',
       member_ts: null,
@@ -203,6 +218,8 @@ test('uses the room role name, emoji and colour when the profile has no name col
       member: {
         user_id: '@alice:example.org',
         display_name: 'Room Alice',
+        real_name: 'Room Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 50,
         membership: 'join',
@@ -238,7 +255,7 @@ test('leaves out the bio and metadata panels when the profile has neither', asyn
 });
 
 test('opens a profile avatar through viewer callback', async () => {
-  const onAvatarClick = vi.fn();
+  const openStandaloneSpy = vi.spyOn(mediaViewerState, 'openStandalone');
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
   render(MentionProfileCard, {
     props: {
@@ -246,16 +263,15 @@ test('opens a profile avatar through viewer callback', async () => {
       roomId: '!room:example.org',
       member: null,
       profile: { ...emptyProfile, display_name: 'Alice', avatar_url: 'mxc://example.org/avatar' },
-      onAvatarClick,
     },
   });
   await tick();
 
-  const avatarButton = screen.getByRole('button', { name: "View Alice's avatar" });
+  const avatarButton = screen.getByRole('button', { name: 'View avatar of Alice' });
   expect(avatarButton.querySelector('.avatar-root')).toHaveAttribute('aria-hidden', 'true');
   await user.click(avatarButton);
 
-  expect(onAvatarClick).toHaveBeenCalledWith('mxc://example.org/avatar', 'Alice');
+  expect(openStandaloneSpy).toHaveBeenCalledWith('mxc://example.org/avatar', 'Alice');
 });
 
 test('loads a member card avatar from the original media', async () => {
@@ -298,6 +314,7 @@ test('sends a direct message from the sheet composer', async () => {
   expect(core.rpc.rooms.createDm).toHaveBeenCalledWith({
     user_id: '@alice:example.org',
     encrypted: null,
+    encrypt_new: true,
   });
   await vi.waitFor(() => {
     expect(goto).toHaveBeenCalledWith(expect.stringContaining('/direct/'));
@@ -332,6 +349,7 @@ test('opens the chat without sending from the Message button', async () => {
   expect(core.rpc.rooms.createDm).toHaveBeenCalledWith({
     user_id: '@alice:example.org',
     encrypted: null,
+    encrypt_new: true,
   });
   expect(core.rpc.messages.send).not.toHaveBeenCalled();
   roomList.rooms = [];
@@ -369,6 +387,7 @@ test('asks before the Message button creates a new chat', async () => {
   expect(core.rpc.rooms.createDm).toHaveBeenCalledWith({
     user_id: '@alice:example.org',
     encrypted: null,
+    encrypt_new: true,
   });
 });
 
@@ -407,7 +426,7 @@ test('renders the extended profile fields', async () => {
   await tick();
 
   const meta = document.querySelectorAll('.profile-card-meta .profile-meta-item');
-  expect(document.querySelector('.profile-pronoun-pill')).toBeNull();
+  expect(document.querySelector('.profile-pronoun-pill')?.textContent.trim()).toBe('she/her');
   expect(meta[0].textContent).toContain('(Europe/Paris)');
   expect(meta[1].textContent).toBe('Is cat, give headpats!');
   expect(document.querySelector('.profile-card-status')?.textContent.trim()).toBe(
@@ -510,6 +529,8 @@ test('keeps a failed profile silent when the room member still names the user', 
       member: {
         user_id: '@alice:example.org',
         display_name: 'Room Alice',
+        real_name: 'Room Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join',
@@ -552,6 +573,8 @@ test('collects an optional reason before kicking a member', async () => {
       member: {
         user_id: '@alice:example.org',
         display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join',
@@ -606,6 +629,8 @@ test('sends no reason when the moderation reason is left blank', async () => {
       member: {
         user_id: '@alice:example.org',
         display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join',
@@ -668,6 +693,8 @@ test('offers to remove a user whose pending invite is loaded from the room', asy
     {
       user_id: '@alice:example.org',
       display_name: 'Alice',
+      real_name: 'Alice',
+      real_avatar_url: null,
       avatar_url: null,
       power_level: 0,
       membership: 'invite',
@@ -750,6 +777,8 @@ test('shows a permission message when the kick is refused', async () => {
       member: {
         user_id: '@alice:example.org',
         display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join',
@@ -767,12 +796,12 @@ test('shows a permission message when the kick is refused', async () => {
   const dialog = await screen.findByRole('dialog');
   await user.click(within(dialog).getByRole('button', { name: 'Remove from room' }));
   expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-    "You don't have permission to do that in this room."
+    'You don’t have permission to do that in this room.'
   );
 });
 
 test('shows a generic message when the kick fails for another reason', async () => {
-  core.rpc.members.kick.mockRejectedValue(new CoreError({ code: 'failed', log_id: 'e1' }));
+  core.rpc.members.kick.mockRejectedValue(new CoreError(transportFailure('e1')));
   render(MentionProfileCard, {
     props: {
       userId: '@alice:example.org',
@@ -796,6 +825,8 @@ test('shows a generic message when the kick fails for another reason', async () 
       member: {
         user_id: '@alice:example.org',
         display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join',
@@ -845,6 +876,8 @@ async function openRoleMenu(
       member: {
         user_id: '@alice:example.org',
         display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join',
@@ -924,6 +957,8 @@ test('asks before lowering your own role', async () => {
       member: {
         user_id: '@me:example.org',
         display_name: 'Me',
+        real_name: 'Me',
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 100,
         membership: 'join',
@@ -953,7 +988,7 @@ test('asks before lowering your own role', async () => {
 
 test('lists mutual rooms in a menu of their own, with direct messages last', async () => {
   core.userRelations.mockResolvedValueOnce({
-    mutualRooms: [
+    mutual_rooms: [
       { room_id: '!dm:example.org', name: 'Alice', is_space: false },
       { room_id: '!general:example.org', name: 'General', is_space: false },
       { room_id: '!space:example.org', name: 'Space', is_space: true },
@@ -1032,6 +1067,8 @@ describe('invite and unban follow the membership', () => {
   const memberWith = (membership: 'join' | 'leave' | 'ban') => ({
     user_id: '@alice:example.org',
     display_name: 'Alice',
+    real_name: 'Alice',
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership,

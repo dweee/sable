@@ -1,3 +1,4 @@
+import { accountDisablesReadReceipts } from '../preferences.svelte.js';
 import ArrowsOutLineVerticalIcon from 'phosphor-svelte/lib/ArrowsOutLineVerticalIcon';
 import ArrowLineDownIcon from 'phosphor-svelte/lib/ArrowLineDownIcon';
 import CalendarBlankIcon from 'phosphor-svelte/lib/CalendarBlankIcon';
@@ -6,12 +7,15 @@ import ChecksIcon from 'phosphor-svelte/lib/ChecksIcon';
 import ClockIcon from 'phosphor-svelte/lib/ClockIcon';
 import DotsThreeIcon from 'phosphor-svelte/lib/DotsThreeIcon';
 import GlobeIcon from 'phosphor-svelte/lib/GlobeIcon';
+import HandSwipeLeftIcon from 'phosphor-svelte/lib/HandSwipeLeftIcon';
 import HeartIcon from 'phosphor-svelte/lib/HeartIcon';
 import LayoutIcon from 'phosphor-svelte/lib/LayoutIcon';
 import DatabaseIcon from 'phosphor-svelte/lib/DatabaseIcon';
 import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
 import MegaphoneIcon from 'phosphor-svelte/lib/MegaphoneIcon';
+import PaperPlaneTiltIcon from 'phosphor-svelte/lib/PaperPlaneTiltIcon';
 import QuotesIcon from 'phosphor-svelte/lib/QuotesIcon';
+import ShieldIcon from 'phosphor-svelte/lib/ShieldIcon';
 import SmileyIcon from 'phosphor-svelte/lib/SmileyIcon';
 import TextAaIcon from 'phosphor-svelte/lib/TextAaIcon';
 import TextAlignLeftIcon from 'phosphor-svelte/lib/TextAlignLeftIcon';
@@ -30,7 +34,7 @@ import {
   SEARCH_INDEX_LIMITS,
   SEARCH_MAX_EVENTS,
   SEARCH_TRICKLE_PAUSES,
-} from '../preferences.svelte';
+} from '../definitions';
 import type { SettingsCategory } from '../registry';
 
 export const timelineCategory: SettingsCategory = {
@@ -82,6 +86,13 @@ export const timelineCategory: SettingsCategory = {
       type: 'boolean',
     },
     {
+      key: 'showAllTimestamps',
+      section: 'message-layout',
+      icon: ClockIcon,
+      name: 'settings.showAllTimestamps',
+      type: 'boolean',
+    },
+    {
       key: 'avatarsInMessageHeaders',
       section: 'message-layout',
       icon: LayoutIcon,
@@ -122,9 +133,17 @@ export const timelineCategory: SettingsCategory = {
       section: 'message-search',
       icon: DatabaseIcon,
       name: 'settings.searchUnmeteredOnly',
+      description: 'settings.searchUnmeteredOnlyHint',
       type: 'boolean',
-      gatedBy: 'searchCrawler',
       supported: isNativeMobile,
+    },
+    {
+      key: 'searchSharing',
+      section: 'message-search',
+      icon: DatabaseIcon,
+      name: 'settings.searchSharing',
+      description: 'settings.searchSharingHint',
+      type: 'boolean',
     },
     {
       key: 'serverSearch',
@@ -239,6 +258,14 @@ export const timelineCategory: SettingsCategory = {
       type: 'boolean',
     },
     {
+      key: 'jumpToLatestOnSend',
+      section: 'messages',
+      icon: PaperPlaneTiltIcon,
+      name: 'settings.jumpToLatestOnSend',
+      description: 'settings.jumpToLatestOnSendHint',
+      type: 'boolean',
+    },
+    {
       key: 'timelineEmoteSize',
       section: 'messages',
       icon: SmileyIcon,
@@ -298,10 +325,37 @@ export const timelineCategory: SettingsCategory = {
       supported: supportsTouch,
     },
     {
+      key: 'messageSwipeAction',
+      section: 'messages',
+      icon: HandSwipeLeftIcon,
+      name: 'settings.messageSwipeAction',
+      type: 'select',
+      options: [
+        { value: 'reply', label: 'settings.messageSwipeActionReply' },
+        { value: 'members', label: 'settings.messageSwipeActionMembers' },
+      ],
+      supported: supportsTouch,
+    },
+    {
+      key: 'showSingleReactionCount',
+      section: 'messages',
+      icon: SmileyIcon,
+      name: 'settings.showSingleReactionCount',
+      type: 'boolean',
+    },
+    {
       key: 'showRoleTooltip',
       section: 'messages',
       icon: UserCircleIcon,
       name: 'settings.showRoleTooltip',
+      type: 'boolean',
+    },
+    {
+      key: 'hideMessageShields',
+      section: 'messages',
+      icon: ShieldIcon,
+      name: 'settings.hideMessageShields',
+      description: 'settings.hideMessageShieldsHint',
       type: 'boolean',
     },
     {
@@ -389,6 +443,7 @@ export const timelineCategory: SettingsCategory = {
     },
     {
       key: 'hideReadReceipts',
+      supported: () => !accountDisablesReadReceipts(),
       section: 'receipts-typing',
       icon: ChecksIcon,
       name: 'settings.hideReadReceipts',

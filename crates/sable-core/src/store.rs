@@ -18,6 +18,10 @@ pub enum StoreError {
     Message(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("the system keyring is unavailable: {0}")]
+    SecretsUnavailable(String),
+    #[error("a saved key is missing from the system keyring")]
+    KeyMissing,
     #[error(transparent)]
     Backend(Cause),
 }
@@ -28,14 +32,64 @@ impl StoreError {
     }
 }
 
+/// Atomically and durably replaces a file, retaining its permissions or the normal creation mode.
+///
+/// # Errors
+/// Returns an error if the temporary file cannot be written or published.
+#[cfg(not(target_family = "wasm"))]
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    publish(path, bytes, 0o666)
+}
+
+/// Like [`write_atomic`], but a newly created file is readable by its owner only.
+///
+/// # Errors
+/// Returns an error if the temporary file cannot be written or published.
+#[cfg(not(target_family = "wasm"))]
+pub fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    publish(path, bytes, 0o600)
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[cfg_attr(
+    not(unix),
+    expect(unused_variables, unused_mut, reason = "creation modes are unix only")
+)]
+fn publish(path: &std::path::Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(mode));
+    }
+    let mut temporary = builder.tempfile_in(parent)?;
+    match std::fs::metadata(path) {
+        Ok(metadata) => temporary
+            .as_file()
+            .set_permissions(metadata.permissions())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 pub trait SessionStore: SendOutsideWasm + SyncOutsideWasm + 'static {
     async fn load(&self) -> Result<Option<Vec<u8>>, StoreError>;
     async fn save(&self, bytes: Vec<u8>) -> Result<(), StoreError>;
     async fn clear(&self) -> Result<(), StoreError>;
-    /// Drops any file lock held on the credentials; the next access takes it again.
-    async fn release(&self) {}
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -87,9 +141,6 @@ impl SessionStore for ExclusiveFileSessionStore {
     async fn clear(&self) -> Result<(), StoreError> {
         self.store().await?.clear().await
     }
-    async fn release(&self) {
-        self.store.lock().await.take();
-    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -101,7 +152,7 @@ impl FileSessionStore {
         }
     }
 
-    /// Owns credential refreshes until dropped; startup waits for any cold notification using the login.
+    /// Holds the credentials lock until dropped, so a second app process waits for the first.
     ///
     /// # Errors
     /// Returns an error if the private directory or ownership lock cannot be opened.
@@ -115,6 +166,7 @@ impl FileSessionStore {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn try_exclusive(
         data_dir: impl Into<std::path::PathBuf>,
     ) -> std::io::Result<Option<Self>> {
@@ -219,40 +271,94 @@ impl SessionStore for FileSessionStore {
 
 #[derive(Default)]
 pub struct MemorySessionStore {
-    bytes: std::sync::Mutex<Option<Vec<u8>>>,
+    bytes: parking_lot::Mutex<Option<Vec<u8>>>,
 }
 
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl SessionStore for MemorySessionStore {
     async fn load(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        Ok(self
-            .bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone())
+        Ok(self.bytes.lock().clone())
     }
 
     async fn save(&self, bytes: Vec<u8>) -> Result<(), StoreError> {
-        *self
-            .bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes);
+        *self.bytes.lock() = Some(bytes);
         Ok(())
     }
 
     async fn clear(&self) -> Result<(), StoreError> {
-        *self
-            .bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self.bytes.lock() = None;
         Ok(())
     }
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
-    use super::{FileSessionStore, SessionStore};
+    #[cfg(unix)]
+    use super::write_atomic_private;
+    use super::{FileSessionStore, SessionStore, write_atomic};
+
+    #[test]
+    fn concurrent_atomic_writers_publish_complete_files_without_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("media");
+        let ready = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for byte in 0..8 {
+                let (path, ready) = (&path, &ready);
+                scope.spawn(move || {
+                    ready.wait();
+                    write_atomic(path, &vec![byte; 16 * 1024]).unwrap();
+                    let saved = std::fs::read(path).unwrap();
+                    assert_eq!(saved.len(), 16 * 1024);
+                    assert!(saved.iter().all(|byte| *byte == saved[0]));
+                });
+            }
+        });
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writes_preserve_creation_and_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference");
+        let path = dir.path().join("policy.json");
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        std::fs::write(&reference, b"old").unwrap();
+        write_atomic(&path, b"first").unwrap();
+        assert_eq!(mode(&path), mode(&reference));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&path, b"replacement").unwrap();
+        assert_eq!(mode(&path), 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_atomic_writes_create_owner_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("users.json");
+        write_atomic_private(&path, b"secret").unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn a_failed_atomic_publish_cleans_its_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("occupied");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_atomic(&path, b"replacement").is_err());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[tokio::test]
     async fn exclusive_store_retries_after_an_unavailable_directory_without_losing_credentials() {
@@ -275,25 +381,6 @@ mod tests {
             FileSessionStore::try_exclusive(&directory)
                 .unwrap()
                 .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn releasing_the_exclusive_store_frees_the_lock_until_the_next_access() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("session.json"), b"saved session").unwrap();
-        let store = super::ExclusiveFileSessionStore::new(dir.path());
-        store.load().await.unwrap();
-        store.release().await;
-        let other = FileSessionStore::try_exclusive(dir.path())
-            .unwrap()
-            .unwrap();
-        drop(other);
-        assert_eq!(store.load().await.unwrap(), Some(b"saved session".to_vec()));
-        assert!(
-            FileSessionStore::try_exclusive(dir.path())
-                .unwrap()
-                .is_none()
         );
     }
 

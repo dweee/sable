@@ -1,5 +1,6 @@
 import { expect, test, SIGNED_OUT } from './fixtures/test';
 import { timelineItem } from './fixtures/timeline-items';
+import type { RoomListSnapshot } from '../../src/lib/rooms/room-list-snapshot';
 
 test.use({ storageState: SIGNED_OUT });
 
@@ -123,4 +124,113 @@ test('a notification tapped while its room is open moves to the event', async ({
   await expect(timeline.message('General message 3')).toBeInViewport();
   await expect(page.locator('.message.highlighted')).toContainText('General message 3');
   expect(new URL(page.url()).search).toBe('');
+});
+
+test('the reveal from an OS notification recovers from an unavailable message', async ({
+  page,
+  app,
+  timeline,
+  installRoomCore,
+}) => {
+  await installRoomCore('unread_context_error');
+  await app.openRooms();
+  await app.openRoomFromList('General');
+  await timeline.expectRevealed();
+  const roomUrl = page.url();
+  await page.goto(`${roomUrl}?event=${encodeURIComponent(eventId('missing'))}`);
+  await expect(page.getByText('This message could not be loaded', { exact: true })).toBeVisible();
+
+  await page.evaluate((event) => {
+    navigator.serviceWorker.dispatchEvent(
+      new MessageEvent('message', {
+        data: { type: 'sable:open-room', roomId: '!room:example.test', eventId: event },
+      })
+    );
+  }, eventId('missing'));
+
+  await expect(page.getByText('This message could not be loaded', { exact: true })).toHaveCount(0);
+  await timeline.expectRevealed();
+  await expect(timeline.message('General message 9999')).toBeInViewport();
+  expect(new URL(page.url()).searchParams.has('event')).toBe(false);
+  const lookups = await page.evaluate(
+    (event) =>
+      window.__e2eCalls.filter((call) => {
+        const params = call.params as { focus?: { event_id?: string } };
+        return call.method === 'timeline.subscribe' && params.focus?.event_id === event;
+      }).length,
+    eventId('missing')
+  );
+  expect(lookups).toBe(2);
+});
+
+test('a newer notification tap wins when an older room is listed late', async ({
+  page,
+  app,
+  timeline,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await app.openRooms();
+  await app.openRoomFromList('General');
+  await timeline.expectRevealed();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('sable.room-list.v2.e2e-account')))
+    .not.toBeNull();
+  const room = await page.evaluate(() => {
+    const saved = localStorage.getItem('sable.room-list.v2.e2e-account');
+    if (saved === null) throw new Error('Room list snapshot is missing');
+    const snapshot = JSON.parse(saved) as RoomListSnapshot;
+    return snapshot.rooms[0];
+  });
+  await page.evaluate(() => {
+    window.__e2eEmitTimelineEvent({
+      type: 'room_list_diff',
+      subscription: 1,
+      diffs: [{ op: 'remove', index: 0 }],
+      sections: null,
+    });
+  });
+  await expect(app.roomLink('General')).toHaveCount(0);
+  await page.evaluate(async () => {
+    navigator.serviceWorker.dispatchEvent(
+      new MessageEvent('message', {
+        data: { type: 'sable:open-room', roomId: '!room:example.test' },
+      })
+    );
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          resolve();
+        })
+      )
+    );
+  });
+  await page.evaluate(() => {
+    navigator.serviceWorker.dispatchEvent(
+      new MessageEvent('message', {
+        data: { type: 'sable:open-room', roomId: '!second:example.test' },
+      })
+    );
+  });
+  await expect(page).toHaveURL(/\/rooms\/!second%3Aexample.test$/);
+  await expect(page.getByRole('heading', { name: 'Random', exact: true })).toBeVisible();
+  await page.evaluate(async (room) => {
+    window.__e2eEmitTimelineEvent({
+      type: 'room_list_diff',
+      subscription: 1,
+      diffs: [{ op: 'push_front', value: room }],
+      sections: null,
+    });
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          resolve();
+        })
+      )
+    );
+  }, room);
+  await expect(app.roomLink('General')).toBeVisible();
+  await expect(page).toHaveURL(/\/rooms\/!second%3Aexample.test$/);
+  await expect(page.getByRole('heading', { name: 'Random', exact: true })).toBeVisible();
 });

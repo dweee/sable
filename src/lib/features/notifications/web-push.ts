@@ -1,7 +1,10 @@
+import { logoutRedirectUrl } from '#lib/deployment/policy.js';
 import { base64ToUint8Array, uint8ArrayToBase64 } from 'uint8array-extras';
 
-import { runtimeConfig } from '#lib/config/runtime-config.js';
 import type { CoreClient } from '#lib/core/client.svelte.js';
+import { appName } from '#lib/deployment/brand.js';
+import { redirectAfterLogout } from '#lib/auth/logout-redirect.js';
+import { readText, removeLocalValue, writeText } from '#lib/platform/local-json.js';
 import { deliversWebPush } from '#lib/platform/notifications.js';
 import { activeServiceWorker } from '#lib/platform/service-worker.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
@@ -13,7 +16,7 @@ import {
   type PushOverride,
   trimmed,
 } from '#lib/notifications/push-config.js';
-import { forgetPushSession } from '#lib/notifications/room-names.js';
+import { expectPushActivation, forgetPushSession } from '#lib/notifications/room-names.js';
 
 const REGISTERED_ENDPOINT = 'sable-push-endpoint';
 
@@ -24,7 +27,6 @@ function fallback<T>(value: T, what: string): (error: unknown) => T {
   };
 }
 
-/** For a deployment that ships no gateway configuration at all. */
 export const WEBPUSH_APP_ID = 'moe.sable.webpush';
 
 /** The pusher kind the MSC4174 handshake lives under. */
@@ -81,7 +83,7 @@ export function registrationMarker(
 
 export function pusherDisplayName(core: Pick<CoreClient, 'deviceList'>): string {
   const deviceName = core.deviceList.find((device) => device.is_own)?.display_name?.trim();
-  return deviceName || 'Sable';
+  return deviceName || appName();
 }
 
 export function needsRegistering(marker: string, registered: string | null): boolean {
@@ -105,22 +107,20 @@ async function pushTarget(core: CoreClient, override: PushOverride): Promise<Pus
   const vapid = await core.rpc.push
     .webPusherSupport()
     .catch(fallback(null, 'server push support unavailable'));
-  const { push } = await runtimeConfig();
-  if (vapid !== null) {
-    return { gateway: null, appId: push?.webPushAppID ?? WEBPUSH_APP_ID, vapid };
-  }
+  if (vapid !== null) return { gateway: null, appId: WEBPUSH_APP_ID, vapid };
 
   const { resolved: settings } = await pushConfig(override);
   return settings ?? null;
 }
 
-/** `false` while the pusher still awaits the validation handshake. */
+/** `false` while the pusher still awaits the validation handshake. Throws on
+    an unreadable list: registering again would replace a token in flight. */
 async function serverPusherActivated(
   core: CoreClient,
   pushkey: string,
   appId: string
 ): Promise<boolean | null> {
-  const pushers = await core.rpc.push.webPushers().catch(fallback([], 'listing pushers failed'));
+  const pushers = await core.rpc.push.webPushers();
   const mine = pushers.find(
     (pusher) =>
       pusher.pushkey === pushkey && pusher.app_id === appId && pusher.kind === SERVER_PUSHER_KIND
@@ -131,27 +131,38 @@ async function serverPusherActivated(
 /** A gateway pusher left beside the server delivery doubles every alert. */
 async function removeStaleGatewayPushers(
   core: CoreClient,
-  appId: string,
   pushkey: string,
   rekeyed: string | null
 ): Promise<void> {
   const pushers = await core.rpc.push.webPushers().catch(fallback([], 'listing pushers failed'));
   for (const pusher of pushers) {
-    if (pusher.app_id !== appId || pusher.kind !== GATEWAY_PUSHER_KIND) continue;
+    if (pusher.kind !== GATEWAY_PUSHER_KIND) continue;
     if (pusher.pushkey !== pushkey && pusher.pushkey !== rekeyed) continue;
     await core.rpc.push
-      .removePusher({ pushkey: pusher.pushkey, app_id: appId })
+      .removePusher({ pushkey: pusher.pushkey, app_id: pusher.app_id })
       .catch(fallback(undefined, 'removing stale pusher failed'));
   }
 }
 
-export async function syncPushSubscription(
-  core: CoreClient,
-  override: PushOverride
-): Promise<void> {
+const syncing = new Map<string, Promise<void>>();
+
+/** Every MSC4174 registration replaces the pending ack token. */
+export function syncPushSubscription(core: CoreClient, override: PushOverride): Promise<void> {
+  const accountId = core.session?.account_id ?? '';
+  const running = syncing.get(accountId);
+  if (running) return running;
+  const run = sync(core, override).finally(() => {
+    syncing.delete(accountId);
+  });
+  syncing.set(accountId, run);
+  return run;
+}
+
+async function sync(core: CoreClient, override: PushOverride): Promise<void> {
   if (!deliversWebPush() || Notification.permission !== 'granted') return;
   const accountId = core.session?.account_id;
-  if (!accountId) return;
+  const userId = core.session?.user_id;
+  if (!accountId || !userId) return;
   const target = await pushTarget(core, override);
   if (!target) return;
 
@@ -174,7 +185,7 @@ export async function syncPushSubscription(
   const { endpoint, keys } = subscription.toJSON();
   if (endpoint === undefined || !keys?.p256dh || !keys.auth) return;
 
-  const registered = localStorage.getItem(REGISTERED_ENDPOINT);
+  const registered = readText(REGISTERED_ENDPOINT);
   const eventIdOnly = !preferences.richPushPayloads;
   const name = pusherDisplayName(core);
   const marker = registrationMarker(accountId, endpoint, target, eventIdOnly, name);
@@ -200,7 +211,7 @@ export async function syncPushSubscription(
         append: false,
       },
     });
-    localStorage.setItem(REGISTERED_ENDPOINT, marker);
+    writeText(REGISTERED_ENDPOINT, marker);
     return;
   }
 
@@ -216,7 +227,8 @@ export async function syncPushSubscription(
     if (activated === true) return;
   }
 
-  await removeStaleGatewayPushers(core, target.appId, keys.p256dh, rekeyed);
+  await removeStaleGatewayPushers(core, keys.p256dh, rekeyed);
+  await expectPushActivation(userId);
   await core.rpc.push.setWebPusher({
     pusher: {
       pushkey: keys.p256dh,
@@ -227,7 +239,7 @@ export async function syncPushSubscription(
       event_id_only: eventIdOnly,
     },
   });
-  localStorage.setItem(REGISTERED_ENDPOINT, marker);
+  writeText(REGISTERED_ENDPOINT, marker);
 }
 
 /** The p256dh of this browser's live subscription, which is the pushkey its
@@ -255,7 +267,7 @@ export async function dropPushSubscription(
   const registration = await navigator.serviceWorker
     .getRegistration()
     .catch(fallback(undefined, 'service worker registration unavailable'));
-  localStorage.removeItem(REGISTERED_ENDPOINT);
+  removeLocalValue(REGISTERED_ENDPOINT);
   const subscription = await registration?.pushManager.getSubscription();
   if (!subscription) return;
 
@@ -268,11 +280,13 @@ export async function dropPushSubscription(
 }
 
 export async function logoutWithPush(core: CoreClient, override: PushOverride): Promise<void> {
-  const userId = core.session?.user_id;
+  const session = core.session;
   await Promise.allSettled([
     dropPushSubscription(core, override),
-    unregisterNativePush(),
-    userId === undefined ? undefined : forgetPushSession(userId),
+    session === null ? undefined : unregisterNativePush(session),
+    session === null ? undefined : forgetPushSession(session.user_id),
   ]);
+  const redirectUrl = logoutRedirectUrl();
   await core.logout();
+  redirectAfterLogout(core, redirectUrl);
 }

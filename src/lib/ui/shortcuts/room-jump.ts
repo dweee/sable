@@ -1,6 +1,5 @@
 import type { RoomListItemView } from '#src/generated/protocol';
-
-import { type RoomUnread, roomUnread } from '#lib/rooms/unread.js';
+import { hasUnread, type RoomUnread, roomUnread } from '#lib/rooms/unread.js';
 
 import { fuzzyFilter } from './fuzzy.js';
 
@@ -13,10 +12,6 @@ const PREFIXES = new Map<string, JumpKind>([
   ['*', 'space'],
   ['@', 'direct'],
 ]);
-
-export function roomDisplayName(room: RoomListItemView): string {
-  return room.name ?? room.canonical_alias ?? room.room_id;
-}
 
 export function jumpKind(room: RoomListItemView): JumpKind {
   if (room.room_kind === 'space') return 'space';
@@ -31,12 +26,6 @@ export function parseJumpQuery(query: string): { kind: JumpKind | null; text: st
   return { kind, text: (kind === null ? trimmed : trimmed.slice(1)).trim() };
 }
 
-function byActivity(rooms: readonly RoomListItemView[]): RoomListItemView[] {
-  return rooms
-    .slice()
-    .sort((a, b) => (b.latest_event?.timestamp ?? 0) - (a.latest_event?.timestamp ?? 0));
-}
-
 export function filterRoomsByQuery(
   rooms: readonly RoomListItemView[],
   query: string,
@@ -49,10 +38,10 @@ export function filterRoomsByQuery(
   if (text === '') {
     const recents =
       kind === null ? candidates.filter((room) => room.room_kind !== 'space') : candidates;
-    return byActivity(recents).slice(0, limit);
+    return recents.slice(0, limit);
   }
 
-  return fuzzyFilter(candidates, text, roomDisplayName, limit);
+  return fuzzyFilter(candidates, text, (room) => room.display_name, limit);
 }
 
 export function parentSpaceNames(rooms: readonly RoomListItemView[]): Map<string, string> {
@@ -62,7 +51,7 @@ export function parentSpaceNames(rooms: readonly RoomListItemView[]): Map<string
     if (space.room_kind !== 'space') continue;
 
     for (const child of space.space_children) {
-      if (!parents.has(child.room_id)) parents.set(child.room_id, roomDisplayName(space));
+      if (!parents.has(child.room_id)) parents.set(child.room_id, space.display_name);
     }
   }
 
@@ -79,4 +68,26 @@ export function unreadRoomsByPriority(
     .filter(({ room, counts }) => counts.unread > 0 && room.room_id !== excludeRoomId)
     .sort((a, b) => b.counts.highlight - a.counts.highlight || b.counts.unread - a.counts.unread)
     .map(({ room }) => room);
+}
+
+export function unreadRoomAtOffset(
+  rooms: readonly RoomListItemView[],
+  currentRoomId: string | null,
+  direction: 1 | -1,
+  unreadFor: RoomUnread = roomUnread
+): RoomListItemView | null {
+  const current = rooms.findIndex((room) => room.room_id === currentRoomId);
+  const start = current === -1 && direction === -1 ? rooms.length : current;
+  for (let step = 1; step <= rooms.length; step += 1) {
+    const room = rooms[(start + direction * step + rooms.length) % rooms.length];
+    if (
+      room.room_id !== currentRoomId &&
+      room.state === 'joined' &&
+      room.room_kind !== 'space' &&
+      hasUnread(unreadFor(room))
+    ) {
+      return room;
+    }
+  }
+  return null;
 }

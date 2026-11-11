@@ -1,3 +1,5 @@
+use sable_model::text::visible_name;
+
 use crate::api::account::AvatarEditView;
 use matrix_sdk::ruma::OwnedUserId;
 use serde::Deserialize;
@@ -7,12 +9,16 @@ use serde_with::{DefaultOnError, serde_as};
 use crate::Core;
 use crate::cosmetics::MEMBER_COLOR_FIELD;
 use crate::protocol::{
-    FieldEdit, OverrideColorView, OverrideTextView, ProfileOverrideView, ProfileOverridesView,
-    RpcError, SealStateView,
+    CoreEvent, FieldEdit, OverrideColorView, OverrideTextView, ProfileOverrideView,
+    ProfileOverridesView, RpcCode, RpcError, SealStateView,
 };
 
 const PROFILE_OVERRIDES_EVENT: &str = "m.profile_overrides";
 const UNSTABLE_PROFILE_OVERRIDES_EVENT: &str = "org.matrix.msc4529.profile_overrides";
+
+pub(crate) fn is_override_event(event_type: &str) -> bool {
+    event_type == PROFILE_OVERRIDES_EVENT || event_type == UNSTABLE_PROFILE_OVERRIDES_EVENT
+}
 
 #[serde_as]
 #[derive(Deserialize)]
@@ -100,8 +106,8 @@ struct ColorIn {
 
 fn text_override(value: Stored<String>) -> OverrideTextView {
     match value {
-        Stored::Cleared(()) => OverrideTextView::Cleared,
-        Stored::Set(value) => OverrideTextView::Set { value },
+        Stored::Set(value) if visible_name(&value).is_some() => OverrideTextView::Set { value },
+        Stored::Cleared(()) | Stored::Set(_) => OverrideTextView::Cleared,
         Stored::Unset => OverrideTextView::Unset,
     }
 }
@@ -148,6 +154,25 @@ pub(crate) fn overrides(content: Option<&Value>) -> Vec<ProfileOverrideView> {
             })
         })
         .collect()
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn notification_name(client: &matrix_sdk::Client, sender: &str) -> Option<String> {
+    let stored = stored_overrides(
+        client,
+        false,
+        crate::sealed_account_data::cached_key(client),
+    )
+    .await
+    .ok()?;
+    let entry = overrides(stored.content.as_ref())
+        .into_iter()
+        .find(|entry| entry.user_id == sender)?;
+    match entry.display_name {
+        OverrideTextView::Set { value } => Some(value),
+        OverrideTextView::Cleared => Some(sender.to_owned()),
+        OverrideTextView::Unset => None,
+    }
 }
 
 pub(crate) struct OverrideEdit {
@@ -216,32 +241,49 @@ struct StoredOverrides {
     can_seal: bool,
 }
 
-impl Core {
-    /// MSC4529's stable type wins and stays plain; otherwise the unstable type
-    /// is read through the account data key.
-    async fn stored_overrides(&self) -> Result<StoredOverrides, RpcError> {
-        let stable = self
-            .global_account_data(PROFILE_OVERRIDES_EVENT.into(), "profile_overrides")
+/// MSC4529's stable type wins and stays plain; otherwise the unstable type
+/// is read through the account data key.
+async fn stored_overrides(
+    client: &matrix_sdk::Client,
+    fetch: bool,
+    key: impl std::future::Future<Output = Option<crate::sealed_account_data::AccountDataKey>>,
+) -> matrix_sdk::Result<StoredOverrides> {
+    let stable =
+        crate::sealed_account_data::read_account_data(client, PROFILE_OVERRIDES_EVENT, fetch)
             .await?
-            .and_then(|raw| raw.deserialize_as::<Value>().ok())
             .filter(Value::is_object);
-        if stable.is_some() {
-            return Ok(StoredOverrides {
-                content: stable,
-                sealed_type: false,
-                protection: SealStateView::Plain,
-                can_seal: false,
-            });
-        }
-        let document = self
-            .sealed_account_data(UNSTABLE_PROFILE_OVERRIDES_EVENT)
-            .await?;
-        Ok(StoredOverrides {
-            content: document.content,
-            sealed_type: true,
-            protection: document.state,
-            can_seal: document.can_seal,
-        })
+    if stable.is_some() {
+        return Ok(StoredOverrides {
+            content: stable,
+            sealed_type: false,
+            protection: SealStateView::Plain,
+            can_seal: false,
+        });
+    }
+    let document = crate::sealed_account_data::read_document(
+        client,
+        UNSTABLE_PROFILE_OVERRIDES_EVENT,
+        fetch,
+        key.await,
+    )
+    .await?;
+    Ok(StoredOverrides {
+        content: document.content,
+        sealed_type: true,
+        protection: document.state,
+        can_seal: document.can_seal,
+    })
+}
+
+impl Core {
+    async fn stored_overrides(&self) -> Result<StoredOverrides, RpcError> {
+        use crate::ResultExt;
+        let client = self.client().await?;
+        let key =
+            self.with_open_stores(async || crate::sealed_account_data::cached_key(&client).await);
+        stored_overrides(&client, true, key)
+            .await
+            .or_failed(self, "profile_overrides")
     }
 
     fn overrides_view(stored: &StoredOverrides) -> ProfileOverridesView {
@@ -254,6 +296,10 @@ impl Core {
             protection: stored.protection,
             can_seal: stored.can_seal,
         }
+    }
+
+    pub(crate) async fn profile_overrides_view(&self) -> Result<ProfileOverridesView, RpcError> {
+        Ok(Self::overrides_view(&self.stored_overrides().await?))
     }
 
     /// A plaintext unstable document read while the key is at hand is sealed.
@@ -282,16 +328,21 @@ impl Core {
         let _guard = self.account_data_lock.lock().await;
         let stored = self.stored_overrides().await?;
         if stored.protection == SealStateView::Locked {
-            return Err(RpcError::DocumentLocked);
+            return Err(RpcCode::DocumentLocked.into());
         }
         let content = edited_overrides(stored.content, user_id.as_str(), edit);
-        if stored.sealed_type {
+        let event_type = if stored.sealed_type {
             self.set_sealed_account_data(UNSTABLE_PROFILE_OVERRIDES_EVENT, &content)
                 .await?;
+            UNSTABLE_PROFILE_OVERRIDES_EVENT
         } else {
             self.set_account_data(PROFILE_OVERRIDES_EVENT, &content)
                 .await?;
-        }
+            PROFILE_OVERRIDES_EVENT
+        };
+        self.emit(CoreEvent::AccountDataChanged {
+            event_type: event_type.to_owned(),
+        });
         Ok(Self::overrides_view(&StoredOverrides {
             content: Some(content),
             ..stored
@@ -313,11 +364,6 @@ mod tests {
             avatar: AvatarEditView::Keep,
             color: FieldEdit::Keep,
         }
-    }
-
-    #[test]
-    fn the_color_field_is_the_cosmetics_key() {
-        assert_eq!(crate::cosmetics::MEMBER_COLOR_FIELD, "eu.she-a.color");
     }
 
     #[test]
@@ -350,6 +396,25 @@ mod tests {
             json!({ "@a:example.org": {
                 "eu.she-a.color": { "on_light": "#abcdef", "on_dark": "#abcdef" }
             }})
+        );
+    }
+
+    #[test]
+    fn hidden_names_clear_the_override() {
+        for name in ["", "   ", "\u{200b}\u{2800}\u{feff}"] {
+            let content = json!({ "@a:example.org": { "displayname": name } });
+            let read = overrides(Some(&content));
+            assert_eq!(
+                read.first().unwrap().display_name,
+                OverrideTextView::Cleared
+            );
+        }
+        let content = json!({ "@a:example.org": { "displayname": "\u{200b}Alice" } });
+        assert_eq!(
+            overrides(Some(&content)).first().unwrap().display_name,
+            OverrideTextView::Set {
+                value: "\u{200b}Alice".to_owned()
+            }
         );
     }
 

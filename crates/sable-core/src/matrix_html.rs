@@ -1,19 +1,22 @@
 //! Sanitises untrusted message bodies; every HTML string the UI renders comes from here.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
-use std::ops::Range;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::LazyLock;
 
 use ammonia::{Builder, UrlRelative};
+use html5ever::tree_builder::{NodeOrText, TreeSink};
 use linkify::{LinkFinder, LinkKind};
 use matrix_sdk::ruma::html::{
-    ElementAttributesSchemes, Html, ListBehavior, NodeData, NodeRef, PropertiesNames,
-    SanitizerConfig,
+    ElementAttributesSchemes, Html, ListBehavior, PropertiesNames, SanitizerConfig,
 };
 use matrix_sdk::ruma::{MatrixUri, MxcUri};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use time::OffsetDateTime;
+use regex_lite::Regex;
+use sable_model::color::is_hex_color;
+use sable_model::html::nests_too_deeply;
+use sable_model::jumbo;
+
+pub use sable_model::html::preview_body;
 
 const ALLOWED_TAGS: [&str; 41] = [
     "a",
@@ -65,9 +68,19 @@ const STRIPPED_CONTENT_TAGS: [&str; 6] = [
     "mx-reply", "script", "style", "textarea", "option", "noscript",
 ];
 
-const URL_SCHEMES: [&str; 7] = ["http", "https", "ftp", "mailto", "matrix", "mxc", "tauri"];
+const URL_SCHEMES: [&str; 8] = [
+    "http",
+    "https",
+    "ftp",
+    "mailto",
+    "matrix",
+    "mxc",
+    "tauri",
+    "sable-app",
+];
 
 const DESKTOP_APP_ORIGIN: &str = "tauri://localhost/";
+const ELECTRON_APP_ORIGIN: &str = "sable-app://app/";
 
 fn tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
     HashMap::from([
@@ -86,6 +99,7 @@ fn tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
                 "data-mx-spoiler",
                 "data-mx-maths",
                 "data-mx-room-mention",
+                "data-emoji",
             ]),
         ),
         ("div", HashSet::from(["data-mx-maths"])),
@@ -96,13 +110,6 @@ fn tag_attributes() -> HashMap<&'static str, HashSet<&'static str>> {
             HashSet::from(["src", "alt", "title", "width", "height", "data-mx-emoticon"]),
         ),
     ])
-}
-
-fn is_matrix_hex_color(value: &str) -> bool {
-    let Some(digits) = value.strip_prefix('#') else {
-        return false;
-    };
-    matches!(digits.len(), 3 | 6) && digits.bytes().all(|digit| digit.is_ascii_hexdigit())
 }
 
 fn is_language_class(value: &str) -> bool {
@@ -144,11 +151,11 @@ fn sanitizer() -> Builder<'static> {
             ("a", "href") if has_scheme(value, "tauri:") => {
                 has_scheme(value, DESKTOP_APP_ORIGIN).then(|| value.into())
             }
-            ("a", "href") => (!has_scheme(value, "mxc:")).then(|| value.into()),
-            ("img", "src") => {
-                (is_mxc_uri(value) || has_scheme(value, "https:") || has_scheme(value, "http:"))
-                    .then(|| value.into())
+            ("a", "href") if has_scheme(value, "sable-app:") => {
+                has_scheme(value, ELECTRON_APP_ORIGIN).then(|| value.into())
             }
+            ("a", "href") => (!has_scheme(value, "mxc:")).then(|| value.into()),
+            ("img", "src") => is_mxc_uri(value).then(|| value.into()),
             ("img", "width" | "height") | (_, "start") => value
                 .parse::<u32>()
                 .ok()
@@ -156,7 +163,7 @@ fn sanitizer() -> Builder<'static> {
             (_, "class") => is_language_class(value).then(|| value.into()),
             ("sub", "data-md") => (value == "-#").then(|| value.into()),
             (_, "data-mx-color" | "data-mx-bg-color") => {
-                is_matrix_hex_color(value).then(|| value.into())
+                is_hex_color(value, &[3, 6]).then(|| value.into())
             }
             _ => Some(value.into()),
         });
@@ -205,7 +212,7 @@ static MATRIX_POLICY: LazyLock<SanitizerConfig> = LazyLock::new(|| {
                 },
                 PropertiesNames {
                     parent: "span",
-                    properties: &["data-mx-room-mention"],
+                    properties: &["data-mx-room-mention", "data-emoji"],
                 },
                 PropertiesNames {
                     parent: "time",
@@ -220,14 +227,14 @@ static MATRIX_POLICY: LazyLock<SanitizerConfig> = LazyLock::new(|| {
                     element: "img",
                     attr_schemes: &[PropertiesNames {
                         parent: "src",
-                        properties: &["mxc", "http", "https"],
+                        properties: &["mxc"],
                     }],
                 },
                 ElementAttributesSchemes {
                     element: "a",
                     attr_schemes: &[PropertiesNames {
                         parent: "href",
-                        properties: &["tauri"],
+                        properties: &["tauri", "sable-app"],
                     }],
                 },
             ],
@@ -377,7 +384,8 @@ fn anchor(href: &str, text: &str) -> String {
             .iter()
             .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
     }) && !has_scheme(href, "mxc:")
-        && (!has_scheme(href, "tauri:") || has_scheme(href, DESKTOP_APP_ORIGIN));
+        && (!has_scheme(href, "tauri:") || has_scheme(href, DESKTOP_APP_ORIGIN))
+        && (!has_scheme(href, "sable-app:") || has_scheme(href, ELECTRON_APP_ORIGIN));
     if !allowed {
         return escape_html(text);
     }
@@ -386,10 +394,6 @@ fn anchor(href: &str, text: &str) -> String {
         html_escape::encode_double_quoted_attribute(href),
         escape_html(text)
     )
-}
-
-fn render_plain_text(text: &str) -> String {
-    rewrite_mfm(text)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -417,7 +421,21 @@ fn room_mention_spans(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn linkify_urls(text: &str) -> String {
+fn escape_with_emoji(text: &str) -> String {
+    let mut html = String::with_capacity(text.len());
+    let mut offset = 0;
+    for (start, end) in jumbo::emoji_runs(text) {
+        html.push_str(&escape_html(text.get(offset..start).unwrap_or_default()));
+        html.push_str("<span data-emoji>");
+        html.push_str(&escape_html(text.get(start..end).unwrap_or_default()));
+        html.push_str("</span>");
+        offset = end;
+    }
+    html.push_str(&escape_html(text.get(offset..).unwrap_or_default()));
+    html
+}
+
+fn render_plain_text(text: &str) -> String {
     let mut spans: Vec<(usize, usize, SpanKind)> = PLAIN_TEXT_LINKS
         .links(text)
         .map(|link| {
@@ -460,7 +478,7 @@ fn linkify_urls(text: &str) -> String {
         let (Some(before), Some(link)) = (text.get(offset..start), text.get(start..end)) else {
             continue;
         };
-        html.push_str(&escape_html(before));
+        html.push_str(&escape_with_emoji(before));
         match kind {
             SpanKind::Email => html.push_str(&anchor(&format!("mailto:{link}"), link)),
             SpanKind::Url => html.push_str(&anchor(link, link)),
@@ -475,741 +493,79 @@ fn linkify_urls(text: &str) -> String {
         }
         offset = end;
     }
-    html.push_str(&escape_html(text.get(offset..).unwrap_or_default()));
+    html.push_str(&escape_with_emoji(text.get(offset..).unwrap_or_default()));
     html
-}
-
-fn spoiler_bars(text: &str, index: usize) -> Option<(usize, &str)> {
-    let body = text.get(index..)?.strip_prefix("||")?;
-    let before = text.get(..index)?.chars().next_back();
-    if !before.is_none_or(|c| c.is_whitespace() || "([{<\"'".contains(c)) {
-        return None;
-    }
-    if body.starts_with(|c: char| c == '|' || c.is_whitespace()) {
-        return None;
-    }
-    let inner = body.get(..body.find("||")?)?;
-    if inner.ends_with(char::is_whitespace) {
-        return None;
-    }
-    Some((inner.len() + 4, inner))
-}
-
-fn math_span(text: &str, index: usize) -> Option<(usize, String)> {
-    let rest = text.get(index..)?;
-    let before = text.get(..index)?.chars().next_back();
-    if before.is_some_and(|c| c.is_alphanumeric() || c == '$') {
-        return None;
-    }
-    let (display, body) = match rest.strip_prefix("$$") {
-        Some(body) => (true, body),
-        None => (false, rest.strip_prefix('$')?),
-    };
-    let inner = body.get(..body.find(if display { "$$" } else { "$" })?)?;
-    if inner.trim().is_empty() || (!display && inner.contains('\n')) {
-        return None;
-    }
-    if !display {
-        let after = body.get(inner.len() + 1..)?.chars().next();
-        let bounded = !inner.starts_with(char::is_whitespace)
-            && !inner.ends_with(char::is_whitespace)
-            && !inner.starts_with('[')
-            && !after.is_some_and(|c| c.is_ascii_digit());
-        if !bounded {
-            return None;
-        }
-    }
-    let latex = inner.trim();
-    let attribute = html_escape::encode_double_quoted_attribute(latex);
-    let tag = if display { "div" } else { "span" };
-    let consumed = inner.len() + if display { 4 } else { 2 };
-    Some((
-        consumed,
-        format!(
-            "<{tag} data-mx-maths=\"{attribute}\"><code>{}</code></{tag}>",
-            escape_html(latex)
-        ),
-    ))
-}
-
-fn hide_spoiler_bars(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut index = 0;
-    while let Some(rest) = text.get(index..).filter(|rest| !rest.is_empty()) {
-        if let Some((consumed, _)) = spoiler_bars(text, index) {
-            out.push_str(SPOILER_PLACEHOLDER);
-            index += consumed;
-        } else {
-            let character = rest.chars().next().unwrap_or_default();
-            out.push(character);
-            index += character.len_utf8();
-        }
-    }
-    out
-}
-
-fn link_words(text: &str) -> Vec<Range<usize>> {
-    let mut words = Vec::new();
-    let mut start = None;
-    for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
-        if character.is_whitespace() {
-            if let Some(from) = start.take()
-                && let Some(word) = text.get(from..index)
-                && (word.contains("://")
-                    || ["www.", "mailto:", "matrix:"]
-                        .iter()
-                        .any(|prefix| word.starts_with(prefix)))
-            {
-                words.push(from..index);
-            }
-        } else if start.is_none() {
-            start = Some(index);
-        }
-    }
-    words
-}
-
-fn inline_markdown(segment: &str) -> String {
-    let trimmed = segment.trim();
-    let lead = segment.get(..segment.len() - segment.trim_start().len());
-    let trail = segment.get(segment.trim_end().len()..);
-    let mut html = String::with_capacity(segment.len());
-    let mut formatted = false;
-    let links = link_words(trimmed);
-    for (event, range) in Parser::new_ext(trimmed, Options::ENABLE_STRIKETHROUGH).into_offset_iter()
-    {
-        if matches!(
-            event,
-            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough) | Event::Code(_)
-        ) {
-            formatted = true;
-            if links
-                .iter()
-                .any(|word| range.start < word.end && word.start < range.end)
-            {
-                return linkify_urls(segment);
-            }
-        }
-        match event {
-            Event::Start(Tag::Paragraph) => {
-                if !html.is_empty() {
-                    html.push_str("\n\n");
-                }
-            }
-            Event::End(TagEnd::Paragraph) => {}
-            Event::Start(Tag::Emphasis) => html.push_str("<em>"),
-            Event::End(TagEnd::Emphasis) => html.push_str("</em>"),
-            Event::Start(Tag::Strong) => html.push_str("<strong>"),
-            Event::End(TagEnd::Strong) => html.push_str("</strong>"),
-            Event::Start(Tag::Strikethrough) => html.push_str("<del>"),
-            Event::End(TagEnd::Strikethrough) => html.push_str("</del>"),
-            Event::Code(code) => {
-                let _ = write!(html, "<code>{}</code>", escape_html(&code));
-            }
-            Event::Text(text) => html.push_str(&linkify_urls(&text)),
-            Event::SoftBreak | Event::HardBreak => html.push('\n'),
-            _ => return linkify_urls(segment),
-        }
-    }
-    if !formatted {
-        return linkify_urls(segment);
-    }
-    format!(
-        "{}{html}{}",
-        lead.map(escape_html).unwrap_or_default(),
-        trail.map(escape_html).unwrap_or_default()
-    )
-}
-
-fn rewrite_mfm(text: &str) -> String {
-    rewrite_mfm_at_depth(text, 0)
-}
-
-const MAX_MFM_DEPTH: usize = 32;
-
-const MFM_SPAN_LIMIT: usize = 2048;
-
-fn rewrite_mfm_at_depth(text: &str, depth: usize) -> String {
-    let mut html = String::with_capacity(text.len());
-    let mut plain_start = 0;
-    let mut code_ticks = None;
-    let mut index = 0;
-    while index < text.len() {
-        let Some(rest) = text.get(index..) else {
-            break;
-        };
-        if code_ticks.is_none() && rest.starts_with('\\') {
-            index += 1 + rest
-                .get(1..)
-                .and_then(|tail| tail.chars().next())
-                .map_or(0, char::len_utf8);
-            continue;
-        }
-        if rest.starts_with('`') {
-            let ticks = rest.bytes().take_while(|byte| *byte == b'`').count();
-            match code_ticks {
-                Some(open) if open == ticks => code_ticks = None,
-                None => code_ticks = Some(ticks),
-                _ => {}
-            }
-            index += ticks;
-            continue;
-        }
-        if code_ticks.is_none()
-            && rest.starts_with("$[")
-            && let Some((consumed, element)) = mfm_element(rest, depth)
-        {
-            if let Some(before) = text.get(plain_start..index) {
-                html.push_str(&inline_markdown(before));
-            }
-            html.push_str(&element);
-            index += consumed;
-            plain_start = index;
-            continue;
-        }
-        if code_ticks.is_none()
-            && !rest.starts_with("$[")
-            && let Some((consumed, element)) = math_span(text, index)
-        {
-            if let Some(before) = text.get(plain_start..index) {
-                html.push_str(&inline_markdown(before));
-            }
-            html.push_str(&element);
-            index += consumed;
-            plain_start = index;
-            continue;
-        }
-        if code_ticks.is_none()
-            && depth < MAX_MFM_DEPTH
-            && let Some((consumed, inner)) = spoiler_bars(text, index)
-        {
-            if let Some(before) = text.get(plain_start..index) {
-                html.push_str(&inline_markdown(before));
-            }
-            let _ = write!(
-                html,
-                "<span data-mx-spoiler=\"\">{}</span>",
-                rewrite_mfm_at_depth(inner, depth + 1)
-            );
-            index += consumed;
-            plain_start = index;
-            continue;
-        }
-        index += rest.chars().next().map_or(1, char::len_utf8);
-    }
-    if let Some(tail) = text.get(plain_start..) {
-        html.push_str(&inline_markdown(tail));
-    }
-    html
-}
-
-fn mfm_element(src: &str, depth: usize) -> Option<(usize, String)> {
-    mfm_unixtime(src).or_else(|| mfm_color(src, depth))
-}
-
-fn mfm_unixtime(src: &str) -> Option<(usize, String)> {
-    let after_name = src.strip_prefix("$[unixtime")?;
-    if !after_name.starts_with([' ', '\t']) {
-        return None;
-    }
-    let args = after_name.trim_start_matches([' ', '\t']);
-    let close = args.bytes().take_while(u8::is_ascii_digit).count();
-    if close == 0 || args.as_bytes().get(close) != Some(&b']') {
-        return None;
-    }
-    let seconds = args.get(..close)?;
-    let (datetime, label) = unix_time(seconds)?;
-    Some((
-        src.len() - args.len() + close + 1,
-        format!("<time datetime=\"{datetime}\">{label}</time>"),
-    ))
-}
-
-struct ColorArgs {
-    fg: Option<String>,
-    bg: Option<String>,
-}
-
-fn mfm_close(src: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut escaped = false;
-    for (index, character) in src.char_indices().take(MFM_SPAN_LIMIT).skip(1) {
-        if escaped {
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == '[' {
-            depth += 1;
-        } else if character == ']' {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
-}
-
-fn mfm_color(src: &str, depth: usize) -> Option<(usize, String)> {
-    if !src.starts_with("$[fg.color=") && !src.starts_with("$[bg.color=") {
-        return None;
-    }
-    let close = mfm_close(src)?;
-    let inner = src.get(2..close)?;
-    let (args, text_at) = parse_color_args(inner)?;
-    let text = inner.get(text_at..)?.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let mut attrs = String::new();
-    if let Some(fg) = &args.fg {
-        let _ = write!(attrs, " data-mx-color=\"{fg}\"");
-    }
-    if let Some(bg) = &args.bg {
-        let _ = write!(attrs, " data-mx-bg-color=\"{bg}\"");
-    }
-    let content = if depth < MAX_MFM_DEPTH {
-        rewrite_mfm_at_depth(text, depth + 1)
-    } else {
-        linkify_urls(text)
-    };
-    Some((close + 1, format!("<span{attrs}>{content}</span>")))
-}
-
-fn parse_color_args(inner: &str) -> Option<(ColorArgs, usize)> {
-    let mut args = ColorArgs { fg: None, bg: None };
-    let mut rest = inner;
-    let mut consumed = 0;
-    let mut found = false;
-    loop {
-        if found {
-            let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
-            if spaces == 0 {
-                break;
-            }
-            rest = rest.get(spaces..)?;
-            consumed += spaces;
-        }
-        let token_len = rest.find([' ', '\t']).unwrap_or(rest.len());
-        let token = rest.get(..token_len)?;
-        let Some((kind, value)) = token
-            .strip_prefix("fg.color=")
-            .map(|value| ("fg", value))
-            .or_else(|| token.strip_prefix("bg.color=").map(|value| ("bg", value)))
-        else {
-            break;
-        };
-        let normalized = normalize_mfm_hex(value)?;
-        if kind == "fg" {
-            args.fg = Some(normalized);
-        } else {
-            args.bg = Some(normalized);
-        }
-        found = true;
-        rest = rest.get(token_len..)?;
-        consumed += token_len;
-    }
-    (args.fg.is_some() || args.bg.is_some()).then_some((args, consumed))
-}
-
-fn normalize_mfm_hex(value: &str) -> Option<String> {
-    let digits = value.strip_prefix('#').unwrap_or(value);
-    if !matches!(digits.len(), 3 | 6) || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let expanded = match digits.len() {
-        3 => {
-            let [red, green, blue] = *digits.as_bytes() else {
-                return None;
-            };
-            format!(
-                "{}{}{}{}{}{}",
-                red as char, red as char, green as char, green as char, blue as char, blue as char
-            )
-        }
-        6 => digits.to_owned(),
-        _ => return None,
-    };
-    Some(format!("#{}", expanded.to_ascii_lowercase()))
-}
-
-fn unix_time(seconds: &str) -> Option<(String, String)> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let seconds: i64 = seconds.parse().ok()?;
-    if seconds < 0 {
-        return None;
-    }
-    let value = OffsetDateTime::from_unix_timestamp(seconds).ok()?;
-    if !(1..=9999).contains(&value.year()) {
-        return None;
-    }
-    let datetime = format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        u8::from(value.month()),
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    );
-    let month = MONTHS.get(usize::from(u8::from(value.month()) - 1))?;
-    let label = format!(
-        "{} {} {}, {:02}:{:02} (UTC)",
-        value.day(),
-        month,
-        value.year(),
-        value.hour(),
-        value.minute()
-    );
-    Some((datetime, label))
 }
 
 const LINKIFY_SKIP_ELEMENTS: [&str; 9] = [
     "a", "code", "mx-reply", "noscript", "pre", "script", "style", "textarea", "time",
 ];
 
-fn markup_span_end(formatted: &str, start: usize) -> usize {
-    let Some(rest) = formatted.get(start..) else {
-        return formatted.len();
-    };
-    if rest.starts_with("<!--") {
-        return rest
-            .find("-->")
-            .map_or(formatted.len(), |at| start + at + "-->".len());
-    }
-
-    let mut quote = None;
-    for (offset, character) in rest.char_indices().skip(1) {
-        match (quote, character) {
-            (None, '"' | '\'') => quote = Some(character),
-            (Some(open), _) if open == character => quote = None,
-            (None, '>') => return start + offset + 1,
-            _ => {}
+fn rewrite_markup(formatted: &str) -> Html {
+    let html = Html::parse(formatted);
+    let mut pending: Vec<_> = html.children().collect();
+    while let Some(node) = pending.pop() {
+        if node
+            .as_element()
+            .is_some_and(|element| LINKIFY_SKIP_ELEMENTS.contains(&element.name.local.as_ref()))
+        {
+            continue;
         }
-    }
-    formatted.len()
-}
-
-fn tag_name(tag: &str) -> Option<(String, bool)> {
-    let body = tag.strip_prefix('<')?;
-    let (body, closing) = body
-        .strip_prefix('/')
-        .map_or((body, false), |rest| (rest, true));
-    let name: String = body
-        .chars()
-        .take_while(|character| character.is_ascii_alphanumeric() || *character == '-')
-        .map(|character| character.to_ascii_lowercase())
-        .collect();
-    (!name.is_empty()).then_some((name, closing))
-}
-
-fn rewrite_text_run(run: &str) -> String {
-    let decoded = html_escape::decode_html_entities(run);
-    let rendered = render_plain_text(&decoded);
-    if rendered == escape_html(&decoded) {
-        run.to_owned()
-    } else {
-        rendered
-    }
-}
-
-fn rewrite_markup(formatted: &str) -> String {
-    let mut out = String::with_capacity(formatted.len());
-    let mut run_start = 0;
-    let mut cursor = 0;
-    let mut skip: Option<(String, usize)> = None;
-
-    while let Some(offset) = formatted.get(cursor..).and_then(|rest| rest.find('<')) {
-        let start = cursor + offset;
-        let run = formatted.get(run_start..start).unwrap_or_default();
-        if skip.is_none() {
-            out.push_str(&rewrite_text_run(run));
-        } else {
-            out.push_str(run);
+        let Some(text) = node.as_text() else {
+            pending.extend(node.children());
+            continue;
+        };
+        let text = text.borrow();
+        let rendered = render_plain_text(&text);
+        if rendered == escape_html(&text) {
+            continue;
         }
-
-        let end = markup_span_end(formatted, start);
-        let tag = formatted.get(start..end).unwrap_or_default();
-        out.push_str(tag);
-
-        if let Some((name, closing)) = tag_name(tag) {
-            let self_closing = tag.trim_end_matches('>').trim_end().ends_with('/');
-            match &mut skip {
-                Some((open, depth)) if *open == name => {
-                    if closing {
-                        *depth -= 1;
-                        if *depth == 0 {
-                            skip = None;
-                        }
-                    } else if !self_closing {
-                        *depth += 1;
-                    }
-                }
-                None if !closing
-                    && !self_closing
-                    && LINKIFY_SKIP_ELEMENTS.contains(&name.as_str()) =>
-                {
-                    skip = Some((name, 1));
-                }
-                _ => {}
-            }
+        let replacement = Html::parse(&rendered);
+        for child in replacement.children() {
+            html.append_before_sibling(&node, NodeOrText::AppendNode(child));
         }
-
-        run_start = end;
-        cursor = end.max(start + 1);
+        html.remove_from_parent(&node);
     }
-
-    let tail = formatted.get(run_start..).unwrap_or_default();
-    if skip.is_none() {
-        out.push_str(&rewrite_text_run(tail));
-    } else {
-        out.push_str(tail);
-    }
-    out
+    html
 }
+
+static PROFILE_FALLBACK_HTML: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"<strong\s+data-mx-profile-fallback(?:="")?\s*>([^<]+): </strong\s*>"#).ok()
+});
 
 /// Strips the profile-name prefix MSC4144 senders prepend, which Sable renders itself.
 ///
 /// Must run before sanitising, which drops the marker attribute.
-/// The leading `<strong>` element and the text it wraps, when there is one.
-fn leading_strong(formatted: &str) -> Option<(&str, &str, usize)> {
-    let trimmed = formatted.trim_start();
-    let tag_end = trimmed.find('>')?;
-    let open_tag = trimmed.get(..=tag_end)?;
-    if !open_tag.starts_with("<strong") {
-        return None;
-    }
-    let close = trimmed.get(tag_end..)?.find("</strong>")?;
-    let text = trimmed.get(tag_end + 1..tag_end + close)?;
-    let rest = tag_end + close + "</strong>".len();
-    Some((open_tag, text, rest))
-}
-
 #[must_use]
-pub fn has_profile_fallback_html(formatted: &str) -> bool {
-    leading_strong(formatted)
-        .is_some_and(|(open_tag, _, _)| open_tag.contains("data-mx-profile-fallback"))
-}
-
-/// Unmarked senders are matched by profile name, or by `has_fallback` and a trailing colon.
-#[must_use]
-pub fn strip_profile_fallback_html(
-    formatted: &str,
-    display_name: Option<&str>,
-    known: bool,
-) -> String {
-    if let Some(name) = display_name.map(str::trim).filter(|name| !name.is_empty())
-        && let Some(body) = formatted
-            .trim_start()
-            .strip_prefix(&format!("&lt;{name}&gt; "))
-    {
-        return body.trim_start().to_owned();
-    }
-
-    if let Some(name) = display_name.map(str::trim).filter(|name| !name.is_empty()) {
-        if let Some(body) = formatted.trim_start().strip_prefix(&format!("{name}: ")) {
-            return body.trim_start().to_owned();
-        }
-        // A name with markup characters arrives entity-encoded in the html.
-        let encoded = html_escape::encode_text(name);
-        if encoded != name
-            && let Some(body) = formatted.trim_start().strip_prefix(&format!("{encoded}: "))
-        {
-            return body.trim_start().to_owned();
-        }
-    }
-
-    let Some((open_tag, text, rest)) = leading_strong(formatted) else {
+pub fn strip_profile_fallback_html(formatted: &str, fallback_name: Option<&str>) -> String {
+    let Some(name) = fallback_name else {
         return formatted.to_owned();
     };
-    // The fallback always carries the colon; without it this is the sender's
-    // own emphasis that happens to read like the profile name.
-    let labelled = text.trim_end().ends_with(':');
-    let label = text.trim().trim_end_matches(':').trim();
-    let named = labelled
-        && display_name
-            .map(str::trim)
-            .is_some_and(|name| !name.is_empty() && label == name);
-    let marked = open_tag.contains("data-mx-profile-fallback");
-    let fallback = marked || named || (known && labelled);
-    fallback
-        .then(|| formatted.trim_start().get(rest..))
-        .flatten()
-        .map_or_else(|| formatted.to_owned(), |body| body.trim_start().to_owned())
+    // Some senders set `has_fallback` but prefix the html without the marker.
+    if let Some(rest) = formatted.strip_prefix(&format!("{}: ", html_escape::encode_text(name))) {
+        return rest.to_owned();
+    }
+    PROFILE_FALLBACK_HTML.as_ref().map_or_else(
+        || formatted.to_owned(),
+        |fallback| fallback.replace_all(formatted, "").into_owned(),
+    )
 }
 
-/// The plain-text `Name: ` fallback. A known name that does not prefix the body cuts nothing.
 #[must_use]
-pub fn strip_profile_fallback_body(body: &str, display_name: Option<&str>, known: bool) -> String {
-    let name = display_name.map(str::trim).filter(|name| !name.is_empty());
-    if let Some(name) = name {
-        return body
-            .strip_prefix(&format!("{name}: "))
-            .or_else(|| body.strip_prefix(&format!("<{name}> ")))
-            .map_or_else(|| body.to_owned(), ToOwned::to_owned);
-    }
-    if !known {
-        return body.to_owned();
-    }
-    body.split_once(": ")
-        .map_or_else(|| body.to_owned(), |(_, rest)| rest.to_owned())
-}
-
-fn nests_too_deeply(formatted: &str) -> bool {
-    const VOID_TAGS: [&str; 3] = ["br", "hr", "img"];
-    const LIMIT: usize = 512;
-
-    let mut open: Vec<&str> = Vec::new();
-    let mut rest = formatted;
-    while let Some(offset) = rest.find('<') {
-        let Some(after) = rest.get(offset + 1..) else {
-            break;
-        };
-        rest = after;
-        if let Some(closing) = rest.strip_prefix('/') {
-            let name = closing
-                .split(['>', ' ', '\t', '\n'])
-                .next()
-                .unwrap_or_default();
-            if open
-                .last()
-                .is_some_and(|top| top.eq_ignore_ascii_case(name))
-            {
-                open.pop();
-            }
-            continue;
-        }
-        let Some(name) = rest.split(['>', ' ', '/', '\t', '\n']).next() else {
-            continue;
-        };
-        if name.starts_with(|c: char| c.is_ascii_alphabetic())
-            && !VOID_TAGS.iter().any(|void| name.eq_ignore_ascii_case(void))
-        {
-            open.push(name);
-            if open.len() > LIMIT {
-                return true;
-            }
-        }
-    }
-    false
+pub fn strip_profile_fallback_body(body: &str, fallback_name: Option<&str>) -> String {
+    fallback_name
+        .and_then(|name| body.strip_prefix(&format!("{name}: ")))
+        .unwrap_or(body)
+        .to_owned()
 }
 
 fn sanitize(formatted: &str) -> String {
     if nests_too_deeply(formatted) {
         return String::new();
     }
-    let html = Html::parse(&rewrite_markup(formatted));
+    let html = rewrite_markup(formatted);
     html.sanitize_with(&MATRIX_POLICY);
-    for node in html.children() {
-        sanitize_emote_sources(&node);
-    }
     SANITIZER.clean(&html.to_string()).to_string()
-}
-
-fn sanitize_emote_sources(node: &NodeRef) {
-    if let NodeData::Element(element) = node.data()
-        && &*element.name.local == "img"
-    {
-        let mut attrs = element.attrs.borrow_mut();
-        if attrs
-            .iter()
-            .any(|attr| &*attr.name.local == "data-mx-emoticon")
-        {
-            attrs.retain(|attr| &*attr.name.local != "src" || is_mxc_uri(&attr.value));
-        }
-    }
-    for child in node.children() {
-        sanitize_emote_sources(&child);
-    }
-}
-
-const SPOILER_ATTRIBUTE: &str = "data-mx-spoiler";
-const SPOILER_PLACEHOLDER: &str = "[Spoiler]";
-
-#[must_use]
-pub fn preview_body(body: &str, formatted: Option<&str>) -> String {
-    let Some(formatted) = formatted else {
-        return body.to_owned();
-    };
-    if nests_too_deeply(formatted) {
-        return if formatted.contains(SPOILER_ATTRIBUTE) {
-            SPOILER_PLACEHOLDER.to_owned()
-        } else {
-            body.to_owned()
-        };
-    }
-    let html = Html::parse(formatted);
-    html.sanitize_with(&MATRIX_POLICY);
-    let mut text = String::new();
-    for node in html.children() {
-        push_preview_text(&node, &mut text);
-    }
-    let text = text.trim_end_matches('\n');
-    if text.is_empty() {
-        body.to_owned()
-    } else {
-        hide_spoiler_bars(text)
-    }
-}
-
-fn push_preview_text(node: &NodeRef, out: &mut String) {
-    match node.data() {
-        NodeData::Text(text) => out.push_str(&text.borrow()),
-        NodeData::Element(element) => {
-            if element
-                .attrs
-                .borrow()
-                .iter()
-                .any(|attribute| &*attribute.name.local == SPOILER_ATTRIBUTE)
-            {
-                out.push_str(SPOILER_PLACEHOLDER);
-                return;
-            }
-            if &*element.name.local == "br" {
-                out.push('\n');
-                return;
-            }
-            if &*element.name.local == "img" {
-                if let Some(alt) = element
-                    .attrs
-                    .borrow()
-                    .iter()
-                    .find(|attr| &*attr.name.local == "alt")
-                {
-                    out.push_str(&alt.value);
-                }
-                return;
-            }
-            let block = matches!(
-                &*element.name.local,
-                "p" | "div"
-                    | "pre"
-                    | "blockquote"
-                    | "h1"
-                    | "h2"
-                    | "h3"
-                    | "h4"
-                    | "h5"
-                    | "h6"
-                    | "li"
-                    | "tr"
-                    | "dt"
-                    | "dd"
-            );
-            if block && !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
-            }
-            for child in node.children() {
-                push_preview_text(&child, out);
-            }
-            if block && !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-        _ => {}
-    }
 }
 
 /// The HTML the UI renders for a message: the sender's `formatted_body` once
@@ -1220,24 +576,19 @@ pub fn display_html(body: &str, formatted: Option<&str>) -> String {
         return render_html(body, None);
     };
     let key = (body.to_owned(), formatted.to_owned());
-    let mut cache = DISPLAY_HTML_CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut cache = DISPLAY_HTML_CACHE.lock();
     if let Some(html) = cache.get(&key) {
         return html.clone();
     }
     let html = render_html(body, Some(formatted));
-    if cache.len() >= DISPLAY_HTML_CACHE_ENTRIES {
-        cache.clear();
-    }
     cache.insert(key, html.clone());
     html
 }
 
 const DISPLAY_HTML_CACHE_ENTRIES: usize = 2048;
 
-static DISPLAY_HTML_CACHE: LazyLock<Mutex<HashMap<(String, String), String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static DISPLAY_HTML_CACHE: LazyLock<Mutex<hashlink::LruCache<(String, String), String>>> =
+    LazyLock::new(|| Mutex::new(hashlink::LruCache::new(DISPLAY_HTML_CACHE_ENTRIES)));
 
 fn render_html(body: &str, formatted: Option<&str>) -> String {
     let sanitized = formatted.map(sanitize);
@@ -1245,7 +596,7 @@ fn render_html(body: &str, formatted: Option<&str>) -> String {
     match sanitized {
         Some(html) if !html.trim().is_empty() => html,
         _ if body.is_empty() => String::new(),
-        _ => format!("<span data-plain-body>{}</span>", linkify_urls(body)),
+        _ => format!("<span data-plain-body>{}</span>", render_plain_text(body)),
     }
 }
 
@@ -1278,126 +629,49 @@ mod tests {
             )
             .contains("src=\"mxc://example.org/wave\"")
         );
-        assert!(
-            display_html(
-                "photo",
-                Some("<img src=\"https://example.org/photo\" alt=\"photo\">")
-            )
-            .contains("src=\"https://example.org/photo\"")
-        );
     }
 
     #[test]
     fn strips_the_per_message_profile_fallback() {
         assert_eq!(
             strip_profile_fallback_html(
-                "<strong data-mx-profile-fallback>Kris: </strong>hello there",
-                None,
-                false
+                "<p><strong data-mx-profile-fallback>cat: </strong>Hello, World!</p>",
+                Some("cat")
             ),
-            "hello there"
+            "<p>Hello, World!</p>"
         );
-        assert_eq!(
-            strip_profile_fallback_body("Kris: hello there", Some("Kris"), false),
-            "hello there"
-        );
-        assert_eq!(
-            strip_profile_fallback_body("Kris: hello there", None, true),
-            "hello there"
-        );
-    }
-
-    #[test]
-    fn keeps_a_body_whose_colon_is_not_a_fallback() {
-        assert_eq!(
-            strip_profile_fallback_body("we shipped it: finally", Some("Robin"), true),
-            "we shipped it: finally"
-        );
-        assert_eq!(
-            strip_profile_fallback_body("Note: to self", Some("Kris"), true),
-            "Note: to self"
-        );
-    }
-
-    #[test]
-    fn keeps_bold_that_merely_repeats_the_profile_name() {
-        assert_eq!(
-            strip_profile_fallback_html("<strong>Kris</strong> is great", Some("Kris"), false),
-            "<strong>Kris</strong> is great"
-        );
-        assert_eq!(
-            strip_profile_fallback_html("<strong>Kris</strong> is great", Some("Kris"), true),
-            "<strong>Kris</strong> is great"
-        );
-    }
-
-    #[test]
-    fn strips_the_html_fallback_without_a_parsed_profile() {
         assert_eq!(
             strip_profile_fallback_html(
-                "<strong data-mx-profile-fallback>Kris: </strong>hi",
-                None,
-                true
+                "<strong data-mx-profile-fallback=\"\">a &amp; b: </strong>hi",
+                Some("a & b")
             ),
             "hi"
         );
-    }
-
-    #[test]
-    fn leaves_markup_without_the_fallback_marker_alone() {
         assert_eq!(
-            strip_profile_fallback_html("<strong>Kris: </strong>hello", Some("Robin"), false),
-            "<strong>Kris: </strong>hello"
-        );
-        assert_eq!(
-            strip_profile_fallback_body("Kris: hello", Some("Robin"), false),
-            "Kris: hello"
-        );
-        assert_eq!(
-            strip_profile_fallback_body("Kris: hello", None, false),
-            "Kris: hello"
+            strip_profile_fallback_body("cat: Hello, World!", Some("cat")),
+            "Hello, World!"
         );
     }
 
     #[test]
-    fn strips_an_unmarked_bold_prefix_that_names_the_profile() {
-        assert_eq!(
-            strip_profile_fallback_html("<strong>Alice: </strong>hello", Some("Alice"), false),
-            "hello"
-        );
-        assert_eq!(
-            strip_profile_fallback_html("<strong>Alice: </strong>hello", None, true),
-            "hello"
-        );
+    fn keeps_a_fallback_the_profile_does_not_declare() {
+        let marked = "<strong data-mx-profile-fallback>cat: </strong>hi";
+        assert_eq!(strip_profile_fallback_html(marked, None), marked);
+        assert_eq!(strip_profile_fallback_body("cat: hi", None), "cat: hi");
     }
 
     #[test]
-    fn strips_a_bare_prefix_that_names_the_profile() {
+    fn keeps_text_that_is_not_the_fallback() {
         assert_eq!(
-            strip_profile_fallback_html("Alice: hello there", Some("Alice"), true),
-            "hello there"
+            strip_profile_fallback_body("Note: to self", Some("cat")),
+            "Note: to self"
         );
         assert_eq!(
-            strip_profile_fallback_html("Alice: hello there", Some("Alice"), false),
-            "hello there"
+            strip_profile_fallback_html("<strong>cat: </strong>hi", Some("cat")),
+            "<strong>cat: </strong>hi"
         );
-        assert_eq!(
-            strip_profile_fallback_html("Alice &amp; Bob: hello", Some("Alice & Bob"), false),
-            "hello"
-        );
-        assert_eq!(
-            strip_profile_fallback_html("<em>Alice: </em>hello", Some("Alice"), false),
-            "<em>Alice: </em>hello"
-        );
-    }
-
-    #[test]
-    fn keeps_the_body_when_the_fallback_tag_is_unclosed() {
-        let malformed = "<strong data-mx-profile-fallback>Kris: hello";
-        assert_eq!(
-            strip_profile_fallback_html(malformed, Some("Kris"), true),
-            malformed
-        );
+        let unclosed = "<strong data-mx-profile-fallback>cat: hi";
+        assert_eq!(strip_profile_fallback_html(unclosed, Some("cat")), unclosed);
     }
 
     #[test]
@@ -1521,12 +795,10 @@ mod tests {
     }
 
     #[test]
-    fn literal_double_bars_become_spoilers() {
-        let html = display_html("", Some("so. ||i could see it|| yes"));
-        assert!(html.contains("so. <span data-mx-spoiler=\"\">i could see it</span> yes"));
-
-        let html = display_html("", Some("a ||b|| and ||c||"));
-        assert_eq!(html.matches("data-mx-spoiler").count(), 2);
+    fn literal_double_bars_stay_literal() {
+        for formatted in ["so. ||i could see it|| yes", "a ||b|| and ||c||"] {
+            assert_eq!(display_html("", Some(formatted)), formatted);
+        }
     }
 
     #[test]
@@ -1547,10 +819,10 @@ mod tests {
     }
 
     #[test]
-    fn preview_hides_literal_spoiler_bars() {
+    fn preview_keeps_literal_spoiler_bars() {
         assert_eq!(
             preview_body("x", Some("see ||this|| now")),
-            "see [Spoiler] now"
+            "see ||this|| now"
         );
     }
 
@@ -1571,28 +843,46 @@ mod tests {
     }
 
     #[test]
-    fn unrendered_markdown_markers_become_formatting() {
-        let html = display_html(
-            "",
-            Some("a **b** and *c* and __d__ and _e_ and ~~f~~ `g&amp;h`"),
-        );
-        for expected in [
-            "<strong>b</strong>",
-            "<em>c</em>",
-            "<strong>d</strong>",
-            "<em>e</em>",
-            "<del>f</del>",
-            "<code>g&amp;h</code>",
+    fn formatted_body_markdown_stays_literal() {
+        for formatted in [
+            "*test*",
+            "a **b** and *c* and __d__ and _e_ and ~~f~~ `g&amp;h`",
+            "***a***",
+            "**a _b_ c**",
+            "# heading\n\n&gt; quote\n\n- item\n\n```rust\ncode\n```",
+            "[label](relative) and ![image](relative)",
+            "\\*escaped\\* and \\`code\\`",
         ] {
-            assert!(html.contains(expected), "{expected} in {html}");
+            assert_eq!(
+                display_html("different fallback", Some(formatted)),
+                formatted
+            );
         }
+    }
+
+    #[test]
+    fn html_formatting_does_not_change_literal_markdown_inside_it() {
         assert_eq!(
-            display_html("", Some("***a***")),
-            "<em><strong>a</strong></em>"
+            display_html(
+                "",
+                Some("<p>*test* <em>**literal**</em> <strong>_text_</strong></p>")
+            ),
+            "<p>*test* <em>**literal**</em> <strong>_text_</strong></p>"
         );
+    }
+
+    #[test]
+    fn entity_encoded_markdown_stays_literal() {
+        let html = display_html("", Some("<p>&#42;test&#42; &amp; &#96;code&#96;</p>"));
+        assert_eq!(html, "<p>*test* &amp; `code`</p>");
+        assert_eq!(preview_body("", Some(&html)), "*test* & `code`");
+    }
+
+    #[test]
+    fn formatted_body_fallback_keeps_literal_syntax() {
         assert_eq!(
-            display_html("", Some("**a _b_ c**")),
-            "<strong>a <em>b</em> c</strong>"
+            display_html("*test* <b>plain</b>", Some("<script>discard</script>")),
+            "<span data-plain-body>*test* &lt;b&gt;plain&lt;/b&gt;</span>"
         );
     }
 
@@ -1668,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_mxc_and_web_image_sources_and_drops_every_other_kind() {
+    fn keeps_only_valid_mxc_image_sources() {
         let html = display_html(
             "",
             Some(
@@ -1682,9 +972,30 @@ mod tests {
         assert!(html.contains("src=\"mxc://example.org/emoji\""));
         assert!(html.contains("data-mx-emoticon"));
         assert!(html.contains("height=\"32\""));
-        assert!(html.contains("src=\"https://example.org/badge.png\""));
+        assert!(!html.contains("src=\"https://example.org/badge.png\""));
         assert!(!html.contains("data:image"));
         assert!(!html.contains("src=\"mxc://example.org\""));
+    }
+
+    #[test]
+    fn rejects_invalid_image_sources() {
+        for source in [
+            "https://tracker.example/pixel",
+            "http://tracker.example/pixel",
+            "//tracker.example/pixel",
+            "/pixel",
+            "data:image/png;base64,AAAA",
+            "blob:https://tracker.example/pixel",
+            "https&#58;//tracker.example/pixel",
+            "mxc://example.org/",
+        ] {
+            let html = display_html(
+                "photo",
+                Some(&format!("<img src=\"{source}\" alt=\"photo\">")),
+            );
+            assert!(!html.contains("src="), "{source}: {html}");
+            assert!(html.contains("alt=\"photo\""), "{source}: {html}");
+        }
     }
 
     #[test]
@@ -1695,15 +1006,16 @@ mod tests {
     }
 
     #[test]
-    fn formatted_text_maths_becomes_a_maths_element() {
-        assert_eq!(
-            display_html("", Some("see $x^2$ now")),
-            "see <span data-mx-maths=\"x^2\"><code>x^2</code></span> now"
-        );
-        assert_eq!(
-            display_html("", Some("$$a&lt;b$$")),
-            "<div data-mx-maths=\"a&lt;b\"><code>a&lt;b</code></div>"
-        );
+    fn formatted_text_maths_stays_literal() {
+        for formatted in ["see $x^2$ now", "$$a&lt;b$$"] {
+            assert_eq!(display_html("", Some(formatted)), formatted);
+        }
+    }
+
+    #[test]
+    fn authored_html_maths_is_preserved() {
+        let formatted = "<span data-mx-maths=\"x^2\"><code>x^2</code></span>";
+        assert_eq!(display_html("", Some(formatted)), formatted);
     }
 
     #[test]
@@ -1730,6 +1042,25 @@ mod tests {
         );
         assert!(!display_html("first\nsecond", Some("<b>rich</b>")).contains("data-plain-body"));
         assert_eq!(display_html("", None), "");
+    }
+
+    #[test]
+    fn wraps_emoji_runs_in_plain_and_formatted_text() {
+        assert_eq!(
+            display_html("hi 👍🎉 <b>", None),
+            "<span data-plain-body>hi <span data-emoji>👍🎉</span> &lt;b&gt;</span>"
+        );
+        assert_eq!(
+            display_html(
+                "x",
+                Some("<p>go 🔥 <a href=\"https://a.example\">🔥</a> <code>🔥</code></p>")
+            ),
+            "<p>go <span data-emoji=\"\">🔥</span> <a href=\"https://a.example\" rel=\"noreferrer noopener\">🔥</a> <code>🔥</code></p>"
+        );
+        assert_eq!(
+            display_html("© 1", None),
+            "<span data-plain-body>© 1</span>"
+        );
     }
 
     #[test]
@@ -1882,22 +1213,13 @@ mod tests {
     }
 
     #[test]
-    fn renders_mfm_time_and_nested_colors_in_formatted_text() {
-        let html = display_html(
-            "",
-            Some("at $[unixtime 0] $[fg.color=abc bg.color=123456 red $[bg.color=f00 hot]]"),
-        );
-
-        assert!(
-            html.contains("<time datetime=\"1970-01-01T00:00:00Z\">1 Jan 1970, 00:00 (UTC)</time>")
-        );
-        assert!(html.contains(
-            "<span data-mx-bg-color=\"#123456\" data-mx-color=\"#aabbcc\">red <span data-mx-bg-color=\"#ff0000\">hot</span></span>"
-        ));
+    fn mfm_time_and_nested_colors_in_formatted_text_stay_literal() {
+        let formatted = "at $[unixtime 0] $[fg.color=abc bg.color=123456 red $[bg.color=f00 hot]]";
+        assert_eq!(display_html("", Some(formatted)), formatted);
     }
 
     #[test]
-    fn rewrites_mfm_in_formatted_text_but_skips_verbatim_elements() {
+    fn mfm_in_formatted_text_and_verbatim_elements_stays_literal() {
         let html = display_html(
             "",
             Some(
@@ -1905,7 +1227,8 @@ mod tests {
             ),
         );
 
-        assert_eq!(html.matches("<time ").count(), 1);
+        assert!(html.contains("<p>$[unixtime 0]</p>"));
+        assert!(!html.contains("<time "));
         assert!(html.contains("<code>$[unixtime 0]</code>"));
         assert!(html.contains(">$[unixtime 0]</a>"));
     }
@@ -1939,12 +1262,11 @@ mod tests {
     }
 
     #[test]
-    fn a_colour_looks_for_its_close_within_a_bounded_span() {
-        let near = format!("$[fg.color=f00 {}]", "a".repeat(100));
-        assert!(render_plain_text(&near).starts_with("<span data-mx-color=\"#ff0000\">"));
-
-        let far = format!("$[fg.color=f00 {}]", "a".repeat(5000));
-        assert_eq!(render_plain_text(&far), far);
+    fn mfm_colors_stay_literal_regardless_of_length() {
+        for length in [100, 5000] {
+            let formatted = format!("$[fg.color=f00 {}]", "a".repeat(length));
+            assert_eq!(display_html("", Some(&formatted)), formatted);
+        }
     }
 
     #[test]
@@ -1963,6 +1285,26 @@ mod tests {
 
         assert!(html.contains("href=\"matrix:u/alice:example.org\""));
         assert!(html.contains("href=\"mailto:alice@example.org\""));
+    }
+
+    #[test]
+    fn detects_links_and_mentions_without_interpreting_markdown() {
+        let body = "*test* **bold** `literal` ||bars|| $x$ $[unixtime 0] @room https://example.org alice@example.org matrix:u/alice:example.org MSC4144";
+        for formatted in [None, Some(body)] {
+            let html = display_html(body, formatted);
+            assert!(html.contains("*test* **bold** `literal` ||bars|| $x$ $[unixtime 0]"));
+            for href in [
+                "https://example.org",
+                "mailto:alice@example.org",
+                "matrix:u/alice:example.org",
+                "https://github.com/matrix-org/matrix-spec-proposals/pull/4144",
+            ] {
+                assert!(html.contains(&format!("href=\"{href}\"")), "{html}");
+            }
+            assert!(html.contains("data-mx-room-mention"));
+            assert!(html.contains(">@room</span>"));
+            assert_eq!(preview_body(body, Some(&html)), body);
+        }
     }
 
     #[test]
@@ -1993,6 +1335,41 @@ mod tests {
             let markup = format!("<a href=\"{other}\">x</a>");
             assert!(
                 !display_html("", Some(&markup)).contains("tauri:"),
+                "{other} survived"
+            );
+        }
+    }
+
+    #[test]
+    fn links_to_the_electron_app_survive() {
+        let href = "sable-app://app/settings/appearance?focus=font-family&moe.sable.client.action=settings";
+        assert_eq!(
+            href.parse::<http::Uri>().unwrap().scheme_str(),
+            Some("sable-app")
+        );
+        let escaped = href.replace('&', "&amp;");
+
+        let markup = format!("<a href=\"{escaped}\">settings</a>");
+        assert!(display_html("", Some(&markup)).contains(&format!("href=\"{escaped}\"")));
+        assert!(display_html(href, None).contains(&format!("href=\"{escaped}\"")));
+        assert!(
+            display_html("", Some(&format!("<p>see {escaped}</p>")))
+                .contains(&format!("href=\"{escaped}\""))
+        );
+
+        for other in [
+            "sable-app://evil.example/settings/timeline",
+            "sable-app://app.evil.example/settings/timeline",
+            "sable-app://app:1234/settings/timeline",
+            "sable-app:app/settings",
+        ] {
+            assert!(
+                !display_html(other, None).contains("<a "),
+                "{other} became a link"
+            );
+            let markup = format!("<a href=\"{other}\">x</a>");
+            assert!(
+                !display_html("", Some(&markup)).contains("sable-app:"),
                 "{other} survived"
             );
         }
@@ -2095,7 +1472,25 @@ mod tests {
         let html = display_html("", Some(markup));
 
         assert!(!html.contains("<a "));
-        assert!(html.contains("src=\"https://example.org/b.png\""));
+        assert!(!html.contains("src="));
+        assert!(html.contains("alt=\"https://example.org/c\""));
+    }
+
+    #[test]
+    fn markup_linkifying_uses_html_text_boundaries() {
+        let html = display_html(
+            "",
+            Some("<p title=\"not > a tag\">2 < 3 https://example.org/a</p>"),
+        );
+
+        assert!(html.contains("2 &lt; 3 <a href=\"https://example.org/a\""));
+    }
+
+    #[test]
+    fn a_self_closing_non_void_element_keeps_its_html_meaning() {
+        let html = display_html("", Some("<code/>https://example.org/a</code>"));
+
+        assert_eq!(html, "<code>https://example.org/a</code>");
     }
 
     #[test]
@@ -2109,7 +1504,7 @@ mod tests {
     fn markup_without_a_link_is_left_byte_identical() {
         let markup = "<p>plain <strong>text</strong> &amp; more</p>";
 
-        assert_eq!(rewrite_markup(markup), markup);
+        assert_eq!(rewrite_markup(markup).to_string(), markup);
     }
 
     #[test]

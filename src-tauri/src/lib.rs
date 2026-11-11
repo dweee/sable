@@ -2,55 +2,26 @@
 
 //! The native carrier. A feature adds an RPC handler in `sable_core::api`, except to move bytes or reach something only this process has.
 
-#[cfg(target_os = "linux")]
-mod app_dirs;
-#[cfg(any(all(feature = "cef", target_os = "linux"), test))]
-mod deep_link_delivery;
-#[cfg(any(all(feature = "cef", target_os = "linux"), all(test, unix)))]
-pub mod deep_link_ipc;
+#[cfg(target_os = "android")]
+mod android_secrets;
+#[cfg(target_os = "android")]
+mod cold_push;
+mod debug_log;
 #[cfg(target_os = "ios")]
 // Objective-C bindings expose PhotoKit calls as unsafe; keep that exception out
 // of the Rust-only application code.
 #[expect(unsafe_code, reason = "FFI call")]
 mod ios;
 mod map_tiles;
-#[cfg(all(feature = "cef", target_os = "linux"))]
-pub use map_tiles::TILE_URI_SCHEME;
-#[cfg(target_os = "android")]
-mod cold_push;
-#[cfg(target_os = "linux")]
-mod hdr_share;
 #[cfg(target_os = "android")]
 mod mobile;
 #[cfg(mobile)]
 mod network;
 mod notifications;
-#[cfg(target_os = "linux")]
-pub mod permission_grants;
-#[cfg(all(feature = "cef", target_os = "linux"))]
-mod portal_theme;
-#[cfg(desktop)]
-pub mod proxy;
-#[cfg(target_os = "linux")]
-pub mod screen_audio;
 mod sentry;
 mod share_inbox;
-#[cfg(target_os = "linux")]
-pub mod smooth_scrolling;
-#[cfg(target_os = "windows")]
-mod snap_layouts;
 #[cfg(desktop)]
-mod tray;
-mod v1_migration;
-#[cfg(desktop)]
-pub mod verbose;
-#[cfg(all(feature = "cef", target_os = "linux"))]
-mod video_transcode;
-mod web_resources;
-#[cfg(all(not(feature = "cef"), target_os = "linux"))]
-mod webkit;
-#[cfg(desktop)]
-mod window_geometry;
+mod theme_files;
 
 use std::{
     collections::HashMap,
@@ -59,20 +30,14 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sable_core::{
-    Core, GalleryAttachment,
-    protocol::{CoreEvent, RpcError},
+    Core,
+    protocol::{CoreEvent, RpcCode, RpcError},
 };
 use tauri::{
     AppHandle, Manager, State,
     ipc::{Channel, InvokeBody, Request, Response},
 };
 use tauri_plugin_opener::OpenerExt;
-
-/// CEF (Chromium) on Linux, wry everywhere else.
-#[cfg(all(feature = "cef", target_os = "linux"))]
-type BrowserEngine = tauri_runtime_cef::CefRuntime<tauri::EventLoopMessage>;
-#[cfg(not(all(feature = "cef", target_os = "linux")))]
-use tauri::Wry as BrowserEngine;
 
 struct AppState {
     core: Arc<Core>,
@@ -94,7 +59,7 @@ struct SinkState {
 }
 
 impl EventSink {
-    fn replace(&self, channel: Channel<Vec<CoreEvent>>) -> bool {
+    fn replace(&self, channel: Channel<Vec<CoreEvent>>) {
         let mut state = self
             .0
             .lock()
@@ -104,7 +69,16 @@ impl EventSink {
             let tail = pending.split_off(pending.len().min(EVENT_BATCH_LIMIT));
             let _ = channel.send(std::mem::replace(&mut pending, tail));
         }
-        state.channel.replace(channel).is_some()
+        state.channel = Some(channel);
+    }
+
+    fn detach(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .channel
+            .take()
+            .is_some()
     }
 
     fn send(&self, events: Vec<CoreEvent>) {
@@ -150,46 +124,6 @@ async fn forget_media(state: State<'_, AppState>, source: String) -> Result<(), 
     state.core.forget_media(source).await
 }
 
-/// The MIME type [`stream_video`] delivers.
-#[cfg(all(feature = "cef", target_os = "linux"))]
-#[tauri::command]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the frontend transport expects a Result"
-)]
-async fn video_stream_mime() -> Result<&'static str, RpcError> {
-    Ok(video_transcode::STREAM_MIME)
-}
-
-/// Sends a re-encode over `chunks`, ending with the empty end-of-stream chunk.
-#[cfg(all(feature = "cef", target_os = "linux"))]
-#[tauri::command]
-async fn stream_video(
-    app: AppHandle<BrowserEngine>,
-    state: State<'_, AppState>,
-    source: String,
-    id: u64,
-    chunks: tauri::ipc::Channel<Response>,
-) -> Result<(), RpcError> {
-    tracing::info!(%source, id, "video stream requested");
-    let input = state
-        .core
-        .media_thumbnail(source.clone(), 0, 0)
-        .await
-        .inspect_err(
-            |error| tracing::warn!(%source, ?error, "video stream could not fetch the attachment"),
-        )?;
-    tracing::info!(id, bytes = input.len(), "video stream fetched, encoding");
-    tauri::async_runtime::spawn_blocking(move || {
-        video_transcode::stream_to(&app, &source, &input, &chunks, id)
-    })
-    .await
-    .map_err(|error| {
-        tracing::error!(%error, "video encode task did not finish");
-        RpcError::Unavailable
-    })?
-}
-
 pub(crate) fn decode_header(request: &Request<'_>, name: &str) -> Option<String> {
     let value = request.headers().get(name)?.to_str().ok()?;
     decode_header_value(value)
@@ -221,13 +155,19 @@ struct Base64Invoke {
 trait Carried {
     fn header(&self, name: &str) -> Option<String>;
     fn bytes(&self) -> Result<Vec<u8>, RpcError>;
+
+    fn metadata<T: serde::de::DeserializeOwned>(&self) -> Result<T, RpcError> {
+        self.header("request")
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .ok_or_else(|| RpcCode::InvalidMedia.into())
+    }
 }
 
 impl Carried for Base64Invoke {
     fn bytes(&self) -> Result<Vec<u8>, RpcError> {
         STANDARD
             .decode(&self.bytes)
-            .map_err(|_| RpcError::InvalidMedia)
+            .map_err(|_| RpcCode::InvalidMedia.into())
     }
 
     fn header(&self, name: &str) -> Option<String> {
@@ -244,7 +184,7 @@ impl Carried for Request<'_> {
 
     fn bytes(&self) -> Result<Vec<u8>, RpcError> {
         let InvokeBody::Raw(bytes) = self.body() else {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         };
         Ok(bytes.clone())
     }
@@ -254,28 +194,53 @@ async fn carried_attachment(
     core: &sable_core::Core,
     request: &impl Carried,
 ) -> Result<(), RpcError> {
-    let attachment = request
-        .header("request")
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .ok_or(RpcError::InvalidMedia)?;
-    core.send_attachment(attachment, request.bytes()?).await
+    core.send_attachment(request.metadata()?, request.bytes()?)
+        .await
 }
 
 async fn carried_upload(
     core: &sable_core::Core,
     request: &impl Carried,
 ) -> Result<String, RpcError> {
-    let mime = request.header("mime").ok_or(RpcError::InvalidMedia)?;
+    let mime = request.header("mime").ok_or(RpcCode::InvalidMedia)?;
     core.upload_media(mime, request.bytes()?).await
 }
 
+async fn carried_gallery(core: &sable_core::Core, request: &impl Carried) -> Result<(), RpcError> {
+    core.send_gallery(request.metadata()?, request.bytes()?)
+        .await
+}
+
+async fn carried_rtc(core: &Arc<Core>, request: &impl Carried) -> Result<Response, RpcError> {
+    let session = request.header("session").ok_or(RpcCode::InvalidMedia)?;
+    let bytes = core.rtc_data(&session, &request.bytes()?).await?;
+    Ok(Response::new(bytes))
+}
+
 #[tauri::command]
-async fn send_gallery(
+async fn rtc_data(state: State<'_, AppState>, request: Request<'_>) -> Result<Response, RpcError> {
+    carried_rtc(&state.core, &request).await
+}
+
+#[tauri::command]
+async fn rtc_data_base64(
     state: State<'_, AppState>,
-    request: sable_core::protocol::SendGalleryRequest,
-    items: Vec<GalleryAttachment>,
+    request: Base64Invoke,
+) -> Result<Response, RpcError> {
+    carried_rtc(&state.core, &request).await
+}
+
+#[tauri::command]
+async fn send_gallery(state: State<'_, AppState>, request: Request<'_>) -> Result<(), RpcError> {
+    carried_gallery(&state.core, &request).await
+}
+
+#[tauri::command]
+async fn send_gallery_base64(
+    state: State<'_, AppState>,
+    request: Base64Invoke,
 ) -> Result<(), RpcError> {
-    state.core.send_gallery(request, items).await
+    carried_gallery(&state.core, &request).await
 }
 
 #[tauri::command]
@@ -319,20 +284,15 @@ async fn upload_media_base64(
     reason = "tauri extracts command state by value"
 )]
 fn subscribe_events(state: State<'_, AppState>, channel: Channel<Vec<CoreEvent>>) {
-    if state.event_sink.replace(channel) {
-        let core = state.core.clone();
-        tauri::async_runtime::spawn(async move { core.end_all_calls().await });
-    }
+    state.event_sink.replace(channel);
 }
 
 #[tauri::command]
 async fn register_push(
-    app: AppHandle<BrowserEngine>,
-    state: State<'_, AppState>,
+    app: AppHandle<tauri::Wry>,
     config: notifications::PushConfig,
 ) -> Result<(), notifications::PushRegistrationError> {
-    let core = state.core.clone();
-    Box::pin(notifications::register_push(&app, &core, config)).await
+    Box::pin(notifications::register_push(&app, config)).await
 }
 
 #[tauri::command]
@@ -341,7 +301,7 @@ async fn register_push(
     reason = "tauri extracts command state by value"
 )]
 fn device_pusher(
-    app: AppHandle<BrowserEngine>,
+    app: AppHandle<tauri::Wry>,
     user_id: String,
     device_id: String,
 ) -> Result<Option<notifications::DevicePusher>, RpcError> {
@@ -349,13 +309,22 @@ fn device_pusher(
 }
 
 #[tauri::command]
-async fn unregister_push(app: AppHandle<BrowserEngine>) -> Result<(), RpcError> {
-    Box::pin(notifications::unregister_push(&app)).await
+async fn unregister_push(
+    app: AppHandle<tauri::Wry>,
+    user_id: Option<String>,
+    device_id: Option<String>,
+) -> Result<(), RpcError> {
+    Box::pin(notifications::unregister_push(
+        &app,
+        user_id.as_deref(),
+        device_id.as_deref(),
+    ))
+    .await
 }
 
 #[tauri::command]
 async fn test_notification(
-    app: AppHandle<BrowserEngine>,
+    app: AppHandle<tauri::Wry>,
     state: State<'_, AppState>,
     sequence: u32,
 ) -> Result<(), RpcError> {
@@ -364,113 +333,151 @@ async fn test_notification(
     Ok(())
 }
 
-#[tauri::command]
+/// The webview sends `camelCase`, the iOS push extension reads the `snake_case` file.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all(serialize = "snake_case", deserialize = "camelCase"))]
 #[expect(
-    clippy::fn_params_excessive_bools,
-    reason = "notification preference command arguments"
+    clippy::struct_excessive_bools,
+    reason = "independent notification switches"
 )]
-async fn set_notification_encrypted_content(
-    app: AppHandle<BrowserEngine>,
-    allowed: bool,
-    content: bool,
+struct NotificationPolicy {
     enabled: bool,
+    content: bool,
+    encrypted_content: bool,
     sounds: bool,
     notify_once: bool,
     clear_on_read: bool,
+    private_receipts: bool,
+    quiet_when_active_elsewhere: bool,
+}
+
+#[tauri::command]
+async fn set_notification_policy(
+    app: AppHandle<tauri::Wry>,
+    policy: NotificationPolicy,
 ) -> Result<(), RpcError> {
     #[cfg(target_os = "android")]
     {
         use tauri_plugin_sable_push::SablePushExt;
+        let NotificationPolicy {
+            enabled,
+            content,
+            encrypted_content,
+            sounds,
+            notify_once,
+            clear_on_read,
+            private_receipts,
+            quiet_when_active_elsewhere,
+        } = policy;
         app.sable_push()
             .set_policy(tauri_plugin_sable_push::Policy {
                 enabled,
                 content,
-                encrypted_content: allowed,
+                encrypted_content,
                 sounds,
                 notify_once,
                 clear_on_read,
+                private_receipts,
+                quiet_when_active_elsewhere,
             })
             .await
-            .map_err(|_| RpcError::Unavailable)?;
+            .map_err(|_| RpcCode::Unavailable)?;
     }
     #[cfg(target_os = "ios")]
-    ios::write_push_policy(
-        enabled,
-        content,
-        allowed,
-        sounds,
-        notify_once,
-        clear_on_read,
-    )
-    .map_err(|_| RpcError::Unavailable)?;
+    ios::write_push_policy(policy).map_err(|_| RpcCode::Unavailable)?;
     #[cfg(not(target_os = "android"))]
     let _ = &app;
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let _ = (
-        allowed,
-        content,
-        enabled,
-        sounds,
-        notify_once,
-        clear_on_read,
-    );
+    #[cfg(desktop)]
+    let _ = policy;
     Ok(())
 }
 
-fn setup(app: &mut tauri::App<BrowserEngine>) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(desktop)]
-    proxy::apply_to_core();
-    #[cfg(desktop)]
-    if let Some(error) = proxy::launch_error() {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-        app.dialog()
-            .message(error)
-            .title("Sable")
-            .kind(MessageDialogKind::Error)
-            .show(|_| std::process::exit(2));
+#[cfg(target_os = "ios")]
+fn install_keyring(_app: &tauri::App<tauri::Wry>) -> Result<(), String> {
+    let group = ios::keychain_group()?;
+    sable_core::secrets::install_os_keyring(group.clone(), Some(&group))
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(desktop)]
+fn install_keyring(app: &tauri::App<tauri::Wry>) -> Result<(), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    sable_core::secrets::install_os_keyring_or_files(app.config().identifier.clone(), &data_dir)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "ios")]
+fn refuse_without_keyring(app: &tauri::App<tauri::Wry>, error: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    log::error!("no usable credential store: {error}");
+    let handle = app.handle().clone();
+    app.dialog()
+        .message(format!(
+            "Sable keeps your login and message keys in the system keyring, and none is available.\n\n{error}"
+        ))
+        .title("No system keyring")
+        .kind(MessageDialogKind::Error)
+        .show(move |_| handle.exit(1));
+}
+
+#[cfg(desktop)]
+fn refuse_without_keyring(app: &tauri::App<tauri::Wry>, error: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    log::error!("no usable credential store: {error}");
+    let handle = app.handle().clone();
+    app.dialog()
+        .message(format!(
+            "Sable keeps your login and message keys in the system keyring, and none is available.\n\n\
+             On Linux, install and unlock a Secret Service provider such as GNOME Keyring or KWallet, \
+             then start Sable again. Or keep the keys in files readable only by your user, and sign in again.\n\n{error}"
+        ))
+        .title("No system keyring")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Keep keys in files".to_owned(),
+            "Quit".to_owned(),
+        ))
+        .show(move |files| {
+            if !files {
+                handle.exit(1);
+                return;
+            }
+            let kept = handle
+                .path()
+                .app_data_dir()
+                .map_err(|error| error.to_string())
+                .and_then(|directory| {
+                    sable_core::secrets::keep_secrets_in_files(&directory)
+                        .map_err(|error| error.to_string())
+                });
+            match kept {
+                Ok(()) => handle.restart(),
+                Err(error) => {
+                    log::error!("could not keep keys in files: {error}");
+                    handle.exit(1);
+                }
+            }
+        });
+}
+
+fn setup(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Error>> {
+    // Before any window, so no page asks a core that never started.
+    #[cfg(not(target_os = "android"))]
+    if let Err(error) = install_keyring(app) {
+        refuse_without_keyring(app, &error);
         return Ok(());
     }
-
     for config in &app.config().app.windows {
-        let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), config)?
-            .on_web_resource_request(|request, response| {
-                web_resources::fix_content_type(&request, response);
-            });
-        #[cfg(desktop)]
-        let builder = window_geometry::restore(app.handle(), builder, &config.label);
-        #[cfg(desktop)]
-        let builder = window_geometry::restore_title_bar(app.handle(), builder);
-        #[cfg(all(desktop, not(all(feature = "cef", target_os = "linux"))))]
-        let builder = match proxy::launch_proxy() {
-            Ok(Some(url)) => builder.proxy_url(tauri::Url::parse(url)?),
-            _ => builder,
-        };
+        let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), config)?;
         #[cfg(target_os = "android")]
         let builder = builder.on_navigation(|url| url.as_str().parse::<tauri::http::Uri>().is_ok());
         builder.build()?;
     }
-
-    // GTK's X11 backend swaps out the X error handlers on the way in,
-    // so the runtime's have to go back on after it.
-    #[cfg(all(feature = "cef", target_os = "linux"))]
-    {
-        gtk::init()?;
-        tauri_runtime_cef::install_x_error_handlers();
-    }
-
-    // Linux never registers schemes at install time, and a Windows dev
-    // build skips the installer, so claim it at runtime.
-    #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
-    {
-        use tauri_plugin_deep_link::DeepLinkExt;
-        app.deep_link().register_all()?;
-    }
-
-    #[cfg(all(feature = "cef", target_os = "linux"))]
-    deep_link_ipc::install_handler(app.handle());
-
-    #[cfg(all(feature = "cef", target_os = "linux"))]
-    portal_theme::follow(app.handle().clone());
 
     let data_dir = app.path().app_data_dir()?;
     // Android resolves that to the app data root, which the app
@@ -479,12 +486,11 @@ fn setup(app: &mut tauri::App<BrowserEngine>) -> Result<(), Box<dyn std::error::
     let data_dir = data_dir.join("files");
     #[cfg(target_os = "ios")]
     let data_dir = {
-        let shared = ios::shared_store_dir().unwrap_or_else(|error| {
-            log::warn!("Shared notification storage unavailable: {error}");
-            data_dir.clone()
-        });
+        let shared = ios::shared_store_dir().map_err(std::io::Error::other)?;
         // Do not silently abandon an older installation's credentials or SDK store.
-        if data_dir.join("session.json").exists() && !shared.join("session.json").exists() {
+        if !shared.join("session.json").try_exists()?
+            && data_dir.join("session.json").try_exists()?
+        {
             log::warn!(
                 "Keeping the existing private iOS session; cold previews require signing in with shared storage"
             );
@@ -493,121 +499,119 @@ fn setup(app: &mut tauri::App<BrowserEngine>) -> Result<(), Box<dyn std::error::
             shared
         }
     };
+    #[cfg(target_os = "ios")]
+    if let Err(error) = ios::exclude_from_backup(&data_dir) {
+        log::warn!("could not exclude the store from iCloud backup: {error}");
+    }
     app.manage(notifications::PushStore(data_dir.clone()));
     let (core, events) = Core::new(
         data_dir.to_string_lossy().into_owned(),
-        Box::new(sable_core::store::ExclusiveFileSessionStore::new(&data_dir)),
+        session_store(&data_dir),
     );
     let event_sink = Arc::new(EventSink::default());
+    #[cfg(target_os = "ios")]
+    follow_ios_lifecycle(&core);
     #[cfg(mobile)]
     network::attach(&core);
     let pushing = core.clone();
     #[cfg(target_os = "android")]
     let _ = cold_push::CORE.set(core.clone());
+    #[cfg(target_os = "android")]
+    mobile::attach_activity(&core);
     tauri::async_runtime::spawn(restore_ahead_of_webview(core.clone()));
     app.manage(AppState {
         core,
         event_sink: event_sink.clone(),
     });
     spawn_event_pump(app.handle().clone(), pushing, events, event_sink);
-    #[cfg(desktop)]
-    notifications::register_actions(app.handle());
-    #[cfg(desktop)]
-    app.manage(tray::DesktopWindowStore::default());
 
     #[cfg(target_os = "ios")]
     if let Some(window) = app.get_webview_window("main") {
         ios::hide_form_accessory_bar(&window);
     }
 
-    #[cfg(all(not(feature = "cef"), target_os = "linux"))]
-    webkit::configure(app.handle());
-
     map_tiles::cleanup_cache(app.handle());
-    #[cfg(all(feature = "cef", target_os = "linux"))]
-    video_transcode::cleanup_cache(app.handle());
 
     Ok(())
-}
-
-#[cfg(desktop)]
-#[tauri::command]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "the framework passes this argument by value"
-)]
-fn apply_desktop_window_settings(
-    app: AppHandle<BrowserEngine>,
-    settings: tray::DesktopWindowSettings,
-) -> Result<tray::DesktopWindowState, String> {
-    tray::apply(&app, settings).map_err(|error| error.to_string())
-}
-
-#[cfg(desktop)]
-#[tauri::command]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "the framework passes this argument by value"
-)]
-fn set_tray_unread(app: AppHandle<BrowserEngine>, unread: bool) -> Result<(), String> {
-    tray::set_unread_dot(&app, unread).map_err(|error| error.to_string())
-}
-
-#[cfg(desktop)]
-fn hide_to_tray_on_close(window: &tauri::Window<BrowserEngine>, event: &tauri::WindowEvent) {
-    match event {
-        tauri::WindowEvent::CloseRequested { api, .. } => {
-            if tray::hides_to_tray(window.app_handle()) {
-                api.prevent_close();
-                tray::hide_to_tray(window);
-            }
-        }
-        tauri::WindowEvent::Resized(_)
-            if tray::minimizes_to_tray(window.app_handle())
-                && window.is_minimized().unwrap_or(false) =>
-        {
-            tray::hide_to_tray(window);
-        }
-        _ => {}
-    }
 }
 
 #[cfg(mobile)]
 const SYNC_STOP_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
-#[cfg(mobile)]
-fn update_mobile_activity(window: &tauri::Window<BrowserEngine>, event: &tauri::WindowEvent) {
-    let active = match event {
-        tauri::WindowEvent::Suspended => false,
-        tauri::WindowEvent::Resumed => true,
-        _ => return,
-    };
-    if let Some(state) = window.try_state::<AppState>() {
-        let core = state.core.clone();
-        core.set_app_active(active);
-        tauri::async_runtime::spawn(async move {
-            if !active {
-                core.release_session_lock().await;
-                tokio::time::sleep(SYNC_STOP_DELAY).await;
-            }
-            core.apply_app_activity(active).await;
-        });
+#[cfg(target_os = "ios")]
+fn follow_ios_lifecycle(core: &Arc<Core>) {
+    use std::cell::RefCell;
+
+    if ios::in_background() {
+        set_mobile_activity(core.clone(), false);
     }
+    let core = core.clone();
+    let preparation = RefCell::new(None);
+    ios::observe_lifecycle(move |change| match change {
+        ios::Lifecycle::ResignActive => {
+            preparation
+                .borrow_mut()
+                .get_or_insert_with(|| ios::BackgroundTask::begin("Prepare sync pause"));
+        }
+        ios::Lifecycle::EnterBackground => {
+            let _preparation = preparation.borrow_mut().take();
+            set_mobile_activity(core.clone(), false);
+        }
+        ios::Lifecycle::EnterForeground => {
+            preparation.borrow_mut().take();
+            set_mobile_activity(core.clone(), true);
+        }
+        ios::Lifecycle::BecomeActive => {
+            preparation.borrow_mut().take();
+        }
+    });
+}
+
+/// A mobile OS never runs two copies of the app, and iOS kills a suspended app that
+/// still holds a file lock in the shared App Group container.
+fn session_store(data_dir: &std::path::Path) -> Box<dyn sable_core::store::SessionStore> {
+    Box::new(sable_core::store::FileSessionStore::new(data_dir))
+}
+
+#[cfg(mobile)]
+fn set_mobile_activity(core: Arc<Core>, active: bool) {
+    core.update_app_in_foreground(active);
+    let revision = core.set_app_active(active);
+    #[cfg(target_os = "ios")]
+    let background_task = (!active).then(|| ios::BackgroundTask::begin("Pause sync"));
+    let stop_delay = SYNC_STOP_DELAY;
+    #[cfg(target_os = "ios")]
+    let stop_delay = if background_task
+        .as_ref()
+        .is_some_and(|task| !task.is_active())
+    {
+        std::time::Duration::ZERO
+    } else {
+        stop_delay
+    };
+    tauri::async_runtime::spawn(async move {
+        if !active {
+            tokio::time::sleep(stop_delay).await;
+        }
+        core.apply_app_activity_if_current(active, revision).await;
+        #[cfg(target_os = "ios")]
+        drop(background_task);
+    });
 }
 
 #[tauri::command]
-async fn notification_permission(app: AppHandle<BrowserEngine>) -> &'static str {
+async fn notification_permission(app: AppHandle<tauri::Wry>) -> &'static str {
     notifications::permission(&app).await
 }
 
 #[tauri::command]
-async fn request_notification_permission(app: AppHandle<BrowserEngine>) -> &'static str {
+async fn request_notification_permission(app: AppHandle<tauri::Wry>) -> &'static str {
     notifications::request_permission(&app).await
 }
 
 #[tauri::command]
 async fn dismiss_room_notifications(
-    app: AppHandle<BrowserEngine>,
+    app: AppHandle<tauri::Wry>,
     user_id: String,
     room_ids: Vec<String>,
 ) {
@@ -615,189 +619,54 @@ async fn dismiss_room_notifications(
 }
 
 #[tauri::command]
+async fn set_open_conversation(
+    app: AppHandle<tauri::Wry>,
+    user_id: Option<String>,
+    room_id: Option<String>,
+) {
+    #[cfg(target_os = "android")]
+    notifications::set_open_conversation(&app, user_id.as_deref(), room_id.as_deref()).await;
+    #[cfg(not(target_os = "android"))]
+    let _ = (app, user_id, room_id);
+}
+
+#[tauri::command]
+async fn forget_left_conversations(app: AppHandle<tauri::Wry>) {
+    #[cfg(target_os = "android")]
+    {
+        let core = app.state::<AppState>().core.clone();
+        notifications::forget_left_conversations(&app, &core).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
+}
+
+#[tauri::command]
 async fn dismiss_read_room_notifications(
-    app: AppHandle<BrowserEngine>,
+    app: AppHandle<tauri::Wry>,
     user_id: String,
     room_ids: Vec<String>,
 ) {
     notifications::dismiss_read(&app, &user_id, &room_ids).await;
 }
 
-#[cfg(all(feature = "cef", target_os = "linux"))]
-#[tauri::command]
-fn pending_deep_links() -> Vec<String> {
-    deep_link_ipc::take_pending_urls()
-}
-
-#[cfg(all(feature = "cef", target_os = "linux"))]
-#[tauri::command]
-fn system_color_scheme() -> Option<&'static str> {
-    portal_theme::current_scheme()
-}
-
-#[cfg(desktop)]
 #[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "tauri extracts command inputs by value"
 )]
-fn toggle_devtools(window: tauri::WebviewWindow<BrowserEngine>) {
-    if window.is_devtools_open() {
-        window.close_devtools();
-    } else {
-        window.open_devtools();
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn hdr_monitors() -> Vec<sable_hdr::share::HdrMonitor> {
-    tauri::async_runtime::spawn_blocking(sable_hdr::share::list)
-        .await
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn start_hdr_share(app: AppHandle<BrowserEngine>, index: usize) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || sable_hdr::share::start(app, index))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn hdr_frame_done(slot: usize) {
-    sable_hdr::share::release(slot);
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn stop_hdr_share() {
-    let _ = tauri::async_runtime::spawn_blocking(sable_hdr::share::stop).await;
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-async fn hdr_monitors() -> Vec<hdr_share::HdrMonitor> {
-    tauri::async_runtime::spawn_blocking(hdr_share::monitors)
-        .await
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-async fn start_hdr_share(frames: tauri::ipc::Channel<tauri::ipc::Response>) -> Result<(), String> {
-    let _ = tauri::async_runtime::spawn_blocking(hdr_share::stop).await;
-    hdr_share::start(frames).await
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn hdr_frame_done() {
-    hdr_share::release();
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-async fn stop_hdr_share() {
-    let _ = tauri::async_runtime::spawn_blocking(hdr_share::stop).await;
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-async fn start_screen_audio(selection: screen_audio::Selection) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || screen_audio::start(selection))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-async fn screen_audio_apps() -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(screen_audio::list_apps)
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-async fn stop_screen_audio() {
-    let _ = tauri::async_runtime::spawn_blocking(screen_audio::stop).await;
-}
-
-/// `WebView2` parents its browser process to Explorer when we run elevated, so
-/// it is not always in our process tree.
-#[cfg(target_os = "windows")]
-async fn webview_process(webview: &tauri::Webview<BrowserEngine>) -> Result<u32, String> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    webview
-        .with_webview(move |platform| {
-            let mut pid = 0;
-            // SAFETY: `pid` outlives the call, which only writes through it.
-            #[expect(unsafe_code, reason = "FFI call")]
-            let outcome = unsafe {
-                platform
-                    .controller()
-                    .CoreWebView2()
-                    .and_then(|core| core.BrowserProcessId(&raw mut pid))
-            };
-            let _ = sender.send(outcome.map(|()| pid).map_err(|error| error.to_string()));
-        })
-        .map_err(|error| error.to_string())?;
-    receiver.await.map_err(|error| error.to_string())?
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn start_screen_audio_stream(
-    webview: tauri::Webview<BrowserEngine>,
-    selection: sable_loopback::capture::Selection,
-    frames: tauri::ipc::Channel<tauri::ipc::Response>,
-) -> Result<(), String> {
-    let browser = webview_process(&webview).await?;
-    tauri::async_runtime::spawn_blocking(move || {
-        sable_loopback::share::start(&selection, browser, frames)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn screen_audio_apps(webview: tauri::Webview<BrowserEngine>) -> Result<Vec<String>, String> {
-    let browser = webview_process(&webview).await?;
-    tauri::async_runtime::spawn_blocking(move || sable_loopback::share::list_apps(browser))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn stop_screen_audio() {
-    let _ = tauri::async_runtime::spawn_blocking(sable_loopback::share::stop).await;
-}
-
-#[tauri::command]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "tauri extracts command inputs by value"
-)]
-fn open_external_url(app: AppHandle<BrowserEngine>, url: String) -> Result<(), RpcError> {
-    let parsed = tauri::Url::parse(&url).map_err(|_| RpcError::Denied)?;
+fn open_external_url(app: AppHandle<tauri::Wry>, url: String) -> Result<(), RpcError> {
+    let parsed = tauri::Url::parse(&url).map_err(|_| RpcCode::Denied)?;
     if !matches!(parsed.scheme(), "http" | "https" | "mailto" | "tel") {
-        return Err(RpcError::Denied);
+        return Err(RpcCode::Denied.into());
     }
 
     app.opener()
         .open_url(parsed.to_string(), None::<String>)
-        .map_err(|_| RpcError::Unavailable)
+        .map_err(|_| RpcCode::Unavailable.into())
 }
 
 async fn restore_ahead_of_webview(core: Arc<Core>) {
-    if !matches!(core.v1_migration_complete().await, Ok(true)) {
-        return;
-    }
     if let Err(error) = Box::pin(core.run(sable_core::api::session::RestoreParams {})).await {
         log::warn!("Early session restore failed: {error:?}");
     }
@@ -819,6 +688,16 @@ fn spawn_event_pump<R: tauri::Runtime>(
                     _ => None,
                 })
                 .collect();
+            for event in &batch {
+                if let CoreEvent::Failure {
+                    log_id,
+                    context,
+                    report,
+                } = event
+                {
+                    sentry::capture_failure(log_id, context, report);
+                }
+            }
             event_sink.send(std::mem::take(&mut batch));
 
             if showing.is_empty() {
@@ -835,67 +714,53 @@ fn spawn_event_pump<R: tauri::Runtime>(
     });
 }
 
-#[cfg(desktop)]
-fn auto_update_supported() -> bool {
-    option_env!("SABLE_DISABLE_UPDATER") != Some("1")
-        && (!cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some())
-}
-
-#[cfg(desktop)]
-fn with_updates(builder: tauri::Builder<BrowserEngine>) -> tauri::Builder<BrowserEngine> {
-    builder
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
-        .plugin(
-            tauri::plugin::Builder::<BrowserEngine, ()>::new("sable-updates")
-                .js_init_script(format!(
-                    "window.__SABLE_AUTO_UPDATE__ = {};",
-                    auto_update_supported()
-                ))
-                .build(),
-        )
-}
-
 /// Silences two SDK sites that log once per room per sync response.
 fn install_logging() {
     use tracing_subscriber::prelude::*;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SABLE_LOG").unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(
-            "info,matrix_sdk_base::room::display_name=error,matrix_sdk::latest_events=off,matrix_sdk::http_client=off",
-        )
-    });
-    let sentry = ::sentry::integrations::tracing::layer()
-        .event_filter(sentry::tracing_filter)
-        .span_filter(|_| false);
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_env("SABLE_LOG").unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new(
+                "info,matrix_sdk_base::room::display_name=error,matrix_sdk::latest_events=off,matrix_sdk::http_client=off",
+            )
+        })
+    };
+    #[cfg(target_os = "android")]
+    let console = paranoid_android::layer("sable");
+    #[cfg(not(target_os = "android"))]
+    let console = tracing_subscriber::fmt::layer();
     let subscriber = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(filter))
-        .with(sentry);
+        .with(sable_core::binding::ErrorLayer::default().with_filter(filter()))
+        .with(console.with_filter(filter()))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(debug_log::MakeDebugLogWriter)
+                .with_filter(filter()),
+        )
+        .with(sentry::tracing_layer());
     if let Err(error) = subscriber.try_init() {
         eprintln!("could not install the log subscriber: {error}");
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn with_platform_plugins(builder: tauri::Builder<BrowserEngine>) -> tauri::Builder<BrowserEngine> {
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(mobile)]
+fn with_platform_plugins(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     let builder = builder
         .plugin(tauri_plugin_app_icon::init())
         .plugin(tauri_plugin_edge_to_edge::init())
         .plugin(tauri_plugin_livekit_mobile::init());
 
+    #[cfg(target_os = "ios")]
+    let builder = builder.plugin(tauri_plugin_auth_session::init());
+
     #[cfg(target_os = "android")]
     let builder = builder.plugin(tauri_plugin_sable_push::init());
 
-    #[cfg(all(any(target_os = "android", target_os = "ios"), feature = "geolocation"))]
+    #[cfg(feature = "geolocation")]
     let builder = builder.plugin(tauri_plugin_geolocation::init());
 
-    #[cfg(any(
-        target_os = "android",
-        target_os = "ios",
-        target_os = "macos",
-        target_os = "windows"
-    ))]
     let builder = builder.plugin(tauri_plugin_sharekit::init());
 
     #[cfg(target_os = "android")]
@@ -904,18 +769,9 @@ fn with_platform_plugins(builder: tauri::Builder<BrowserEngine>) -> tauri::Build
     builder
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the platform-specific builder remains together"
-)]
-pub fn run() {
-    // Before the threads Tauri spawns, so they inherit the panic handler.
-    let sentry_guard = sentry::init();
-    install_logging();
-
-    let builder = tauri::Builder::<BrowserEngine>::new();
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+fn app_builder(sentry_client: Option<&::sentry::Client>) -> tauri::Builder<tauri::Wry> {
+    let builder = tauri::Builder::<tauri::Wry>::new();
+    #[cfg(target_os = "ios")]
     let builder = builder.on_web_content_process_terminate(|webview| {
         tracing::error!("webview content process terminated");
         // WebKit leaves the page blank until reloaded.
@@ -923,43 +779,16 @@ pub fn run() {
             tracing::error!(%error, "webview reload failed");
         }
     });
-    let builder = if let Some(client) = sentry_guard.as_ref() {
+    let builder = if let Some(client) = sentry_client {
         builder.plugin(tauri_plugin_sentry::init_with_no_injection(client))
     } else {
         builder
     };
 
-    // Before every other plugin, as its docs require: it has to win the race
-    // with a second process carrying the OIDC redirect.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.set_focus();
-        }
-    }));
-
-    #[cfg(desktop)]
-    let builder = if verbose::enabled() {
-        builder.plugin(verbose::plugin())
-    } else {
-        builder
-    };
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder
-        .plugin(window_geometry::plugin())
-        .on_window_event(hide_to_tray_on_close);
-
     #[cfg(mobile)]
-    let builder = builder.on_window_event(update_mobile_activity);
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = with_updates(builder);
-
-    #[cfg(not(target_os = "linux"))]
     let builder = with_platform_plugins(builder);
 
-    let app = match builder
+    builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(
             tauri_plugin_opener::Builder::new()
@@ -972,82 +801,86 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notifications::init())
         .register_asynchronous_uri_scheme_protocol(map_tiles::TILE_URI_SCHEME, map_tiles::respond)
+        .on_page_load(|webview, payload| {
+            if payload.event() != tauri::webview::PageLoadEvent::Started {
+                return;
+            }
+            debug_log::detach();
+            if let Some(state) = webview.try_state::<AppState>()
+                && state.event_sink.detach()
+            {
+                let core = state.core.clone();
+                tauri::async_runtime::spawn(async move { core.end_all_calls().await });
+            }
+        })
         .setup(setup)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // Before the threads Tauri spawns, so they inherit the panic handler.
+    let sentry_guard = sentry::init();
+    install_logging();
+
+    let app = match app_builder(sentry_guard.as_deref())
         .invoke_handler(tauri::generate_handler![
-            v1_migration::v1_migration_complete,
-            v1_migration::begin_v1_migration,
-            v1_migration::import_v1_crypto_batch,
-            v1_migration::finish_v1_migration,
-            v1_migration::skip_v1_migration,
             call,
             subscribe_events,
             fetch_media,
             forget_media,
-            #[cfg(all(feature = "cef", target_os = "linux"))]
-            stream_video,
-            #[cfg(all(feature = "cef", target_os = "linux"))]
-            video_stream_mime,
             import_persona_avatar,
             send_attachment,
             send_gallery,
+            send_gallery_base64,
             send_attachment_base64,
             upload_media,
             upload_media_base64,
+            rtc_data,
+            rtc_data_base64,
             open_external_url,
-            #[cfg(target_os = "linux")]
-            start_screen_audio,
-            #[cfg(target_os = "windows")]
-            start_screen_audio_stream,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            stop_screen_audio,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            screen_audio_apps,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            hdr_monitors,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            start_hdr_share,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            hdr_frame_done,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            stop_hdr_share,
-            #[cfg(desktop)]
-            toggle_devtools,
-            #[cfg(desktop)]
-            verbose::log_console,
-            #[cfg(all(feature = "cef", target_os = "linux"))]
-            pending_deep_links,
-            #[cfg(all(feature = "cef", target_os = "linux"))]
-            system_color_scheme,
             register_push,
             unregister_push,
             device_pusher,
             dismiss_room_notifications,
+            forget_left_conversations,
+            set_open_conversation,
             dismiss_read_room_notifications,
             notification_permission,
             request_notification_permission,
             test_notification,
-            set_notification_encrypted_content,
-            #[cfg(desktop)]
-            apply_desktop_window_settings,
-            #[cfg(desktop)]
-            set_tray_unread,
-            #[cfg(target_os = "windows")]
-            snap_layouts::show_snap_layouts,
-            #[cfg(target_os = "windows")]
-            snap_layouts::release_snap_layouts,
-            #[cfg(target_os = "windows")]
-            snap_layouts::dismiss_snap_layouts,
+            set_notification_policy,
             share_inbox::share_inbox_drain,
             share_inbox::share_inbox_read,
             share_inbox::share_inbox_clear,
             sentry::set_native_sentry_enabled,
+            debug_log::set_debug_logs,
             has_geolocation,
+            #[cfg(desktop)]
+            theme_files::pick_theme_files,
+            #[cfg(desktop)]
+            theme_files::read_theme_file,
             #[cfg(target_os = "ios")]
             ios::save_media_to_photos,
+            #[cfg(target_os = "ios")]
+            ios::h264_from_hevc,
+            #[cfg(target_os = "ios")]
+            ios::open_in_app_auth_url,
+            #[cfg(target_os = "ios")]
+            ios::close_in_app_auth_window,
+            #[cfg(target_os = "android")]
+            mobile::open_in_app_auth_url,
+            #[cfg(target_os = "android")]
+            mobile::close_in_app_auth_window,
+            #[cfg(target_os = "ios")]
+            ios::donate_sent_message,
             #[cfg(target_os = "ios")]
             ios::haptic_feedback,
             #[cfg(target_os = "ios")]
             ios::set_system_bars_hidden,
+            #[cfg(target_os = "ios")]
+            ios::set_badge_count,
+            #[cfg(target_os = "android")]
+            mobile::copy_image_to_clipboard,
             #[cfg(target_os = "android")]
             mobile::haptic_feedback,
             #[cfg(target_os = "android")]
@@ -1077,7 +910,7 @@ pub fn run() {
 const EXIT_HANGUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Quitting mid-call would otherwise leave our membership in the room.
-fn hang_up_before_exit(app: &AppHandle<BrowserEngine>) {
+fn hang_up_before_exit(app: &AppHandle<tauri::Wry>) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
@@ -1119,8 +952,8 @@ mod tests {
         });
 
         let sink = EventSink::default();
-        assert!(!sink.replace(first));
-        assert!(sink.replace(second));
+        sink.replace(first);
+        sink.replace(second);
         sink.send(vec![CoreEvent::SessionEnded {
             reason: "test".to_owned(),
         }]);

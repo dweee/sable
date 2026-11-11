@@ -14,9 +14,9 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
+  import { nativeFilePicker } from '#lib/platform/native-file-picker.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
-  import MediaImage from '#lib/ui/MediaImage.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import FormField from '#lib/ui/primitives/FormField.svelte';
   import OptionCards from '#lib/ui/primitives/OptionCards.svelte';
@@ -37,10 +37,12 @@
   import RoomAddressSettings from './RoomAddressSettings.svelte';
   import RoomEncryptionSettings from './RoomEncryptionSettings.svelte';
   import RoomHistorySettings from './RoomHistorySettings.svelte';
+  import RoomPresenceSettings from './RoomPresenceSettings.svelte';
   import RoomPublishSettings from './RoomPublishSettings.svelte';
   import RoomSpacesSettings from './RoomSpacesSettings.svelte';
   import RoomUpgradeSettings from './RoomUpgradeSettings.svelte';
   import { canSendState } from './permission-groups';
+  import Banner from '#lib/ui/primitives/Banner.svelte';
 
   interface Props {
     room: RoomListItemView | null;
@@ -238,7 +240,9 @@
 
 {#snippet bannerPreview()}
   {#if banner}
-    <MediaImage source={banner} alt="" width={160} height={90} class="banner-preview" />
+    <div class="banner-preview">
+      <Banner source={banner} {name} width={160} height={90} />
+    </div>
   {/if}
 {/snippet}
 
@@ -254,7 +258,12 @@
         description={i18n.t('room.settingsAvatarHint')}
       >
         {#snippet before()}
-          <Avatar id={roomId} src={room?.avatar_url ?? null} name={room?.name ?? ''} />
+          <Avatar
+            id={roomId}
+            src={room?.avatar_url ?? null}
+            openable={true}
+            name={room?.name ?? ''}
+          />
         {/snippet}
         {#if canEditAvatar}
           <Button size="small" disabled={saving} onclick={() => avatarInput?.click()}>
@@ -268,6 +277,7 @@
         {/if}
         <input
           bind:this={avatarInput}
+          use:nativeFilePicker
           class="avatar-input"
           type="file"
           accept="image/*"
@@ -293,6 +303,7 @@
         {/if}
         <input
           bind:this={bannerInput}
+          use:nativeFilePicker
           class="avatar-input"
           type="file"
           accept="image/*"
@@ -396,9 +407,10 @@
       {#if room?.room_kind !== 'space'}
         <RoomHistorySettings {room} {levels} {ownPowerLevel} />
         <RoomEncryptionSettings {room} {levels} {ownPowerLevel} />
+        <RoomPresenceSettings {room} {levels} {ownPowerLevel} />
       {/if}
       <RoomPublishSettings {room} {levels} {ownPowerLevel} />
-      <RoomSpacesSettings {room} />
+      <RoomSpacesSettings {room} {levels} {ownPowerLevel} />
       {#if room?.is_direct}
         <SettingsRow
           title={i18n.t('common.directMessage')}
@@ -426,7 +438,7 @@
       {#if failed}
         <p class="save-status error" role="alert">{i18n.t('room.settingsFailed')}</p>
       {:else if dirty}
-        <p class="save-status" role="status">{i18n.t('common.youHaveUnsavedChanges')}</p>
+        <p class="save-status" role="status">{i18n.t('common.unsavedChangesNotice')}</p>
       {:else if saved}
         <p class="save-status" role="status">{i18n.t('room.settingsSaved')}</p>
       {/if}
@@ -454,14 +466,13 @@
     margin: 0;
   }
 
-  .section :global(.media-image.banner-preview) {
+  .section .banner-preview :global(.media-image) {
     border-radius: var(--radius);
     flex: none;
     height: 2.5rem;
     max-width: none;
     object-fit: cover;
     overflow: hidden;
-    width: 4.5rem;
   }
 
   .avatar-input {

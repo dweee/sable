@@ -1,5 +1,7 @@
 <script lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { onMount } from 'svelte';
+  import { watchMatrixLinks } from '#lib/rooms/native-links.js';
   import { on } from 'svelte/events';
   import type { Snippet } from 'svelte';
   import { isTauri } from '@tauri-apps/api/core';
@@ -13,32 +15,27 @@
   import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
   import TitleBar from '#lib/ui/TitleBar.svelte';
   import SessionRestoreError from '#lib/ui/SessionRestoreError.svelte';
+  import ModelLoadError from '#lib/ui/ModelLoadError.svelte';
+  import { modelLoadFailed } from '#lib/model/model-load.svelte.js';
   import AccountLocked from '#lib/features/sidebar/AccountLocked.svelte';
   import favicon from '#lib/assets/favicon.png';
+  import { appName, faviconUrl } from '#lib/deployment/brand.js';
   import { trackKeyboardInset } from '#lib/platform/keyboard.js';
-  import { trackInspectorShortcut } from '#lib/platform/devtools.js';
-  import { trackZoomShortcuts } from '#lib/platform/zoom-shortcuts.js';
-  import { suppressNativeContextMenu } from '#lib/platform/context-menu.js';
   import { blockEdgeNavigation } from '#lib/platform/edge-navigation.js';
   import { systemDark } from '#lib/platform/system-theme.js';
   import { hostsServiceWorker, registerServiceWorker } from '#lib/platform/service-worker.js';
   import { notificationPermalink } from '#lib/features/notifications/notification-link.js';
   import { guardTouchClicks } from '#lib/ui/trailing-click.js';
-  import {
-    applyDesktopWindowSettings,
-    setWindowFullscreen,
-    supportsDesktopWindow,
-    titleBarKind,
-  } from '#lib/platform/window-decorations.js';
+  import { applyDesktopWindowSettings, titleBarKind } from '#lib/platform/window-decorations.js';
   import { electronBridge } from '#lib/platform/electron.js';
-  import { runtimeConfig } from '#lib/config/runtime-config.js';
-  import { applyDeploymentDefaults, preferences } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import {
     activeCustomThemeCss,
     activeTweakCss,
     hydrateCatalogThemes,
     updateCatalogThemes,
     themePreview,
+    watchThemeFiles,
   } from '#lib/settings/custom-themes.svelte.js';
   import {
     applyCustomTheme,
@@ -51,6 +48,13 @@
   } from '#lib/settings/theme.js';
   import { shouldReduceMotion } from '#lib/ui/motion.js';
   import { ALERT_MODULES, provideAlertProviders } from '#lib/features/sidebar/alerts.js';
+  import ServerLogin from './ServerLogin.svelte';
+  import {
+    bindServerNotificationIdentity,
+    boundServerIdentity,
+    isServerAuthenticationFailure,
+    ServerSessionError,
+  } from '#lib/notifications/room-names.js';
 
   interface Props {
     children: Snippet;
@@ -58,38 +62,107 @@
 
   let { children }: Props = $props();
   const core = createCoreClient();
+  const serverMode = Boolean(import.meta.env.VITE_SABLE_SERVER_URL);
+  let serverAuthEndpoint = $state('/_sable/auth');
+  let serverAuthReady = $state(!serverMode);
+  let serverAuthenticated = $state(!serverMode);
+  let mounted = $state(false);
   provideCoreClient(core);
   const alertProviders = ALERT_MODULES.map((component) => component.priorityProvider());
   provideAlertProviders(alertProviders);
   let titlebar = $derived(titleBarKind(preferences.useCustomTitleBar));
 
+  onMount(watchThemeFiles);
+
   onMount(() => {
+    mounted = true;
     void hydrateCatalogThemes().then(updateCatalogThemes);
 
     if (isTauri()) {
       document.documentElement.dataset.tauriOs = osType();
     }
 
+    const identityChannel =
+      serverMode && typeof BroadcastChannel !== 'undefined'
+        ? new BroadcastChannel('sable-server-identity')
+        : null;
+    if (identityChannel) {
+      identityChannel.onmessage = (event: MessageEvent<unknown>) => {
+        const current = boundServerIdentity();
+        if (
+          current &&
+          typeof event.data === 'string' &&
+          (event.data === 'logout' || event.data !== current)
+        ) {
+          core.stop();
+          window.location.reload();
+        }
+      };
+      const current = boundServerIdentity();
+      if (current) identityChannel.postMessage(current);
+    }
     const stopTrackingKeyboard = trackKeyboardInset();
     const stopGuardingClicks = guardTouchClicks();
-    const stopInspectorShortcut = trackInspectorShortcut();
-    const stopZoomShortcuts = trackZoomShortcuts();
-    const stopSuppressingContextMenu = suppressNativeContextMenu();
     const stopBlockingEdgeNavigation = blockEdgeNavigation();
     void registerServiceWorker();
-    void runtimeConfig().then((config) => {
-      applyDeploymentDefaults(config.settingsDefaults);
+    const stopMatrixLinks = watchMatrixLinks((path) => {
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- matrixLinkPath resolves the permalink route
+      void goto(path);
     });
-    void core.start();
+    if (serverMode) {
+      const configured = import.meta.env.VITE_SABLE_SERVER_URL;
+      serverAuthEndpoint = new URL(
+        '/_sable/auth',
+        new URL(configured ?? window.location.href, window.location.href)
+      ).toString();
+      void fetch(serverAuthEndpoint, { credentials: 'include' })
+        .then((response) => {
+          if (!response.ok && response.status !== 401 && response.status !== 403)
+            throw new ServerSessionError(response.status);
+          serverAuthenticated = response.ok;
+        })
+        .catch((error: unknown) => {
+          console.error('[sable server] session check failed', error);
+          core.restoreFailed = true;
+          core.status = 'error';
+        })
+        .finally(() => {
+          serverAuthReady = true;
+        });
+    }
     return () => {
+      identityChannel?.close();
       stopTrackingKeyboard();
       stopGuardingClicks();
-      stopInspectorShortcut();
-      stopZoomShortcuts();
-      stopSuppressingContextMenu();
       stopBlockingEdgeNavigation();
+      stopMatrixLinks();
       core.stop();
     };
+  });
+
+  $effect(() => {
+    if (mounted && serverAuthReady && serverAuthenticated && !modelLoadFailed()) {
+      void (async () => {
+        if (serverMode) {
+          const previouslyBound = boundServerIdentity();
+          await bindServerNotificationIdentity();
+          // Stores read user-scoped storage at import; reload so they see this user.
+          if (!previouslyBound) {
+            window.location.reload();
+            return;
+          }
+        }
+        await core.start();
+      })().catch((error: unknown) => {
+        if (isServerAuthenticationFailure(error)) {
+          serverAuthenticated = false;
+          return;
+        }
+        console.error('[sable server] startup failed', error);
+        core.restoreFailed = true;
+        core.status = 'error';
+      });
+    }
   });
 
   $effect(() => {
@@ -101,6 +174,7 @@
         | { type?: string; roomId?: string; userId?: string; eventId?: string }
         | undefined;
       if (message?.type !== 'sable:open-room' || message.roomId === undefined) return;
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- notificationPermalink() resolves the route itself
       void goto(notificationPermalink(message.roomId, message.eventId, message.userId));
     });
   });
@@ -122,10 +196,13 @@
   $effect(() => {
     electronBridge()?.applySettings({
       hardwareAcceleration: preferences.hardwareAcceleration,
-      hardwareVideoAcceleration: preferences.hardwareVideoAcceleration,
+      hardwareVideoEncode: preferences.hardwareVideoEncode,
+      hardwareVideoDecode: preferences.hardwareVideoDecode,
       smoothScrolling: preferences.smoothScrolling,
       webRtcIpPolicy: preferences.webRtcIpPolicy,
       updateChannel: preferences.updateChannel,
+      launchAtLogin: preferences.launchAtLogin,
+      startMinimized: preferences.startMinimized,
     });
   });
 
@@ -171,17 +248,12 @@
   onvisibilitychange={() => {
     if (document.visibilityState === 'visible') void updateCatalogThemes();
   }}
-  onfullscreenchange={() => {
-    if (!supportsDesktopWindow()) return;
-    setWindowFullscreen(document.fullscreenElement !== null).catch((error: unknown) => {
-      console.debug('[sable window] the window fullscreen state was not applied', error);
-    });
-  }}
 />
 
+<PageTitle title={appName()} />
+
 <svelte:head>
-  <title>Sable</title>
-  <link rel="icon" href={favicon} />
+  <link rel="icon" href={faviconUrl() ?? favicon} />
 </svelte:head>
 
 <!-- Icons ride along with a labelled control, so `role="img"` would only add a
@@ -192,10 +264,21 @@
   {/if}
 
   <TooltipProvider>
-    {#if core.accountLocked}
+    {#if modelLoadFailed()}
+      <ModelLoadError />
+    {:else if core.accountLocked}
       <AccountLocked />
     {:else if core.restoreFailed}
       <SessionRestoreError />
+    {:else if serverMode && !serverAuthReady}
+      <main>Checking server session…</main>
+    {:else if serverMode && !serverAuthenticated}
+      <ServerLogin
+        endpoint={serverAuthEndpoint}
+        onAuthenticated={() => {
+          window.location.reload();
+        }}
+      />
     {:else}
       {@render children()}
     {/if}

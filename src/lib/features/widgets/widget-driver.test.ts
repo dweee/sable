@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest';
 import type { CoreClient } from '#lib/core/client.svelte.js';
-import { CoreError } from '#src/transport';
+import { CoreError, transportFailure } from '#src/transport';
 import { SableWidgetDriver } from './widget-driver.js';
 
 test('returns the created IDs for messages, state events and redactions', async () => {
@@ -313,7 +313,7 @@ test('expresses core refusals as Matrix API errors', () => {
   expect(driver.processError(new CoreError({ code: 'denied' }))).toMatchObject({
     matrix_api_error: { http_status: 403, response: { errcode: 'M_FORBIDDEN' } },
   });
-  expect(driver.processError(new CoreError({ code: 'failed', log_id: 'e1' }))).toBeUndefined();
+  expect(driver.processError(new CoreError(transportFailure('e1')))).toBeUndefined();
   expect(driver.processError(new Error('boom'))).toBeUndefined();
 });
 
@@ -327,5 +327,31 @@ test('offers no TURN servers when the homeserver has none', async () => {
   await expect(driver.getTurnServers().next()).resolves.toEqual({
     done: true,
     value: undefined,
+  });
+});
+
+test('a widget searching the directory sees real names, never nicknames', async () => {
+  const driver = driverWithRpc({
+    account: {
+      searchUserDirectory: vi.fn().mockResolvedValue({
+        limited: false,
+        results: [
+          {
+            user_id: '@bob:example.org',
+            display_name: 'Bobby',
+            avatar_url: 'mxc://example.org/nick',
+            real_name: 'Bob',
+            real_avatar_url: 'mxc://example.org/real',
+          },
+        ],
+      }),
+    },
+  });
+
+  await expect(driver.searchUserDirectory('bob')).resolves.toEqual({
+    limited: false,
+    results: [
+      { userId: '@bob:example.org', displayName: 'Bob', avatarUrl: 'mxc://example.org/real' },
+    ],
   });
 });

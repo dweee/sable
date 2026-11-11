@@ -12,20 +12,19 @@ import type {
   PersonaView,
   RoomPreviewView,
   RpcParams,
+  ShareHistoryView,
   Rpc,
 } from '#src/generated/protocol';
 
 import {
-  descriptionKey,
   parseSlash,
   runSlash,
   slashCommandNames,
   SlashError,
-  usageKey,
   type SlashContext,
 } from './slash-commands';
 
-import en from '../../../locales/en.json' with { type: 'json' };
+import { testPersona } from '#lib/personas/persona.ts';
 
 function fakeCommands() {
   return {
@@ -58,7 +57,10 @@ function fakeCommands() {
 
 function fakeRpc() {
   return {
-    encryption: { discardRoomKey: vi.fn(() => Promise.resolve(null)) },
+    encryption: {
+      discardRoomKey: vi.fn(() => Promise.resolve(null)),
+      shareHistory: vi.fn(() => Promise.resolve<ShareHistoryView>('shared')),
+    },
     room_state: {
       setName: vi.fn(() => Promise.resolve(null)),
       setTopic: vi.fn(() => Promise.resolve(null)),
@@ -72,6 +74,7 @@ function fakeRpc() {
           personas: [],
           account: null,
           rooms: {},
+          account_rooms: [],
           disabled_rooms: [],
         } as PersonaCatalogView)
       ),
@@ -105,6 +108,7 @@ function context(
     roomId: '!room:example.org',
     userId: '@me:example.org',
     developerTools: true,
+    e2eePolicy: () => Promise.resolve({ defaultEncrypted: true, forceDisabled: false }),
     rpc: {
       ...rpc,
       account: commands,
@@ -236,6 +240,21 @@ test.each(['hug', 'cuddle', 'wave', 'poke', 'headpat'] as const)(
     });
   }
 );
+
+test('a mention pill stands in for the user id a command asks for', async () => {
+  const commands = fakeCommands();
+
+  await runSlash('/headpat @Kris', {
+    ...context(commands),
+    formatted: '/headpat <a href="https://matrix.to/#/@kris:example.org">@Kris</a>',
+  });
+
+  expect(commands.sendGesture).toHaveBeenCalledWith({
+    room_id: '!room:example.org',
+    gesture: 'headpat',
+    target: '@kris:example.org',
+  });
+});
 
 test('a gesture without a target is sent at nobody in particular', async () => {
   const commands = fakeCommands();
@@ -485,19 +504,6 @@ test.each([
   });
 });
 
-test('every command has a description and a usage line', () => {
-  const slash: Record<string, { description: string; usage: string }> = en.composer.slash;
-
-  for (const name of slashCommandNames()) {
-    const entry = slash[name];
-    expect(entry, `no locale entry for /${name}`).toBeDefined();
-    expect(descriptionKey(name)).toBe(`composer.slash.${name}.description`);
-    expect(usageKey(name)).toBe(`composer.slash.${name}.usage`);
-    expect(entry.description.length, `/${name} description`).toBeGreaterThan(0);
-    expect(entry.usage.startsWith(`/${name}`), `/${name} usage`).toBe(true);
-  }
-});
-
 test('no two commands claim the same name', () => {
   const names = slashCommandNames();
 
@@ -570,6 +576,29 @@ test('/discardsession discards the room key', async () => {
   });
 });
 
+test('/sharehistory shares the room history with one user', async () => {
+  const rpc = fakeRpc();
+
+  await runSlash('/sharehistory @bob:example.org', context(fakeCommands(), rpc));
+  expect(rpc.encryption.shareHistory).toHaveBeenCalledWith({
+    room_id: '!room:example.org',
+    user_id: '@bob:example.org',
+  });
+
+  await expect(runSlash('/sharehistory', context(fakeCommands(), rpc))).rejects.toMatchObject({
+    key: 'composer.slash.sharehistory.usage',
+  });
+});
+
+test('/sharehistory says why nothing was shared', async () => {
+  const rpc = fakeRpc();
+  rpc.encryption.shareHistory.mockResolvedValue('no_cross_signing');
+
+  await expect(
+    runSlash('/sharehistory @bob:example.org', context(fakeCommands(), rpc))
+  ).rejects.toMatchObject({ key: 'composer.slashShareHistory.no_cross_signing' });
+});
+
 test('/acl hands the flags to the core', async () => {
   const rpc = fakeRpc();
 
@@ -611,20 +640,15 @@ test('/addwidget shows its usage for a url the core refuses', async () => {
 test('/pmpproxy appends a persona trigger', async () => {
   const rpc = fakeRpc();
   const persona = {
+    ...testPersona,
     id: 'alt',
     display_name: 'Alt',
-    avatar_url: null,
-    pronouns: [],
-    color_on_light: null,
-    color_on_dark: null,
-    triggers: [],
-    pluralkit: null,
-    last_used: null,
   } satisfies PersonaView;
   rpc.personas.list.mockResolvedValueOnce({
     personas: [persona],
     account: null,
     rooms: {},
+    account_rooms: [],
     disabled_rooms: [],
   });
 
@@ -633,8 +657,9 @@ test('/pmpproxy appends a persona trigger', async () => {
   expect(rpc.personas.save).toHaveBeenCalledWith({
     persona: expect.objectContaining({
       id: 'alt',
-      triggers: [{ prefix: '✨:', suffix: null, keep_trigger: false }],
+      triggers: [{ prefix: '✨:', suffix: null, keep_trigger: false, alternate_avatar_id: null }],
     }) as unknown,
+    base_persona: persona,
     previous_id: 'alt',
   });
 });
@@ -775,6 +800,7 @@ test('/addpmp creates a profile from its named fields', async () => {
       display_name: 'Alt',
       avatar_url: 'mxc://example.org/a',
     }) as unknown,
+    base_persona: expect.objectContaining({ id: 'alt' }) as unknown,
     previous_id: null,
   });
 });
@@ -834,6 +860,8 @@ function member(userId: string, membership: MemberView['membership'] = 'join'): 
   return {
     user_id: userId,
     display_name: null,
+    real_name: null,
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership,

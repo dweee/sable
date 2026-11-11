@@ -7,7 +7,7 @@
   import { i18n } from '#lib/i18n.js';
   import SettingsAnchorLink from '#lib/ui/primitives/SettingsAnchorLink.svelte';
   import { deliversNativePush, deliversWebPush } from '#lib/platform/notifications.js';
-  import { setPreference } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import Select from '#lib/ui/primitives/Select.svelte';
@@ -22,7 +22,9 @@
     type PushProvider,
   } from './native-push.js';
   import {
+    embeddedServer,
     hasCompleteOverride,
+    isEmbeddedServerUrl,
     type OverrideProblem,
     overrideProblem,
     type PushOverride,
@@ -45,7 +47,7 @@
   const config = runtimeConfig();
   const core = useCoreClient();
   let android = $state(false);
-  let native = $state(false);
+  const native = deliversNativePush();
   let distributors = $state.raw<string[]>([]);
   let selected = $state('');
   let switching = $state(false);
@@ -54,10 +56,7 @@
   let serverPush = $state(false);
 
   async function refreshServerPush(): Promise<void> {
-    if (
-      !(deliversWebPush() || (await deliversNativePush())) ||
-      hasCompleteOverride(pushOverride())
-    ) {
+    if (!(deliversWebPush() || native) || hasCompleteOverride(pushOverride())) {
       serverPush = false;
       return;
     }
@@ -71,7 +70,6 @@
 
   async function refreshDistributors(): Promise<void> {
     try {
-      native = await deliversNativePush();
       android = await supportsPushDistributors();
       if (!android) return;
       distributors = await listPushDistributors();
@@ -144,6 +142,15 @@
   const dirty = $derived(fields.some((field) => draft[field.key] !== saved[field.key]));
   const urlRejected = $derived(problem === 'notAUrl' || problem === 'notAGateway');
 
+  let serverDraft = $state(preferences.pushEmbeddedServerUrl);
+  const serverDirty = $derived(serverDraft.trim() !== preferences.pushEmbeddedServerUrl);
+  const serverRejected = $derived(serverDraft.trim() !== '' && !isEmbeddedServerUrl(serverDraft));
+
+  function applyServer(next: string): void {
+    setPreference('pushEmbeddedServerUrl', next.trim());
+    serverDraft = preferences.pushEmbeddedServerUrl;
+  }
+
   function apply(next: PushOverride): void {
     for (const field of fields) setPreference(field.key, next[field.key].trim());
     draft = pushOverride();
@@ -191,6 +198,50 @@
         disabled={switching || core.status !== 'ready'}
       />
     {/if}
+    {#if provider === 'embedded'}
+      <label>
+        <span>{i18n.t('settings.pushEmbeddedServer')}</span>
+        <TextInput
+          bind:value={serverDraft}
+          placeholder="https://ntfy.example.org"
+          autocomplete="off"
+          spellcheck="false"
+          aria-invalid={serverRejected ? 'true' : undefined}
+        />
+      </label>
+      {#await config then { push }}
+        <p class="hint">
+          {i18n.t('settings.pushEmbeddedServerHint', { server: embeddedServer(push) })}
+        </p>
+      {/await}
+      {#if serverRejected}
+        <Alert variant="warning" role="status">
+          <p>{i18n.t('settings.pushEmbeddedServerInvalid')}</p>
+        </Alert>
+      {/if}
+      <div class="actions">
+        <Button
+          variant="primary"
+          size="small"
+          disabled={!serverDirty || serverRejected || switching}
+          onclick={() => {
+            applyServer(serverDraft);
+          }}
+        >
+          {i18n.t('common.apply')}
+        </Button>
+        <Button
+          variant="secondary"
+          size="small"
+          disabled={(preferences.pushEmbeddedServerUrl === '' && !serverDirty) || switching}
+          onclick={() => {
+            applyServer('');
+          }}
+        >
+          {i18n.t('settings.pushGatewayReset')}
+        </Button>
+      </div>
+    {/if}
     {#if distributorError}
       <Alert variant="critical">
         {i18n.t(
@@ -209,6 +260,9 @@
     <SettingsAnchorLink anchor="push-gateway" />
   </div>
   <p class="hint settings-description">{i18n.t('settings.pushGatewayHint')}</p>
+  {#if android && (provider === 'unifiedpush' || provider === 'embedded')}
+    <p class="hint">{i18n.t('settings.pushGatewayUnifiedPush')}</p>
+  {/if}
 
   {#if !deliversWebPush() && !native}
     <Alert variant="info">

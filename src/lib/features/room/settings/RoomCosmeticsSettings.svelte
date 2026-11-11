@@ -12,6 +12,7 @@
   import { COSMETIC_EVENT_TYPES, pronounSets } from '#lib/features/composer/slash-commands.js';
   import { MAX_DISPLAY_NAME_LENGTH } from '#lib/profile/fields.js';
   import { MAX_PRONOUN_INPUT } from '#lib/profile/pronouns.js';
+  import { nativeFilePicker } from '#lib/platform/native-file-picker.js';
   import ColorSetting from '#lib/ui/ColorSetting.svelte';
   import { i18n } from '#lib/i18n.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
@@ -76,6 +77,7 @@
     if (saving === 'apply' && applied)
       return i18n.t('room.cosmeticsApplying', {
         done: applied.done + applied.failed,
+        count: applied.total,
         total: applied.total,
       });
     if (applied?.failed)
@@ -311,6 +313,7 @@
         {/if}
         <input
           bind:this={avatarInput}
+          use:nativeFilePicker
           class="avatar-input"
           type="file"
           accept="image/*"
@@ -465,5 +468,9 @@
   .inline-field {
     display: flex;
     gap: var(--space-200);
+
+    :global(button) {
+      flex-shrink: 0;
+    }
   }
 </style>

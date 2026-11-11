@@ -9,7 +9,7 @@
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import type { CallVoiceState } from '#lib/features/call/call-session.svelte.js';
-  import { numberedName, participantKeys } from '#lib/features/call/participant-keys.js';
+  import { byName, numberedName, participantKeys } from '#lib/features/call/participant-keys.js';
   import type { PeerProfiles } from './peer-profiles.svelte.js';
 
   interface Props {
@@ -26,18 +26,22 @@
 
   const core = useCoreClient();
   let live = $derived(room.call_participants.length);
-  let rowKeys = $derived(participantKeys(room.call_participants));
+  let participants = $derived(
+    byName(room.call_participants, (userId) => profiles.get(userId)?.display_name)
+  );
+  let rowKeys = $derived(participantKeys(participants));
 </script>
 
 <ul
   class={['call-participant-list', { collapsed, 'closed-row': closed }]}
   aria-label={i18n.t('nav.voiceLive', { count: live })}
 >
-  {#each room.call_participants as userId, index (rowKeys[index])}
+  {#each participants as userId, index (rowKeys[index])}
     {@const profile = profiles.get(userId)}
     {@const voice = voiceStates?.get(rowKeys[index] ?? userId)}
     {@const sharing = voice ? voice.screen : room.screen_sharers.includes(userId)}
-    {@const displayName = numberedName(profile?.display_name ?? userId, rowKeys[index] ?? userId)}
+    {@const name = profile?.display_name ?? userId}
+    {@const displayName = numberedName(name, rowKeys[index] ?? userId)}
     <li
       class={{ speaking: voice?.speaking && !voice.muted }}
       oncontextmenu={voice && userId !== core.session?.user_id
@@ -56,10 +60,10 @@
       >
         <Avatar
           src={profile?.avatar_url ?? null}
-          name={profile?.display_name ?? userId}
+          {name}
           id={userId}
           size="small"
-          alt={collapsed ? (profile?.display_name ?? userId) : undefined}
+          alt={collapsed ? name : undefined}
         />
         {#if !collapsed}
           <span>{displayName}</span>

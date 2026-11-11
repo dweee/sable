@@ -10,7 +10,10 @@ const pronouns = [
   { summary: 'xey/xem', language: null },
 ];
 
-async function mount(width: number, props: { displayName?: string; accountName?: string } = {}) {
+async function mount(
+  width: number,
+  props: { displayName?: string; accountName?: string; pronouns?: typeof pronouns } = {}
+) {
   const screen = await render(SenderName, {
     displayName: 'Username',
     colors: senderDisplayColors('@user:example.test', null),
@@ -82,6 +85,15 @@ test('never overflows or clips a pill at any width, and never truncates the name
   }
 });
 
+test('hidden pills leave no gap that truncates a name that exactly fits', async () => {
+  const container = await mount(600);
+  await settle();
+  container.style.width = `${String(name(container).scrollWidth)}px`;
+  await settle();
+  expect(visiblePills(container)).toHaveLength(0);
+  expect(name(container).scrollWidth).toBeLessThanOrEqual(name(container).clientWidth);
+});
+
 test('shows no pills when not even one fits next to the name', async () => {
   const container = await mount(600);
   await settle();
@@ -119,4 +131,87 @@ test('caps a very long display name instead of letting it overflow', async () =>
   expect(element.offsetWidth).toBeLessThanOrEqual(container.offsetWidth);
   expect(element.scrollWidth).toBeGreaterThan(element.clientWidth);
   expect(getComputedStyle(element).textOverflow).toBe('ellipsis');
+});
+
+test('does not clip a short name without pronouns at fractional font sizes', async () => {
+  const screen = await render(SenderName, {
+    displayName: 'Samantha',
+    colors: senderDisplayColors('@samantha:example.test', null),
+    onMention: () => {},
+  });
+  screen.container.style.width = '600px';
+  await document.fonts.ready;
+  const element = name(screen.container);
+  const range = document.createRange();
+  range.selectNodeContents(element);
+
+  for (const size of [14, 15, 15.4, 16, 17.1, 18, 20]) {
+    screen.container.style.fontSize = `${size}px`;
+    expect(element.getBoundingClientRect().width, `name width at ${size}px`).toBeGreaterThanOrEqual(
+      range.getBoundingClientRect().width - 0.005
+    );
+  }
+});
+
+test('still truncates a long name without pronouns in a narrow container', async () => {
+  const screen = await render(SenderName, {
+    displayName: 'W'.repeat(120),
+    colors: senderDisplayColors('@user:example.test', null),
+    onMention: () => {},
+  });
+  screen.container.style.width = '80px';
+  await settle();
+  const element = name(screen.container);
+  expect(element.getBoundingClientRect().width).toBeLessThanOrEqual(80);
+  expect(element.scrollWidth).toBeGreaterThan(element.clientWidth);
+});
+
+/** Mirrors the timeline header: the identity shrinks beside a timestamp that does not. */
+function inHeader(container: HTMLElement) {
+  const header = document.createElement('div');
+  header.style.cssText = 'display: flex; gap: 8px; min-width: 0; font-family: monospace';
+  const identity = find(container, '.sender-identity');
+  identity.style.flexShrink = '1';
+  const time = document.createElement('span');
+  time.style.cssText = 'flex: none; margin-inline-start: auto';
+  time.textContent = '01:50 AM';
+  header.append(identity, time);
+  container.append(header);
+  return time;
+}
+
+test('a pronoun pill that does not fit leaves no gap before the account name', async () => {
+  const container = await mount(400, {
+    pronouns: [{ summary: 'she/it', language: null }],
+    accountName: 'tomacose',
+  });
+  const time = inHeader(container);
+  await settle();
+  const via = find(container, '.sender-identity-via');
+  const gap = Number.parseFloat(getComputedStyle(find(container, '.sender-identity')).columnGap);
+  const withoutPill = name(container).offsetWidth + gap + via.offsetWidth + 8 + time.offsetWidth;
+
+  container.style.width = `${String(withoutPill + gap + 10)}px`;
+  await settle();
+  expect(visiblePills(container)).toHaveLength(0);
+  expect(
+    via.getBoundingClientRect().left - name(container).getBoundingClientRect().right
+  ).toBeLessThanOrEqual(gap + 0.5);
+});
+
+test('a long name with an account name never runs into the timestamp', async () => {
+  const container = await mount(400, {
+    displayName: 'turntechGodhead [Davebot]',
+    accountName: 'theseusGalexi',
+  });
+  const time = inHeader(container);
+
+  for (let width = 400; width >= 200; width -= 20) {
+    container.style.width = `${String(width)}px`;
+    await settle();
+    expect(
+      find(container, '.sender-identity-via').getBoundingClientRect().right,
+      `account name overlaps the time at ${String(width)}px`
+    ).toBeLessThanOrEqual(time.getBoundingClientRect().left);
+  }
 });

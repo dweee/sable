@@ -3,13 +3,14 @@ use std::sync::Arc;
 use matrix_sdk::ruma::OwnedRoomId;
 use matrix_sdk::ruma::api::client::state::get_state_events;
 use matrix_sdk::ruma::events::room::avatar::RoomAvatarEventContent;
+use matrix_sdk::ruma::events::room::topic::RoomTopicEventContent;
 use matrix_sdk::ruma::serde::Raw;
 use serde::{Deserialize, Serialize};
 use sable_model::bot_commands::BotCommand;
 
 use super::{Handler, Json};
-use crate::protocol::{AbbreviationView, RpcError, HistoryVisibilityView, JoinRuleView, RoomStateEventView};
-use crate::{Core, ResultExt, account_data, presence};
+use crate::protocol::{AbbreviationView, RpcError, HistoryVisibilityView, PresenceHintView, JoinRuleView, RoomStateEventView};
+use crate::{Core, ResultExt, account_data};
 use crate::media::mxc_uri;
 use crate::room_settings::AclEdit;
 
@@ -25,6 +26,8 @@ domain! {
     set_banner,
     member_list_threshold,
     set_member_list_threshold,
+    presence_hint,
+    set_presence_hint,
     update_server_acl,
     abbreviations,
     set_abbreviations,
@@ -60,7 +63,7 @@ impl Handler for SetNameParams {
             .await?
             .set_name(self.name.unwrap_or_default())
             .await
-            .map_err(|error| core.room_error("set_room_name", error))?;
+            .or_failed(core, "set_room_name")?;
         Ok(())
     }
 }
@@ -73,15 +76,22 @@ pub struct SetTopicParams {
     pub topic: String,
 }
 
+pub(crate) fn topic_content(topic: &str) -> RoomTopicEventContent {
+    match sable_model::markdown::markdown_to_content(topic, &[]).formatted_body {
+        Some(html) => RoomTopicEventContent::html(topic, html),
+        None => RoomTopicEventContent::new(topic.to_owned()),
+    }
+}
+
 impl Handler for SetTopicParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         core.room(&self.room_id)
             .await?
-            .set_room_topic(&self.topic)
+            .send_state_event(topic_content(&self.topic))
             .await
-            .map_err(|error| core.room_error("set_room_topic", error))?;
+            .or_failed(core, "set_room_topic")?;
         Ok(())
     }
 }
@@ -105,13 +115,13 @@ impl Handler for SetAvatarParams {
             Some(url) => {
                 room.set_avatar_url(&mxc_uri(&url)?, None)
                     .await
-                    .map_err(|error| core.room_error("set_room_avatar", error))?;
+                    .or_failed(core, "set_room_avatar")?;
             }
             // State cannot be deleted, so empty content is the removal.
             None => {
                 room.send_state_event(RoomAvatarEventContent::new())
                     .await
-                    .map_err(|error| core.room_error("clear_room_avatar", error))?;
+                    .or_failed(core, "clear_room_avatar")?;
             }
         }
 
@@ -258,6 +268,37 @@ impl Handler for SetMemberListThresholdParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         core.set_member_list_threshold(self)
             .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PresenceHintParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+}
+
+impl Handler for PresenceHintParams {
+    type Ok = PresenceHintView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<PresenceHintView, RpcError> {
+        core.presence_hint(&self.room_id).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetPresenceHintParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    pub hint: PresenceHintView,
+}
+
+impl Handler for SetPresenceHintParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.set_presence_hint(self.room_id, self.hint).await
     }
 }
 
@@ -435,12 +476,11 @@ impl Handler for AccountDataParams {
     type Ok = Option<Json>;
 
     async fn run(self, core: &Arc<Core>) -> Result<Option<Json>, RpcError> {
+        let room = core.room(&self.room_id).await?;
         let event = core
-            .room(&self.room_id)
-            .await?
-            .account_data(self.event_type.into())
+            .with_open_stores(async || room.account_data(self.event_type.into()).await)
             .await
-            .map_err(|error| core.room_error("room_account_data", error))?;
+            .or_failed(core, "room_account_data")?;
 
         Ok(event
             .and_then(|raw| raw.get_field::<serde_json::Value>("content").ok().flatten())
@@ -463,7 +503,7 @@ impl Handler for AccountDataTypesParams {
         let types = account_data::room_server_types(
             &client,
             &self.room_id,
-            presence::state(core.desired_presence()),
+            core.sync_presence().await,
         )
         .await
         .or_failed(core, "room_account_data_types")?;
@@ -492,7 +532,7 @@ impl Handler for SetAccountDataParams {
             .await?
             .set_account_data_raw(self.event_type.into(), raw)
             .await
-            .map_err(|error| core.room_error("set_room_account_data", error))?;
+            .or_failed(core, "set_room_account_data")?;
         Ok(())
     }
 }
@@ -564,8 +604,43 @@ impl Handler for BotCommandsParams {
     async fn run(self, core: &Arc<Core>) -> Result<Vec<BotCommand>, RpcError> {
         let client = core.client().await?;
         let room = core.room(&self.room_id).await?;
-        core.bot_commands_for(&client, &room)
+        let mut commands = core
+            .bot_commands_for(&client, &room)
             .await
-            .map_err(|error| core.room_error("bot_commands", error))
+            .or_failed(core, "bot_commands")?;
+        let nicknames = core.nicknames();
+        for command in &mut commands {
+            nicknames.apply_bot(command);
+        }
+        Ok(commands)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::topic_content;
+
+    #[test]
+    fn a_formatted_topic_carries_html_beside_its_plain_text() {
+        assert_eq!(
+            serde_json::to_value(topic_content("**Rules** at https://example.org")).unwrap(),
+            json!({
+                "topic": "**Rules** at https://example.org",
+                "m.topic": { "m.text": [
+                    { "mimetype": "text/html", "body": "<strong>Rules</strong> at https://example.org" },
+                    { "body": "**Rules** at https://example.org" },
+                ] },
+            })
+        );
+    }
+
+    #[test]
+    fn a_plain_topic_carries_only_plain_text() {
+        assert_eq!(
+            serde_json::to_value(topic_content("Chat")).unwrap(),
+            json!({ "topic": "Chat", "m.topic": { "m.text": [{ "body": "Chat" }] } })
+        );
     }
 }

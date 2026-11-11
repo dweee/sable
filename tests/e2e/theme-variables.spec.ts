@@ -68,6 +68,8 @@ for (const theme of ['light', 'dark'] as const) {
         {
           user_id: '@alice:example.test',
           display_name: 'Alice',
+          real_name: 'Alice',
+          real_avatar_url: null,
           avatar_url: null,
           power_level: 0,
           membership: 'join',
@@ -217,6 +219,10 @@ for (const theme of ['light', 'dark'] as const) {
       'rgb(221, 221, 221)'
     );
     await page.goto('/profile');
-    await expect(page.locator('.profile-card')).toHaveCSS('color', 'rgb(238, 238, 238)');
+    await expect(page.locator('.profile-card')).toHaveCSS('--profile-card-ground', '#203040');
+    await expect(page.locator('.profile-card')).toHaveCSS(
+      'color',
+      theme === 'light' ? 'rgb(0, 0, 0)' : 'rgb(255, 255, 255)'
+    );
   });
 }

@@ -10,7 +10,6 @@
     after?: boolean;
     entering?: boolean;
     removing?: boolean;
-    accessibilityLabel: string;
     unavailableLabel?: string;
     onActivate: () => void;
     onMotionComplete?: () => void;
@@ -24,7 +23,6 @@
     after = false,
     entering = false,
     removing = false,
-    accessibilityLabel,
     unavailableLabel,
     onActivate,
     onMotionComplete,
@@ -54,15 +52,9 @@
     }
   }}
 >
-  <button
-    class={['stage-activation', { active }]}
-    type="button"
-    onclick={onActivate}
-    aria-label={accessibilityLabel}
-    aria-hidden="true"
-    disabled={!reachable}
-    tabindex="-1"
-  ></button>
+  {#if !active && reachable}
+    <div class="stage-activation" onclick={onActivate} aria-hidden="true"></div>
+  {/if}
   {#if !active && !reachable && unavailableLabel}
     <Tooltip label={unavailableLabel}>
       {#snippet trigger({ props })}
@@ -72,7 +64,7 @@
       {/snippet}
     </Tooltip>
   {/if}
-  <div class="card-content" inert={!active}>
+  <div class="card-content" inert={!active} aria-hidden={!active}>
     {@render children()}
   </div>
 </div>
@@ -96,20 +88,8 @@
     z-index: 2;
   }
 
-  .stage-activation.active {
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  .stage-activation:disabled,
   .auth-card.muted.unavailable {
     cursor: default;
-  }
-
-  .stage-activation:focus-visible {
-    border-radius: var(--radius);
-    box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring);
-    outline: none;
   }
 
   .auth-card.muted {

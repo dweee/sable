@@ -4,11 +4,13 @@
 
   import RoomOptionsMenu from './RoomOptionsMenu.svelte';
   import type { Component } from 'svelte';
-  import type { RoomListItemView } from '#src/generated/protocol';
+  import type { BridgeView, RoomListItemView } from '#src/generated/protocol';
   import { resolve } from '$app/paths';
   import { afterNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
+  import { isRoomSwitch } from '#lib/features/room/room-navigation.js';
+  import { isBridgedSpace } from '#lib/rooms/bridged-spaces.svelte.js';
   import { findRoomByPathId, roomPathParam, useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { addUnread } from '#lib/rooms/spaces.js';
   import type { UnreadCount } from '#lib/rooms/unread.js';
@@ -28,6 +30,7 @@
     ROOMS_PATHS_KEY,
     saveSpacePath,
     savedSpacePaths,
+    isJoinedRoomPath,
     spaceNavigationHref,
   } from './space-paths.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
@@ -42,6 +45,7 @@
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import UnreadBadge from '#lib/ui/primitives/UnreadBadge.svelte';
   import { resolveUnreadBadge } from '#lib/ui/primitives/unread-badge.js';
+  import { rovingFocus } from '#lib/ui/roving-focus.js';
   import '#lib/ui/primitives/nav-tab.css';
   import CaretUpIcon from 'phosphor-svelte/lib/CaretUpIcon';
   import ChecksIcon from 'phosphor-svelte/lib/ChecksIcon';
@@ -49,12 +53,14 @@
   import FolderOpenIcon from 'phosphor-svelte/lib/FolderOpenIcon';
   import HashIcon from 'phosphor-svelte/lib/HashIcon';
   import HouseIcon from 'phosphor-svelte/lib/HouseIcon';
+  import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
   import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
   import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
   import SpeakerHighIcon from 'phosphor-svelte/lib/SpeakerHighIcon';
   import PencilSimpleIcon from 'phosphor-svelte/lib/PencilSimpleIcon';
   import PlusIcon from 'phosphor-svelte/lib/PlusIcon';
   import UsersIcon from 'phosphor-svelte/lib/UsersIcon';
+  import BridgeBadge from './BridgeBadge.svelte';
   import UserQuickTools from './UserQuickTools.svelte';
 
   type RailSection = 'home' | 'unspaced' | 'direct';
@@ -73,13 +79,18 @@
     section?: RailSection;
     badge?: boolean;
     inCall?: boolean;
+    /** Read live by room id, so a space's avatar does not re-run on every unread change. */
+    space?: boolean;
   };
+
+  type SpaceRailItem = RailItem & { roomId: string };
 
   interface Props {
     pathname?: string;
     spaces: readonly RoomListItemView[];
     spaceUnread?: ReadonlyMap<string, UnreadCount>;
     callSpaces?: ReadonlySet<string>;
+    voiceSpaces?: ReadonlySet<string>;
     homeUnread?: UnreadCount;
     unspacedUnread?: UnreadCount;
     directRooms?: readonly RoomListItemView[];
@@ -91,7 +102,10 @@
     layout?: readonly SidebarItem[];
     openFolders?: ReadonlySet<string>;
     onToggleFolder?: (folderId: string) => void;
+    onCollapseFolders?: () => void;
     onRenameFolder?: (folder: SidebarFolder) => void;
+    onChangeFolderIcon?: (folder: SidebarFolder) => void;
+    onChangeSpaceIcon?: (roomId: string) => void;
     onUngroupFolder?: (folderId: string) => void;
     onMarkFolderRead?: (folder: SidebarFolder) => void;
     onRemoveFromFolder?: (roomId: string, folderId: string) => void;
@@ -106,6 +120,7 @@
     spaces,
     spaceUnread = new Map(),
     callSpaces = new Set(),
+    voiceSpaces = new Set(),
     homeUnread = NO_UNREAD,
     unspacedUnread = NO_UNREAD,
     directRooms = [],
@@ -117,7 +132,10 @@
     layout = [],
     openFolders = new Set(),
     onToggleFolder,
+    onCollapseFolders,
     onRenameFolder,
+    onChangeFolderIcon,
+    onChangeSpaceIcon,
     onUngroupFolder,
     onMarkFolderRead,
     onRemoveFromFolder,
@@ -132,6 +150,10 @@
 
   function unreadId(key: string): string {
     return `${uid}-unread-${key}`;
+  }
+
+  function voiceId(key: string): string {
+    return `${uid}-voice-${key}`;
   }
 
   function unreadLabel(count: UnreadCount | undefined): string | undefined {
@@ -250,6 +272,7 @@
 
   function navigateTo(href: string): void {
     if (onNavigate) onNavigate(href);
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- every rail href is built with resolve()
     else void goto(href);
   }
 
@@ -274,8 +297,14 @@
     return idOf(previous) === idOf(current);
   }
 
+  function tabHref(root: string, savedPath: string | undefined, fallback: string): string {
+    if (!mobile) return spaceNavigationHref(root, savedPath, fallback);
+    const joined = (pathId: string) => findRoomByPathId(roomList.rooms, pathId)?.state === 'joined';
+    return savedPath !== undefined && isJoinedRoomPath(root, savedPath, joined) ? savedPath : root;
+  }
+
   function sectionHref(key: string, root: string): string {
-    return spaceNavigationHref(root, spacePaths[key], mobile, root);
+    return tabHref(root, spacePaths[key], root);
   }
 
   function spaceName(name: string | null, roomId: string): string {
@@ -340,8 +369,8 @@
 
   function entryRef(item: SidebarItem): LayoutRef {
     return item.kind === 'space'
-      ? { kind: 'space', roomId: item.room_id }
-      : { kind: 'folder', folderId: item.id };
+      ? { kind: 'space', room_id: item.room_id, folder_id: null }
+      : { kind: 'folder', folder_id: item.id };
   }
 
   let contextIndex = $derived.by(() => {
@@ -356,7 +385,7 @@
     if (targetIndex < 0 || targetIndex >= entries.length) return;
 
     onReorder?.(
-      { kind: 'space', roomId: contextSpace.room_id },
+      { kind: 'space', room_id: contextSpace.room_id, folder_id: null },
       entryRef(entries[targetIndex]),
       direction === 'up' ? 'above' : 'below'
     );
@@ -389,7 +418,19 @@
     contextOpen = true;
   }
 
-  function spaceItem(roomId: string): RailItem | null {
+  function spaceBridge(roomId: string): BridgeView | null {
+    if (!preferences.showBridgeBadges || !isBridgedSpace(roomId)) return null;
+    const space = spacesById.get(roomId);
+    if (space === undefined) return null;
+    if (space.bridge) return space.bridge;
+    for (const child of space.space_children) {
+      const bridge = roomList.byId(child.room_id)?.bridge;
+      if (bridge) return bridge;
+    }
+    return null;
+  }
+
+  function spaceItem(roomId: string): SpaceRailItem | null {
     const space = spacesById.get(roomId);
     if (space === undefined) return null;
 
@@ -406,13 +447,15 @@
       href,
       activePrefix: href,
       roomId: space.room_id,
-      navigateHref: spaceNavigationHref(href, savedPath, mobile, lobby),
+      navigateHref: tabHref(href, savedPath, lobby),
       initial: toInitials(name),
-      avatar: space.avatar_url,
       label: name,
-      unread: spaceUnread.get(space.room_id),
-      inCall: callSpaces.has(space.room_id),
+      space: true,
     };
+  }
+
+  function spaceItems(roomIds: readonly string[]): SpaceRailItem[] {
+    return roomIds.flatMap((roomId) => spaceItem(roomId) ?? []);
   }
 
   function folderLabel(folder: SidebarFolder): string {
@@ -451,8 +494,19 @@
     return pathname.startsWith(item.activePrefix);
   }
 
-  function navigate(item: RailItem): void {
-    onNavigate?.(item.navigateHref ?? item.href);
+  function navigate(item: RailItem, event: MouseEvent): void {
+    const href = item.navigateHref ?? item.href;
+    if (onNavigate) {
+      onNavigate(href);
+      return;
+    }
+    const plain =
+      event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+    if (href === item.href || !plain) return;
+    event.preventDefault();
+    if (new URL(href, page.url.href).pathname === page.url.pathname) return;
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- every rail href is built with resolve()
+    void goto(href, { replace: isRoomSwitch(href), state: { mobileDrawer: 'open' } });
   }
 
   function dropping(ref: LayoutRef, instruction: DropInstruction): boolean {
@@ -467,6 +521,16 @@
 
   const noAttachment = (): undefined => undefined;
   const dragList = createDragList<LayoutRef>(refsEqual);
+
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- never read reactively
+  const layoutRefs = new Map<string, LayoutRef>();
+  function stableRef(ref: LayoutRef): LayoutRef {
+    const key = JSON.stringify(ref);
+    const known = layoutRefs.get(key);
+    if (known) return known;
+    layoutRefs.set(key, ref);
+    return ref;
+  }
 
   function dragSource(ref: LayoutRef) {
     return mobile
@@ -494,8 +558,6 @@
   let previousPath = '';
 
   afterNavigate(() => {
-    if (mobile) return;
-
     const kept = [...new URLSearchParams(page.url.search)].filter(([key]) => key !== 'event');
     const search = new URLSearchParams(kept).toString();
     const path = `${page.url.pathname}${search ? `?${search}` : ''}${page.url.hash}`;
@@ -518,6 +580,7 @@
       spacePaths = { ...spacePaths, [bounced[0]]: bounced[1] };
       saveSpacePath(bounced[0], bounced[1]);
     }
+    if (mobile && page.params.roomId === undefined) return;
     if (key === undefined || spacePaths[key] === path) return;
 
     spacePaths = { ...spacePaths, [key]: path };
@@ -540,52 +603,76 @@
   {#if item.icon}
     <span class="icon" aria-hidden="true"><item.icon weight={active ? 'fill' : 'regular'} /></span>
   {:else}
+    {@const avatar =
+      item.space && item.roomId ? spacesById.get(item.roomId)?.display_avatar_url : item.avatar}
     <Avatar
       class="space-initial"
       id={item.roomId ?? null}
-      src={item.avatar}
+      src={avatar}
       initials={item.initial}
       uniform
     />
   {/if}
   {#if item.badge !== false}
-    {@render unreadMark(item.unread, item.dm ?? false, unreadId(item.roomId ?? item.href))}
+    {@render unreadMark(
+      item.space && item.roomId ? spaceUnread.get(item.roomId) : item.unread,
+      item.dm ?? false,
+      unreadId(item.roomId ?? item.href)
+    )}
   {/if}
-  {#if item.inCall}
+  {#if item.space && item.roomId}
+    {@const bridge = spaceBridge(item.roomId)}
+    {#if bridge}<BridgeBadge {bridge} />{/if}
+  {/if}
+  {#if item.space && item.roomId ? callSpaces.has(item.roomId) : item.inCall}
     <span class="call-mark" aria-hidden="true"><SpeakerHighIcon weight="fill" /></span>
+  {:else if item.space && item.roomId && voiceSpaces.has(item.roomId)}
+    <span class="call-mark others" id={voiceId(item.roomId)}
+      ><SpeakerHighIcon aria-hidden="true" /><span class="screen-reader-only"
+        >{i18n.t('nav.voiceActive')}</span
+      ></span
+    >
   {/if}
 {/snippet}
 
-{#snippet itemLink(item: RailItem, props: Record<string, unknown>, held: boolean)}
+{#snippet itemLink(item: RailItem, props: Record<string, unknown>, level: number)}
   {@const active = isActive(item)}
   <a
     {...props}
+    role="treeitem"
+    aria-level={level}
     class={[
       'rail-item nav-tab nav-tab-side selection-layer',
       { 'nav-tab-outlined': outlined(item), 'space-item': Boolean(item.initial) },
     ]}
     href={item.navigateHref ?? item.href}
-    draggable={held ? 'false' : undefined}
+    draggable="false"
     onclick={mobile
-      ? () => {
-          navigate(item);
+      ? (event) => {
+          navigate(item, event);
         }
       : undefined}
     aria-label={i18n.t(item.label)}
-    aria-describedby={describedBy(props, unreadId(item.roomId ?? item.href))}
+    aria-describedby={describedBy(
+      props,
+      item.space && item.roomId && voiceSpaces.has(item.roomId)
+        ? `${unreadId(item.roomId)} ${voiceId(item.roomId)}`
+        : unreadId(item.roomId ?? item.href)
+    )}
     aria-current={active ? 'page' : undefined}
   >
+    <span class="nav-tab-hit-area" aria-hidden="true"></span>
     {@render itemBody(item, active)}
   </a>
 {/snippet}
 
-{#snippet railItem(item: RailItem, held: boolean)}
+{#snippet railItem(item: RailItem, level = 1)}
   {#if mobile}
-    {@render itemLink(item, {}, held)}
+    {@render itemLink(item, {}, level)}
   {:else}
     {@const label = i18n.t(item.label)}
     {#snippet trigger({ props }: { props: Record<string, unknown> })}
-      {@render itemLink(item, props, held)}
+      {@render itemLink(item, props, level)}
     {/snippet}
     <Tooltip {label} side="right" {trigger} />
   {/if}
@@ -595,12 +682,14 @@
   <button
     {...props}
     type="button"
+    role="treeitem"
+    aria-level="1"
     class="rail-item nav-tab nav-tab-side nav-tab-outlined selection-layer"
     aria-label={i18n.t('nav.add')}
     aria-haspopup="menu"
-    aria-expanded={createOpen}
     onclick={openCreateMenu}
   >
+    <span class="nav-tab-hit-area" aria-hidden="true"></span>
     <span class="icon" aria-hidden="true"
       ><PlusIcon weight={createOpen ? 'fill' : 'regular'} /></span
     >
@@ -620,7 +709,7 @@
       },
     })}
   >
-    {@render railItem(item, false)}
+    {@render railItem(item)}
   </div>
 {/snippet}
 
@@ -639,45 +728,46 @@
     {@attach dragSource(ref)}
     {@attach dropTarget(ref, folderId === undefined)}
   >
-    {@render railItem(item, !mobile)}
+    {@render railItem(item, folderId === undefined ? 1 : 2)}
   </div>
 {/snippet}
 
-{#snippet spaceSlot(roomId: string, folderId?: string)}
-  {@const item = spaceItem(roomId)}
-  {#if item !== null}
-    {@const ref = { kind: 'space', roomId, folderId } satisfies LayoutRef}
-    {#if folderId === undefined}
-      <div
-        class="rail-menu-anchor"
-        oncontextmenu={mouseContextMenu((event) => {
-          openSpaceContextMenu(event, roomId);
-        })}
-        role="presentation"
-        {@attach longPress({
-          onPress: (event) => {
-            openSpaceContextMenu(event, roomId);
-          },
-        })}
-      >
-        {@render spaceSlotBody(item, ref)}
-      </div>
-    {:else}
-      <div
-        class="rail-menu-anchor"
-        role="presentation"
-        oncontextmenu={mouseContextMenu((event) => {
-          openRemoveMenu(event, roomId, folderId);
-        })}
-        {@attach longPress({
-          onPress: (event) => {
-            openRemoveMenu(event, roomId, folderId);
-          },
-        })}
-      >
-        {@render spaceSlotBody(item, ref, folderId)}
-      </div>
-    {/if}
+{#snippet spaceSlot(item: SpaceRailItem, folderId?: string)}
+  {@const ref = stableRef({
+    kind: 'space',
+    room_id: item.roomId,
+    folder_id: folderId ?? null,
+  })}
+  {#if folderId === undefined}
+    <div
+      class="rail-menu-anchor"
+      oncontextmenu={mouseContextMenu((event) => {
+        openSpaceContextMenu(event, item.roomId);
+      })}
+      role="presentation"
+      {@attach longPress({
+        onPress: (event) => {
+          openSpaceContextMenu(event, item.roomId);
+        },
+      })}
+    >
+      {@render spaceSlotBody(item, ref)}
+    </div>
+  {:else}
+    <div
+      class="rail-menu-anchor"
+      role="presentation"
+      oncontextmenu={mouseContextMenu((event) => {
+        openRemoveMenu(event, item.roomId, folderId);
+      })}
+      {@attach longPress({
+        onPress: (event) => {
+          openRemoveMenu(event, item.roomId, folderId);
+        },
+      })}
+    >
+      {@render spaceSlotBody(item, ref, folderId)}
+    </div>
   {/if}
 {/snippet}
 
@@ -688,7 +778,7 @@
       <Avatar
         class="folder-tile"
         id={roomId}
-        src={space?.avatar_url}
+        src={space?.display_avatar_url}
         name={spaceName(space?.name ?? null, roomId)}
         size="small"
         uniform
@@ -701,6 +791,8 @@
   <button
     {...props}
     type="button"
+    role="treeitem"
+    aria-level="1"
     class="rail-item folder-preview nav-tab nav-tab-side selection-layer"
     data-current={folderActive(folder) ? 'true' : undefined}
     aria-expanded="false"
@@ -710,13 +802,24 @@
       onToggleFolder?.(folder.id);
     }}
   >
-    {@render folderTiles(folder)}
+    <span class="nav-tab-hit-area" aria-hidden="true"></span>
+    {#if folder.icon}
+      <Avatar
+        class="space-initial"
+        id={folder.id}
+        src={folder.icon}
+        name={folderLabel(folder)}
+        uniform
+      />
+    {:else}
+      {@render folderTiles(folder)}
+    {/if}
     {@render unreadMark(folderUnread(folder), false, unreadId(folder.id))}
   </button>
 {/snippet}
 
 {#snippet closedFolder(folder: SidebarFolder)}
-  {@const ref = { kind: 'folder', folderId: folder.id } satisfies LayoutRef}
+  {@const ref = stableRef({ kind: 'folder', folder_id: folder.id })}
   <div
     class={[
       'rail-slot',
@@ -752,7 +855,7 @@
 {/snippet}
 
 {#snippet openFolder(folder: SidebarFolder)}
-  {@const ref = { kind: 'folder', folderId: folder.id } satisfies LayoutRef}
+  {@const ref = stableRef({ kind: 'folder', folder_id: folder.id })}
   <div
     class={[
       'folder-open',
@@ -761,8 +864,12 @@
     {@attach dropTarget(ref, false)}
   >
     <div class="folder-card">
+      <!-- svelte-ignore a11y_role_has_required_aria_props -->
       <button
         type="button"
+        role="treeitem"
+        aria-level="1"
+        aria-owns={`folder-children-${folder.id}`}
         class="folder-collapse"
         aria-expanded="true"
         aria-label={i18n.t('nav.folderCollapse', { name: folderLabel(folder) })}
@@ -780,33 +887,49 @@
       >
         <CaretUpIcon weight="fill" />
       </button>
-      {#each folder.content as roomId (roomId)}
-        {@render spaceSlot(roomId, folder.id)}
-      {/each}
+      <div class="folder-children" id={`folder-children-${folder.id}`} role="group">
+        {#each spaceItems(folder.content) as item (item.roomId)}
+          {@render spaceSlot(item, folder.id)}
+        {/each}
+      </div>
     </div>
   </div>
 {/snippet}
 
-<div class="rail" role="presentation" oncontextmenu={mouseContextMenu(openDisplayMenu)}>
-  <div class="rail-scroll" {@attach mobile ? noAttachment : monitor}>
-    <ul class="rail-stack">
+<nav
+  class="rail"
+  aria-label={i18n.t('nav.navigation')}
+  oncontextmenu={mouseContextMenu(openDisplayMenu)}
+>
+  <div
+    class="rail-scroll"
+    role="tree"
+    data-focus-region="spaces"
+    aria-orientation="vertical"
+    aria-label={i18n.t('nav.navigation')}
+    {@attach mobile ? noAttachment : monitor}
+    {@attach rovingFocus({ tree: true })}
+  >
+    <ul class="rail-stack" role="presentation">
       {#each [...items, ...directItems] as item (item.roomId ?? item.href)}
-        <li>
+        <li role="presentation">
           {#if item.section !== undefined}
             {@render sectionItem(item, item.section)}
           {:else}
-            {@render railItem(item, false)}
+            {@render railItem(item)}
           {/if}
         </li>
       {/each}
     </ul>
     {#if entries.length > 0}
-      <div class="rail-separator" role="separator"></div>
-      <ul class="rail-stack">
+      <div class="rail-separator" role="presentation"></div>
+      <ul class="rail-stack" role="presentation">
         {#each entries as entry (entry.kind === 'space' ? entry.room_id : entry.id)}
-          <li>
+          <li role="presentation">
             {#if entry.kind === 'space'}
-              {@render spaceSlot(entry.room_id)}
+              {#each spaceItems([entry.room_id]) as item (item.roomId)}
+                {@render spaceSlot(item)}
+              {/each}
             {:else if knownContent(entry).length === 0}
               {@render nothing()}
             {:else if folderOpen(entry)}
@@ -818,8 +941,8 @@
         {/each}
       </ul>
     {/if}
-    <ul class="rail-stack">
-      <li>
+    <ul class="rail-stack" role="presentation">
+      <li role="presentation">
         {#if mobile}
           {@render createButton({})}
         {:else}
@@ -834,7 +957,7 @@
   {#if !mobile && compact}
     <UserQuickTools compact />
   {/if}
-</div>
+</nav>
 
 {#if !mobile}
   <ActionMenu
@@ -856,7 +979,7 @@
         }}
       >
         <span class="menu-check" aria-hidden="true">{on ? '✓' : ''}</span>
-        {i18n.t(toggle.label)}
+        <span>{i18n.t(toggle.label)}</span>
       </ActionMenuItem>
     {/each}
 
@@ -872,9 +995,17 @@
         }}
       >
         <span class="menu-check" aria-hidden="true">{on ? '✓' : ''}</span>
-        {i18n.t(toggle.label)}
+        <span>{i18n.t(toggle.label)}</span>
       </ActionMenuItem>
     {/each}
+
+    {#if onCollapseFolders}
+      <ActionMenuSeparator />
+      <ActionMenuItem disabled={openFolders.size === 0} onSelect={onCollapseFolders}>
+        <span class="menu-check" aria-hidden="true"></span>
+        <span>{i18n.t('nav.folderCollapseAll')}</span>
+      </ActionMenuItem>
+    {/if}
   </ActionMenu>
 {/if}
 
@@ -944,6 +1075,16 @@
       <PencilSimpleIcon />
       {i18n.t('nav.folderRename')}
     </ActionMenuItem>
+    {#if onChangeFolderIcon}
+      <ActionMenuItem
+        onSelect={() => {
+          onChangeFolderIcon(folder);
+        }}
+      >
+        <ImageIcon />
+        {i18n.t('nav.changeIcon')}
+      </ActionMenuItem>
+    {/if}
     <ActionMenuItem
       onSelect={() => {
         onUngroupFolder?.(folder.id);
@@ -952,6 +1093,12 @@
       <FolderOpenIcon />
       {i18n.t('nav.folderUngroup')}
     </ActionMenuItem>
+    {#if onCollapseFolders}
+      <ActionMenuItem disabled={openFolders.size === 0} onSelect={onCollapseFolders}>
+        <CaretUpIcon />
+        {i18n.t('nav.folderCollapseAll')}
+      </ActionMenuItem>
+    {/if}
   </ActionMenu>
 {/if}
 
@@ -976,6 +1123,11 @@
     onMoveDown={mobile && contextIndex !== -1 && contextIndex < entries.length - 1
       ? () => {
           moveContextSpace('down');
+        }
+      : undefined}
+    onChangeIcon={onChangeSpaceIcon
+      ? () => {
+          if (contextSpace) onChangeSpaceIcon(contextSpace.room_id);
         }
       : undefined}
     onRemoveFromFolder={contextFolderId !== null
@@ -1013,6 +1165,10 @@
 {/if}
 
 <style>
+  .rail-slot :global(.avatar-root) {
+    pointer-events: none;
+  }
+
   .call-mark {
     align-items: center;
     background: var(--success-main);
@@ -1026,6 +1182,12 @@
     right: -0.25rem;
     top: -0.25rem;
     z-index: 1;
+  }
+
+  .call-mark.others {
+    background: var(--bg-container);
+    border-color: var(--success-main);
+    color: var(--success-main);
   }
 
   .call-mark :global(svg) {
@@ -1171,6 +1333,13 @@
     flex-direction: column;
     gap: var(--space-100);
     padding: var(--space-100) 0;
+  }
+
+  .folder-children {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-100);
   }
 
   .folder-card .rail-slot.nested :global(.rail-item) {

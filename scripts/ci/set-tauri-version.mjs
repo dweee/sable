@@ -1,89 +1,58 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { parseArgs } from 'node:util';
+import { parse, valid } from 'semver';
 
-const {
-  values: {
-    'apple-short-version': foldNightlyIntoPatch,
-    msi: setMsiVersion,
-    'updater-endpoint': updaterEndpoint,
-  },
-  positionals: [version],
-} = parseArgs({
-  options: {
-    'apple-short-version': { type: 'boolean' },
-    msi: { type: 'boolean' },
-    'updater-endpoint': { type: 'string' },
-  },
-  allowPositionals: true,
-});
+export function tauriVersionConfig(version) {
+  const parsed = parse(version);
+  if (!parsed) throw new Error(`Invalid semantic version: ${version}`);
+  const nightlyVersion =
+    /^(\d+)\.(\d+)\.(\d+)-nightly\.(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.g?[0-9a-f]+)?$/.exec(
+      version
+    );
+  const androidVersionCode = nightlyVersion
+    ? Date.UTC(
+        2000 + +nightlyVersion[4],
+        +nightlyVersion[5] - 1,
+        +nightlyVersion[6],
+        +nightlyVersion[7],
+        +nightlyVersion[8],
+        +nightlyVersion[9]
+      ) / 1000
+    : // Keep standard APKs on the same scale as previously released FOSS APKs.
+      [parsed.major, parsed.minor, parsed.patch].reduce((code, part) => code * 1000 + part, 0) * 10;
 
-if (!version || !/^\d+\.\d+\.\d+/.test(version)) {
-  console.error(
-    `Usage: set-tauri-version.mjs <version> [--apple-short-version] [--msi]  (got: ${version ?? '<none>'})`
-  );
-  process.exit(1);
+  if (parsed.minor >= 1000 || parsed.patch >= 1000) {
+    throw new Error('Android versions require minor and patch numbers below 1000');
+  }
+
+  if (
+    !Number.isSafeInteger(androidVersionCode) ||
+    androidVersionCode < 1 ||
+    androidVersionCode + 4 > 2_100_000_000
+  ) {
+    throw new Error(`Android version code is out of range: ${androidVersionCode}`);
+  }
+
+  return {
+    version,
+    bundle: { android: { versionCode: androidVersionCode } },
+  };
 }
 
-// CFBundleShortVersionString only accepts numeric components, so the nightly
-// stamp folds into patch as a Unix timestamp. The YYMMDDHHMMSS form itself
-// overflows the u32 Tauri parses each version part into.
-let stampedVersion = version;
-let wixVersion;
-const nightlyVersion =
-  /^(\d+)\.(\d+)\.(\d+)-nightly\.(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.[0-9a-f]+)?$/.exec(
-    version
-  );
-const androidVersionCode = nightlyVersion
-  ? Date.UTC(
-      2000 + +nightlyVersion[4],
-      +nightlyVersion[5] - 1,
-      +nightlyVersion[6],
-      +nightlyVersion[7],
-      +nightlyVersion[8],
-      +nightlyVersion[9]
-    ) / 1000
-  : undefined;
-if (foldNightlyIntoPatch) {
-  if (!nightlyVersion) {
-    console.error(`--apple-short-version needs a nightly version (got: ${version})`);
+if (import.meta.main) {
+  const version = process.argv[2];
+
+  if (!version || !valid(version)) {
+    console.error(`Usage: set-tauri-version.mjs <version>  (got: ${version ?? '<none>'})`);
     process.exit(1);
   }
-  const [, major, minor] = nightlyVersion;
-  const patch = androidVersionCode;
-  if (!Number.isInteger(patch) || patch <= 0 || patch > 0xffffffff) {
-    console.error(`Nightly stamp does not map to a u32 patch version: ${version}`);
-    process.exit(1);
-  }
-  stampedVersion = `${major}.${minor}.${patch}`;
-}
 
-if (setMsiVersion) {
-  if (nightlyVersion) {
-    const [, major, minor, patch] = nightlyVersion;
-    const day = Math.floor(androidVersionCode / 86_400);
-    wixVersion = `${major}.${minor}.${patch}.${day % 65_536}`;
-  }
-}
-
-const file = 'src-tauri/tauri.conf.json';
-const config = JSON.parse(readFileSync(file, 'utf8'));
-config.version = stampedVersion;
-if (wixVersion) {
-  config.bundle ??= {};
-  config.bundle.windows ??= {};
-  config.bundle.windows.wix ??= {};
-  config.bundle.windows.wix.version = wixVersion;
-}
-if (updaterEndpoint) {
-  config.plugins ??= {};
-  config.plugins.updater ??= {};
-  config.plugins.updater.endpoints = [updaterEndpoint];
-}
-if (androidVersionCode) {
+  const patch = tauriVersionConfig(version);
+  const file = 'src-tauri/tauri.conf.json';
+  const config = JSON.parse(readFileSync(file, 'utf8'));
+  config.version = patch.version;
   config.bundle ??= {};
   config.bundle.android ??= {};
-  config.bundle.android.versionCode = androidVersionCode;
+  config.bundle.android.versionCode = patch.bundle.android.versionCode;
+  writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+  console.log(`Set ${file} version to ${version}`);
 }
-writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
-console.log(`Set ${file} version to ${stampedVersion}`);
-if (wixVersion) console.log(`Set ${file} MSI version to ${wixVersion}`);

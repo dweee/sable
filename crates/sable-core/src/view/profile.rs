@@ -1,3 +1,5 @@
+use sable_model::text::visible_name;
+
 use serde::Deserialize as _;
 use serde_with::{DefaultOnError, serde_as};
 
@@ -7,39 +9,6 @@ use crate::protocol::PerMessageProfileView;
 use super::raw::{ObjectOnly, present};
 
 const PMP_KEYS: [&str; 2] = ["com.beeper.per_message_profile", "m.per_message_profile"];
-
-pub(super) fn relay_profile(content: Option<&serde_json::Value>) -> Option<PerMessageProfileView> {
-    let body = content?.get("body")?.as_str()?;
-    let name = relay_author(body)?;
-
-    Some(PerMessageProfileView {
-        id: None,
-        display_name: Some(name.to_owned()),
-        avatar_url: None,
-        pronouns: Vec::new(),
-        color_on_light: None,
-        color_on_dark: None,
-        has_fallback: true,
-    })
-}
-
-fn relay_author(body: &str) -> Option<&str> {
-    const MAX_NAME: usize = 64;
-
-    let line = body.lines().next()?;
-    let name = if let Some(rest) = line.strip_prefix('<') {
-        rest.split_once("> ")?.0
-    } else {
-        let name = line.split_once(": ")?.0;
-        if name.contains(['<', '>']) {
-            return None;
-        }
-        name
-    };
-
-    let trimmed = name.trim();
-    (!trimmed.is_empty() && trimmed.len() <= MAX_NAME).then_some(trimmed)
-}
 
 #[serde_as]
 #[derive(Default, serde::Deserialize)]
@@ -61,6 +30,21 @@ struct PerMessageProfileIn {
     color: Option<ProfileColorIn>,
     #[serde_as(deserialize_as = "DefaultOnError")]
     has_fallback: Option<bool>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(rename = "net.f0rest.biography")]
+    biography: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(rename = "net.f0rest.banner_url")]
+    banner_url: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(rename = "net.f0rest.is_animal")]
+    pub is_animal: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(rename = "net.f0rest.has_animal")]
+    pub has_animal: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(rename = "net.f0rest.animal_need")]
+    pub animal_need: Option<String>,
 }
 
 #[serde_as]
@@ -96,12 +80,17 @@ pub(crate) fn per_message_profile(
 
     Some(PerMessageProfileView {
         id: non_blank(profile.id),
-        display_name: non_blank(profile.display_name),
+        display_name: profile.display_name.and_then(visible_name),
         avatar_url,
         pronouns: pronoun_sets(profile.pronouns.as_ref()),
         color_on_light: color.on_light,
         color_on_dark: color.on_dark,
         has_fallback: profile.has_fallback.unwrap_or(false),
+        biography: profile.biography,
+        banner_url: profile.banner_url,
+        is_animal: profile.is_animal,
+        has_animal: profile.has_animal,
+        animal_need: profile.animal_need,
     })
 }
 
@@ -110,40 +99,6 @@ mod tests {
     use super::*;
 
     use serde_json::json;
-
-    #[test]
-    fn reads_the_author_a_relay_bot_writes_into_the_body() {
-        assert_eq!(relay_author("<Marie> salut"), Some("Marie"));
-        assert_eq!(relay_author("Marie: salut"), Some("Marie"));
-        assert_eq!(relay_author("<Marie Dupont> salut"), Some("Marie Dupont"));
-        assert_eq!(
-            relay_author("<Marie> salut\nsur deux lignes"),
-            Some("Marie")
-        );
-        assert_eq!(relay_author("Marie: a: b"), Some("Marie"));
-        assert_eq!(
-            relay_author("we shipped it: finally"),
-            Some("we shipped it")
-        );
-    }
-
-    #[test]
-    fn leaves_a_body_that_names_no_author() {
-        assert_eq!(relay_author("salut"), None);
-        assert_eq!(relay_author("<Marie>salut"), None);
-        assert_eq!(relay_author(": salut"), None);
-        assert_eq!(relay_author(&format!("{}: hi", "n".repeat(65))), None);
-        assert_eq!(relay_author("\nMarie: salut"), None);
-    }
-
-    #[test]
-    fn synthesises_a_profile_only_from_a_body_that_names_an_author() {
-        let named = relay_profile(Some(&json!({ "body": "<Marie> salut" }))).expect("profile");
-        assert_eq!(named.display_name.as_deref(), Some("Marie"));
-        assert!(named.has_fallback);
-        assert!(relay_profile(Some(&json!({ "body": "salut" }))).is_none());
-        assert!(relay_profile(Some(&json!({ "msgtype": "m.text" }))).is_none());
-    }
 
     #[test]
     fn reads_a_per_message_profile_under_either_key() {
@@ -190,10 +145,11 @@ mod tests {
 
     #[test]
     fn a_blank_profile_name_reads_as_no_name_rather_than_an_empty_one() {
-        let content = json!({ "m.per_message_profile": { "displayname": "   " } });
-        let profile = per_message_profile(Some(&content)).expect("a profile");
-
-        assert_eq!(profile.display_name, None);
+        for name in ["   ", "\u{200b}\u{2800}\u{feff}"] {
+            let content = json!({ "m.per_message_profile": { "displayname": name } });
+            let profile = per_message_profile(Some(&content)).expect("a profile");
+            assert_eq!(profile.display_name, None);
+        }
     }
 
     #[test]

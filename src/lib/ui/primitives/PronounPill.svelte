@@ -42,11 +42,15 @@
   function measure() {
     if (!container || !sizer || !probe) return;
     const widths = Array.from(sizer.children, (pill) => pill.getBoundingClientRect().width);
+    const pulledIn = Math.min(
+      0,
+      Number.parseFloat(getComputedStyle(container).marginInlineStart) || 0
+    );
     fitted = fittingPillCount(
       widths,
       probe.getBoundingClientRect().width,
       Number.parseFloat(getComputedStyle(sizer).columnGap) || 0,
-      container.getBoundingClientRect().width + 0.5,
+      container.getBoundingClientRect().width + pulledIn + 0.5,
       splitPronouns.overflow.length > 0
     );
   }
@@ -65,7 +69,11 @@
 </script>
 
 {#if splitPronouns.visible.length > 0}
-  <span {...rest} class={['pronoun-pill-container', className]} bind:this={container}>
+  <span
+    {...rest}
+    class={['pronoun-pill-container', { empty: shown === 0 }, className]}
+    bind:this={container}
+  >
     <span class="pronoun-pill-sizer" aria-hidden="true" bind:this={sizer}>
       {#each splitPronouns.visible as pronoun, index (index)}
         <span class="pronoun-pill" lang={pronoun.language ?? undefined} data-text={pronoun.summary}
@@ -108,6 +116,11 @@
     position: relative;
   }
 
+  /* Still measured, but its leftover space moves to the end of the row. */
+  .pronoun-pill-container.empty {
+    order: 1;
+  }
+
   .pronoun-pill-sizer,
   .pronoun-pill-row {
     display: flex;
@@ -130,7 +143,7 @@
   }
 
   .pronoun-pill {
-    background: var(--surface-var-container);
+    background: var(--pronoun-pill-ground, var(--surface-var-container));
     border-radius: var(--radii-0);
     display: block;
     flex: none;

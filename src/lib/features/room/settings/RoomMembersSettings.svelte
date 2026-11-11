@@ -7,8 +7,11 @@
     RoomListItemView,
   } from '#src/generated/protocol';
 
+  import { CoreError } from '#src/transport';
+
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
+  import { isUserId } from '#lib/guards.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -27,6 +30,7 @@
     MEMBER_SORT_LABELS,
     groupMembers,
     matchesFilter,
+    memberName,
     membershipFor,
     type MembershipFilter,
   } from '#lib/rooms/member-listing.js';
@@ -42,7 +46,11 @@
   import '#lib/ui/primitives/settings-row.css';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
 
-  import { FOUNDER_POWER_LEVEL, type PowerLevelTagMap } from './power-level-tags';
+  import {
+    FOUNDER_POWER_LEVEL,
+    isValidPowerLevel,
+    type PowerLevelTagMap,
+  } from './power-level-tags';
 
   interface Props {
     room: RoomListItemView | null;
@@ -59,7 +67,6 @@
     { level: -1, label: 'timeline.powerLevelMuted' },
   ];
 
-  const userIdPattern = /^@[^:\s]+:\S+$/;
   const noMembers: MemberView[] = [];
 
   let tab = $state<MembershipFilter>('join');
@@ -67,6 +74,7 @@
   let members = $state.raw<MemberView[]>([]);
   let loading = $state(false);
   let failed = $state(false);
+  let denied = $state(false);
   let busy = $state<string | null>(null);
   let inviteOpen = $state(false);
   const directory = new UserDirectoryLookup(core);
@@ -94,8 +102,7 @@
   let inviteQuery = $derived(canInviteInline ? search.trim() : '');
   let candidates = $derived.by(() => {
     const typed =
-      userIdPattern.test(inviteQuery) &&
-      !directory.results.some((entry) => entry.user_id === inviteQuery)
+      isUserId(inviteQuery) && !directory.results.some((entry) => entry.user_id === inviteQuery)
         ? [{ user_id: inviteQuery, display_name: null, avatar_url: null }]
         : [];
     return [...typed, ...directory.results].filter(
@@ -185,10 +192,6 @@
     }
   }
 
-  function memberName(member: MemberView): string {
-    return member.display_name ?? member.user_id;
-  }
-
   async function load(): Promise<void> {
     const target = roomId;
     const filter = tab;
@@ -197,6 +200,7 @@
     const current = ++run;
     loading = true;
     failed = false;
+    denied = false;
     try {
       const loaded = await core.rpc.members.list({
         room_id: target,
@@ -237,7 +241,9 @@
           .filter((entry) => matchesFilter(entry, tab));
     } catch (error) {
       console.warn('[sable room] member action failed', error);
+      await load();
       failed = true;
+      denied = error instanceof CoreError && error.detail.code === 'denied';
     } finally {
       busy = null;
     }
@@ -256,7 +262,7 @@
     );
     for (const [level, tag] of Object.entries(powerTags)) labels[String(Number(level))] = tag.name;
     const known = Object.entries(labels)
-      .filter(([level]) => Number(level) <= ownPowerLevel)
+      .filter(([level]) => isValidPowerLevel(Number(level)) && Number(level) <= ownPowerLevel)
       .sort(([left], [right]) => Number(right) - Number(left))
       .map(([value, label]) => ({ value, label }));
     const current = String(member.power_level);
@@ -387,7 +393,9 @@
   </div>
 
   {#if failed}
-    <Alert variant="critical" role="alert">{i18n.t('room.membersFailed')}</Alert>
+    <Alert variant="critical" role="alert"
+      >{i18n.t(denied ? 'room.membersDenied' : 'room.membersFailed')}</Alert
+    >
   {/if}
 
   {#if loading && members.length === 0}

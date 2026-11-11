@@ -1,24 +1,24 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
+use matrix_sdk::ruma::api::client::membership::get_mutual_rooms;
 use matrix_sdk::ruma::api::client::profile::{PropagateTo, set_profile_field};
-use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
-use matrix_sdk::ruma::api::error::ErrorKind;
-use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::profile::{ProfileFieldName, ProfileFieldValue};
 use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId, OwnedUserId, UserId};
 use serde::{Deserialize, Serialize};
 
 use super::{Handler, Json};
-use crate::room_settings::state_event_content;
 use crate::media::mxc_uri;
 use crate::profile_overrides::OverrideEdit;
 use crate::profiles::profile_view;
-use crate::protocol::{BookmarkView, RpcError, FieldEdit, InviteTriageView, MediaPreviewConfigView, MutualRoomView, PresenceView, ProfileOverridesView, ProfileView, SealedAccountDataView, UserDirectoryEntryView};
-use crate::{Core, ResultExt, presence};
+use crate::protocol::{BookmarkView, NotificationModeView, RpcCode, RpcError, FieldEdit, InviteTriageView, MediaPreviewConfigView, MediaPreviewsView, MutualRoomView, PresenceSharingEdit, PresenceOverrideView, PresenceSharingView, PresenceView, ProfileOverridesView, ProfileView, SealedAccountDataView, UserDirectoryEntryView};
+use crate::{Core, ResultExt};
 
 domain! {
+    set_read_receipts,
     user_profile,
     user_relations,
+    well_known,
     data_types,
     data,
     set_data,
@@ -34,8 +34,14 @@ domain! {
     ignore_user,
     unignore_user,
     report_user,
+    deactivate_account,
     set_presence,
+    set_device_activity,
     fetch_presence,
+    presence_sharing,
+    edit_presence_sharing,
+    presence_override,
+    set_presence_override,
     search_user_directory,
     dismissed_invites,
     set_invite_dismissed,
@@ -43,8 +49,29 @@ domain! {
     set_bookmark,
     media_preview_config,
     set_media_preview_config,
+    set_room_media_previews,
+    dm_spaces,
+    set_dm_spaces,
+    space_notifications,
+    set_space_notification,
+    set_space_notification_exempt,
     profile_overrides,
     set_profile_override,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct DeactivateAccountParams {
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl Handler for DeactivateAccountParams {
+    type Ok = Option<String>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Option<String>, RpcError> {
+        core.deactivate_account(self.password).await
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -89,8 +116,10 @@ impl Handler for UserProfileParams {
             .account()
             .fetch_user_profile_of(&self.user_id)
             .await
-            .map_err(|error| core.profile_error(error))?;
-        Ok(profile_view(self.user_id, &response))
+            .map_err(|error| core.profile_error(&error))?;
+        let mut profile = profile_view(self.user_id, &response);
+        core.nicknames().apply_profile(&mut profile);
+        Ok(profile)
     }
 }
 
@@ -117,31 +146,9 @@ impl Handler for UserRelationsParams {
             .await?
             .iter()
             .any(|ignored| ignored == self.user_id.as_str());
-        // Sliding sync never delivers a leave for a silent member, so
-        // stored rooms are confirmed with the server.
-        let target = &self.user_id;
-        let lookups = client.joined_rooms().into_iter().map(|room| async move {
-            let stored = room
-                .get_member_no_sync(target)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|member| member.membership() == &MembershipState::Join);
-            let joined = stored && confirmed_member_join(&room, target).await;
-            joined.then(|| MutualRoomView {
-                name: room
-                    .cached_display_name()
-                    .map(|name| name.to_string())
-                    .or_else(|| room.name()),
-                room_id: room.room_id().to_owned(),
-                is_space: room.is_space(),
-            })
-        });
-        let mutual_rooms = futures_util::future::join_all(lookups)
+        let mutual_rooms = fetch_mutual_rooms(&client, &self.user_id)
             .await
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+            .or_failed(core, "user_relations")?;
 
         Ok(UserRelationsOk {
             mutual_rooms,
@@ -150,21 +157,50 @@ impl Handler for UserRelationsParams {
     }
 }
 
-async fn confirmed_member_join(room: &matrix_sdk::Room, user_id: &UserId) -> bool {
-    let response = room
-        .client()
-        .send(get_state_event_for_key::v3::Request::new(
-            room.room_id().to_owned(),
-            matrix_sdk::ruma::events::StateEventType::RoomMember,
-            user_id.to_string(),
-        ))
-        .await;
-    match response {
-        Ok(response) => state_event_content(response.event_or_content.get())
-            .and_then(|content| content.get("membership")?.as_str().map(|m| m == "join"))
-            .unwrap_or(true),
-        Err(error) if error.client_api_error_kind() == Some(&ErrorKind::NotFound) => false,
-        Err(_) => true,
+async fn fetch_mutual_rooms(
+    client: &matrix_sdk::Client,
+    user_id: &UserId,
+) -> Result<Vec<MutualRoomView>, matrix_sdk::HttpError> {
+    let mut rooms = Vec::new();
+    let mut from = None;
+    loop {
+        let mut request = get_mutual_rooms::v1::Request::new(user_id.to_owned());
+        request.from = from;
+        let response = match client.send(request).await {
+            Ok(response) => response,
+            Err(matrix_sdk::HttpError::IntoHttp(
+                matrix_sdk::ruma::api::error::IntoHttpError::NoUnstablePath,
+            )) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        rooms.extend(response.joined.into_iter().map(|room_id| {
+            let room = client.get_room(&room_id);
+            MutualRoomView {
+                name: room.as_ref().and_then(|room| {
+                    room.cached_display_name()
+                        .map(|name| name.to_string())
+                        .or_else(|| room.name())
+                }),
+                is_space: room.as_ref().is_some_and(|room| room.is_space()),
+                room_id,
+            }
+        }));
+        from = response.next_batch;
+        if from.is_none() {
+            return Ok(rooms);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct WellKnownParams {}
+
+impl Handler for WellKnownParams {
+    type Ok = Option<Json>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Option<Json>, RpcError> {
+        Ok(core.well_known().await?.map(Json))
     }
 }
 
@@ -212,6 +248,10 @@ impl Handler for SetDataParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        // Server-managed since MSC4010.
+        if matches!(self.event_type.as_str(), "m.push_rules" | "m.fully_read") {
+            return Err(RpcCode::Unsupported.into());
+        }
         core.set_account_data(&self.event_type, &self.content).await
     }
 }
@@ -279,7 +319,7 @@ impl Handler for SetDisplayNameParams {
             )
             .or_failed(core, "set_display_name")?;
             let mut request = set_profile_field::v3::Request::new(
-                client.user_id().ok_or(RpcError::NotLoggedIn)?.to_owned(),
+                client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_owned(),
                 value,
             );
             request.propagate_to = profile_propagation(self.propagate_to);
@@ -332,7 +372,7 @@ impl Handler for SetAvatarUrlParams {
             )
             .or_failed(core, "set_avatar_url")?;
             let mut request = set_profile_field::v3::Request::new(
-                client.user_id().ok_or(RpcError::NotLoggedIn)?.to_owned(),
+                client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_owned(),
                 value,
             );
             request.propagate_to = profile_propagation(self.propagate_to);
@@ -377,7 +417,7 @@ impl Handler for SetProfileFieldParams {
         match self.value {
             Some(value) => {
                 let value = ProfileFieldValue::new(&self.field, value)
-                    .map_err(|error| core.failed("set_profile_field_invalid_value", error))?;
+                    .map_err(|error| core.failed_with("set_profile_field_invalid_value", &error))?;
                 account
                     .set_profile_field(value)
                     .await
@@ -439,7 +479,7 @@ impl Handler for InviteTriageParams {
     type Ok = Vec<InviteTriageView>;
 
     async fn run(self, core: &Arc<Core>) -> Result<Vec<InviteTriageView>, RpcError> {
-        Ok(crate::invites::triage(&core.client().await?).await)
+        Ok(crate::invites::triage(core, &core.client().await?).await)
     }
 }
 
@@ -581,15 +621,31 @@ pub struct SetPresenceParams {
     pub status_message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetDeviceActivityParams {
+    pub active: bool,
+}
+
+impl Handler for SetDeviceActivityParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        crate::notifications::set_device_activity(core, self.active).await;
+        Ok(())
+    }
+}
+
 impl Handler for SetPresenceParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         core.set_desired_presence(self.presence);
 
+        let presence = core.sync_presence().await;
         let client = core.client().await?;
         client
-            .set_presence(presence::state(self.presence), self.status_message, true)
+            .set_presence(presence, self.status_message, true)
             .await
             .or_failed(core, "set_presence")?;
 
@@ -597,6 +653,21 @@ impl Handler for SetPresenceParams {
             core.fetch_presence(vec![user_id.to_owned()]).await;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetReadReceiptsParams {
+    pub public: bool,
+}
+
+impl Handler for SetReadReceiptsParams {
+    type Ok = ();
+
+    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
+        core.private_receipts.store(!self.public, Ordering::Relaxed);
+        std::future::ready(Ok(()))
     }
 }
 
@@ -637,7 +708,11 @@ impl Handler for SearchUserDirectoryParams {
     type Ok = SearchUserDirectoryOk;
 
     async fn run(self, core: &Arc<Core>) -> Result<SearchUserDirectoryOk, RpcError> {
-        let (limited, results) = core.search_user_directory(&self.term, self.limit).await?;
+        let (limited, mut results) = core.search_user_directory(&self.term, self.limit).await?;
+        let nicknames = core.nicknames();
+        for entry in &mut results {
+            nicknames.apply_directory_entry(entry);
+        }
         Ok(SearchUserDirectoryOk { limited, results })
     }
 }
@@ -670,6 +745,151 @@ impl Handler for SetInviteDismissedParams {
             core.set_invite_dismissed(self.room_id, self.dismissed)
                 .await?,
         ))
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct DmSpaceLink {
+    pub room_id: String,
+    pub space_ids: Vec<String>,
+}
+
+fn dm_space_links(
+    links: std::collections::BTreeMap<OwnedRoomId, Vec<OwnedRoomId>>,
+) -> Vec<DmSpaceLink> {
+    links
+        .into_iter()
+        .map(|(room_id, space_ids)| DmSpaceLink {
+            room_id: room_id.into(),
+            space_ids: room_id_strings(space_ids),
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct DmSpacesParams {}
+
+impl Handler for DmSpacesParams {
+    type Ok = Vec<DmSpaceLink>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Vec<DmSpaceLink>, RpcError> {
+        Ok(dm_space_links(core.dm_spaces().await?))
+    }
+}
+
+/// An empty `space_ids` takes the chat out of every space.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetDmSpacesParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
+    pub space_ids: Vec<OwnedRoomId>,
+}
+
+impl Handler for SetDmSpacesParams {
+    type Ok = Vec<DmSpaceLink>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Vec<DmSpaceLink>, RpcError> {
+        Ok(dm_space_links(
+            core.set_dm_spaces(self.room_id, self.space_ids).await?,
+        ))
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct SpaceNotificationView {
+    pub space_id: String,
+    pub mode: NotificationModeView,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct SpaceNotificationsView {
+    pub spaces: Vec<SpaceNotificationView>,
+    pub exempt_rooms: Vec<String>,
+}
+
+fn space_notifications_view(
+    notifications: crate::account_documents::SpaceNotifications,
+) -> SpaceNotificationsView {
+    SpaceNotificationsView {
+        spaces: notifications
+            .modes
+            .into_iter()
+            .map(|(space_id, mode)| SpaceNotificationView {
+                space_id: space_id.into(),
+                mode,
+            })
+            .collect(),
+        exempt_rooms: notifications.exempt.into_iter().map(String::from).collect(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SpaceNotificationsParams {}
+
+impl Handler for SpaceNotificationsParams {
+    type Ok = SpaceNotificationsView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<SpaceNotificationsView, RpcError> {
+        Ok(space_notifications_view(core.space_notifications().await?))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetSpaceNotificationParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub space_id: OwnedRoomId,
+    #[serde(default)]
+    pub mode: Option<NotificationModeView>,
+}
+
+impl Handler for SetSpaceNotificationParams {
+    type Ok = SpaceNotificationsView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<SpaceNotificationsView, RpcError> {
+        let notifications = core
+            .update_space_notifications(|notifications| match self.mode {
+                Some(mode) => {
+                    notifications.modes.insert(self.space_id, mode);
+                }
+                None => {
+                    notifications.modes.remove(&self.space_id);
+                }
+            })
+            .await?;
+        Ok(space_notifications_view(notifications))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetSpaceNotificationExemptParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    pub exempt: bool,
+}
+
+impl Handler for SetSpaceNotificationExemptParams {
+    type Ok = SpaceNotificationsView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<SpaceNotificationsView, RpcError> {
+        let notifications = core
+            .update_space_notifications(|notifications| {
+                if self.exempt {
+                    notifications.exempt.insert(self.room_id);
+                } else {
+                    notifications.exempt.remove(&self.room_id);
+                }
+            })
+            .await?;
+        Ok(space_notifications_view(notifications))
     }
 }
 
@@ -743,6 +963,24 @@ impl Handler for SetMediaPreviewConfigParams {
     }
 }
 
+/// `None` drops the room's own value so the account's applies.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetRoomMediaPreviewsParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    pub media_previews: Option<MediaPreviewsView>,
+}
+
+impl Handler for SetRoomMediaPreviewsParams {
+    type Ok = MediaPreviewConfigView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<MediaPreviewConfigView, RpcError> {
+        core.set_room_media_previews(&self.room_id, self.media_previews)
+            .await
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct ProfileOverridesParams {}
@@ -778,11 +1016,112 @@ impl Handler for SetProfileOverrideParams {
     }
 }
 
+/// `None` when the homeserver does not support MSC4495.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PresenceSharingParams {}
+
+impl Handler for PresenceSharingParams {
+    type Ok = Option<PresenceSharingView>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Option<PresenceSharingView>, RpcError> {
+        core.presence_sharing().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct EditPresenceSharingParams {
+    pub edit: PresenceSharingEdit,
+}
+
+impl Handler for EditPresenceSharingParams {
+    type Ok = PresenceSharingView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<PresenceSharingView, RpcError> {
+        core.edit_presence_sharing(&self.edit).await
+    }
+}
+
+/// `None` when the homeserver does not support MSC4532.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PresenceOverrideParams {}
+
+impl Handler for PresenceOverrideParams {
+    type Ok = Option<PresenceOverrideView>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Option<PresenceOverrideView>, RpcError> {
+        core.presence_override().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetPresenceOverrideParams {
+    #[serde(rename = "override")]
+    pub presence_override: PresenceOverrideView,
+}
+
+impl Handler for SetPresenceOverrideParams {
+    type Ok = PresenceOverrideView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<PresenceOverrideView, RpcError> {
+        core.set_presence_override(&self.presence_override).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::with_ignored_user;
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn mutual_rooms_follows_pagination() {
+        use matrix_sdk::ruma::{api::MatrixVersion, user_id};
+        use matrix_sdk::test_utils::mocks::MatrixMockServer;
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+
+        let server = MatrixMockServer::new().await;
+        let client = server
+            .client_builder()
+            .server_versions(vec![MatrixVersion::V1_19])
+            .build()
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v1/mutual_rooms"))
+            .and(query_param("user_id", "@bob:example.org"))
+            .respond_with(|request: &wiremock::Request| {
+                let from = request.url.query_pairs().find(|(key, _)| key == "from");
+                let body = match from.as_ref().map(|(_, value)| value.as_ref()) {
+                    None => {
+                        json!({"count": 2, "joined": ["!first:example.org"], "next_batch": "next"})
+                    }
+                    Some("next") => json!({"count": 2, "joined": ["!second:example.org"]}),
+                    token => panic!("Unexpected pagination token: {token:?}"),
+                };
+                ResponseTemplate::new(200).set_body_json(body)
+            })
+            .expect(2)
+            .mount(server.server())
+            .await;
+
+        let rooms = super::fetch_mutual_rooms(&client, user_id!("@bob:example.org"))
+            .await
+            .unwrap();
+        assert_eq!(
+            rooms
+                .iter()
+                .map(|room| room.room_id.as_str())
+                .collect::<Vec<_>>(),
+            ["!first:example.org", "!second:example.org"]
+        );
+    }
 
     fn keys(content: &serde_json::Value) -> Vec<&str> {
         content["ignored_users"]
@@ -820,3 +1159,4 @@ mod tests {
         assert_eq!(keys(&edited), ["@a:x"]);
     }
 }
+

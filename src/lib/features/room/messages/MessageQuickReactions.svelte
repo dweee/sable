@@ -3,7 +3,8 @@
   import { RoomPacks } from '#lib/emoji/room-packs.svelte.js';
   import { i18n } from '#lib/i18n.js';
   import { shortcodeFor } from '#lib/emoji/emoji.js';
-  import { readRecentReactions, rememberReaction } from '#lib/emoji/recents.svelte.js';
+  import { RecentReactions } from '#lib/emoji/recents.svelte.js';
+  import { quickReactions } from '#lib/model/model.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
 
   import { isCustomReaction, reactionEmoteLabel } from './reaction-emote-label.js';
@@ -17,13 +18,9 @@
 
   let { count, onReact, roomId, roomy = false }: Props = $props();
   const core = useCoreClient();
+  const history = new RecentReactions(core);
   const packs = new RoomPacks(core, () => roomId);
-  let recents = $derived(readRecentReactions().slice(0, count));
-
-  function react(emoji: string): void {
-    rememberReaction(emoji);
-    onReact(emoji);
-  }
+  let recents = $derived(quickReactions(history.current, count));
 </script>
 
 {#if recents.length > 0}
@@ -35,7 +32,7 @@
         class="quick-reaction"
         aria-label={isCustomReaction(emoji) ? label : (shortcodeFor(emoji) ?? emoji)}
         onclick={() => {
-          react(emoji);
+          onReact(emoji);
         }}
       >
         {#if isCustomReaction(emoji)}
@@ -64,6 +61,7 @@
     flex-wrap: wrap;
     gap: var(--space-200);
     justify-content: center;
+    min-width: 0;
     padding: var(--space-200);
   }
 
@@ -73,13 +71,18 @@
     border: 0;
     border-radius: var(--radii-pill);
     cursor: pointer;
-    display: inline-flex;
-    font-size: var(--font-size-body);
+    display: inline-block;
+    font-size: var(--font-size-subheading);
     height: var(--control-height-300);
     justify-content: center;
     line-height: 1;
+    max-width: 100%;
     min-width: var(--control-height-300);
+    overflow: hidden;
+    text-box: trim-both cap alphabetic;
+    text-overflow: ellipsis;
     user-select: none;
+    white-space: nowrap;
   }
 
   .quick-reaction:hover {

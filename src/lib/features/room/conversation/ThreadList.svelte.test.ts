@@ -71,8 +71,7 @@ function root(id: string, body: string): TimelineItemView {
       kind: 'message',
       body,
       html: body,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -89,6 +88,7 @@ function root(id: string, body: string): TimelineItemView {
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
   });
 }
 

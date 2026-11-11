@@ -5,6 +5,7 @@
   import type { MemberView, RoomListItemView } from '#src/generated/protocol';
 
   import { i18n } from '#lib/i18n.js';
+  import { memberName } from '#lib/rooms/member-listing.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
@@ -49,11 +50,12 @@
     onCancel,
   }: Props = $props();
 
+  let botName = $derived(command.sender_name ?? command.sender);
   const uid = $props.id();
   const fieldId = (key: string): string => `bot-command-${uid}-${key}`;
   const labelOf = (key: string): string => key.replaceAll('_', ' ');
 
-  const values = $state<ArgumentDrafts>(untrack(() => ({ ...drafts })));
+  const values = untrack(() => drafts);
   const pending = $state<Record<string, string>>({});
   let errors = $state<Record<string, 'required' | 'invalid'>>({});
 
@@ -91,11 +93,11 @@
     if (acceptsType(parameter.schema, 'user_id')) {
       for (const member of members) {
         if (member.membership !== 'join') continue;
-        options.push({ value: member.user_id, label: member.display_name ?? member.user_id });
+        options.push({ value: member.user_id, label: memberName(member) });
       }
     }
     for (const room of rooms) {
-      const name = room.name ?? room.canonical_alias ?? room.room_id;
+      const name = room.display_name;
       if (acceptsType(parameter.schema, 'room_id')) {
         options.push({ value: room.room_id, label: name });
       }
@@ -183,14 +185,9 @@
   {@attach focusFirstField}
 >
   <div class="bot-command-header">
-    <Avatar
-      size="small"
-      src={command.sender_avatar}
-      id={command.sender}
-      name={command.sender_name ?? command.sender}
-    />
+    <Avatar size="small" src={command.sender_avatar} id={command.sender} name={botName} />
     <span class="bot-command-name">{prefix}{command.command}</span>
-    <span class="bot-command-bot">{command.sender_name ?? command.sender}</span>
+    <span class="bot-command-bot">{botName}</span>
     {#if command.description}
       <span class="bot-command-description">{command.description}</span>
     {/if}

@@ -141,7 +141,7 @@
     left: 0;
     max-width: 68rem;
     overflow: hidden;
-    padding-block: var(--safe-top) var(--safe-bottom);
+    padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
     top: 0;
     width: 100%;
   }
@@ -150,19 +150,21 @@
   :global(.dialog-content-sheet) {
     --ghost-hover: var(--surface-container-hover);
     --ghost-active: var(--surface-container-active);
+    --sheet-inset-bottom: max(0px, calc(var(--safe-bottom) - var(--keyboard-overlap)));
 
     background: var(--surface-container);
     border: var(--border-width) solid var(--surface-container-line);
     border-radius: var(--radius) var(--radius) 0 0;
-    bottom: 0;
+    bottom: var(--keyboard-overlap);
     box-shadow: var(--shadow-dialog);
     color: var(--surface-on-container);
     max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - var(--space-300) * 2);
     overflow: auto;
-    padding: var(--space-400);
+    padding: var(--space-400) calc(var(--space-400) + var(--safe-right)) var(--space-400)
+      calc(var(--space-400) + var(--safe-left));
 
     /* Bottom-anchored, so the home indicator would otherwise sit on the content. */
-    padding-bottom: calc(var(--space-400) + var(--safe-bottom));
+    padding-bottom: calc(var(--space-400) + var(--sheet-inset-bottom));
     width: 100%;
   }
 
@@ -173,11 +175,9 @@
   }
 
   :global(.dialog-content-sheet) {
-    --sheet-inset-bottom: var(--safe-bottom);
-
-    max-height: calc(100dvh - var(--safe-top) - var(--space-300) * 2);
+    max-height: calc(100dvh - var(--safe-top) - var(--keyboard-overlap) - var(--space-300) * 2);
     overscroll-behavior: contain;
-    padding: 0 0 var(--safe-bottom);
+    padding: 0 var(--safe-right) var(--sheet-inset-bottom) var(--safe-left);
   }
 
   :global(.dialog-content-sheet:has(> div > [data-inset-owner~='bottom'])) {
@@ -188,10 +188,13 @@
     :global(.dialog-content-verification) {
       border-radius: var(--radius);
       bottom: auto;
-      left: 50%;
-      max-width: min(34rem, calc(100vw - 3rem));
+      left: calc(50% + (var(--safe-left) - var(--safe-right)) / 2);
+      max-width: min(
+        var(--dialog-max-width, 34rem),
+        calc(100vw - 3rem - var(--safe-left) - var(--safe-right))
+      );
       padding: var(--space-500);
-      top: 50%;
+      top: calc(50% + (var(--safe-top) - var(--safe-bottom)) / 2);
       transform: translate(-50%, -50%);
 
       /* The mobile rule sets `width: 100%`, which held the panel at its max
@@ -200,16 +203,16 @@
     }
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     :global(.dialog-content-settings) {
       border: var(--border-width) solid var(--surface-container-line);
       border-radius: var(--radius);
-      height: min(52rem, calc(100dvh - 3rem - var(--titlebar-height)));
-      left: 50%;
-      padding-block: 0;
-      top: calc(50% + var(--titlebar-height) / 2);
+      height: min(52rem, calc(100dvh - 3rem - var(--safe-top) - var(--safe-bottom)));
+      left: calc(50% + (var(--safe-left) - var(--safe-right)) / 2);
+      padding: 0;
+      top: calc(50% + (var(--safe-top) - var(--safe-bottom)) / 2);
       transform: translate(-50%, -50%);
-      width: calc(100% - 3rem);
+      width: calc(100% - 3rem - var(--safe-left) - var(--safe-right));
     }
   }
 
@@ -322,7 +325,7 @@
     }
   }
 
-  @media (prefers-reduced-motion: no-preference) and (width >= 48rem) {
+  @media (prefers-reduced-motion: no-preference) and (--app-layout) {
     :global(html:not([data-reduced-motion='on']) .dialog-content-settings[data-state='open']) {
       animation: dialog-in var(--duration-fast) var(--ease-smooth-out);
     }

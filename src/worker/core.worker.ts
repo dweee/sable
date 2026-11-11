@@ -6,12 +6,18 @@ import init, {
   setLogFilter,
   setLogHandler,
   setPanicHandler,
+  setSpanHandler,
 } from '#src/generated/wasm/sable_wasm.js';
 import { clearSession, loadSession, saveSession } from '#lib/platform/session-storage.js';
 import { installFirefoxFetchLimit } from './adaptive-fetch';
 import { createCoreWorkerBoundary } from './core-worker-boundary';
+import { PerfStats } from './perf-stats';
 import { claimStore } from './store-ownership';
 import { installUploadDeadline } from './upload-deadline';
+import type { WasmDebugImage } from './protocol';
+import wasmDebug from '#src/generated/wasm/sable_wasm_build_id.js';
+import wasmUrl from '#src/generated/wasm/sable_wasm_bg.wasm?url';
+import { sleep } from '#lib/sleep.js';
 
 declare const self: SharedWorkerGlobalScope;
 
@@ -19,15 +25,19 @@ const SHUTDOWN_LIMIT_MS = 5_000;
 
 installUploadDeadline(self);
 installFirefoxFetchLimit(self);
+const perf = new PerfStats();
+perf.instrument(globalThis);
+let wasmMemory: WebAssembly.Memory | undefined;
+Reflect.set(self, '__sablePerf', () => perf.snapshot(wasmMemory));
 
 let started: SableCore | null = null;
+const wasm: WasmDebugImage | undefined = wasmDebug
+  ? { ...wasmDebug, type: 'wasm', code_file: new URL(wasmUrl, self.location.href).href }
+  : undefined;
 
 async function stopCore(): Promise<void> {
   if (!started) return;
-  await Promise.race([
-    started.shutdown(),
-    new Promise((resolve) => setTimeout(resolve, SHUTDOWN_LIMIT_MS)),
-  ]);
+  await Promise.race([started.shutdown(), sleep(SHUTDOWN_LIMIT_MS)]);
 }
 
 const core = claimStore(() => {
@@ -37,10 +47,13 @@ const core = claimStore(() => {
   });
 })
   .then(() => init())
-  .then(() => {
+  .then((output) => {
+    wasmMemory = output.memory;
     // Before the constructor, so a panic while opening the session store still
     // carries its Rust message.
-    setPanicHandler(crash);
+    setPanicHandler((message: string) => {
+      crash(message, new Error(message).stack);
+    });
 
     const instance = new SableCore(
       'sable-next',
@@ -69,12 +82,15 @@ const boundary = createCoreWorkerBoundary(
       setLogFilter(filter);
     });
   },
-  stopCore
+  stopCore,
+  (method, elapsedMs) => {
+    perf.recordCall(method, elapsedMs);
+  }
 );
 
 // A trap unwinds only its own call, so close the worker rather than keep re-entering a corrupted module; the next connect builds a fresh one.
 function crash(message: string, stack?: string): void {
-  boundary.handlePanic(message, stack);
+  boundary.handlePanic(message, stack, wasm);
   setTimeout(() => {
     self.close();
   }, 0);
@@ -93,9 +109,6 @@ self.addEventListener('error', (event) => {
       (event.filename ? `    at ${event.filename}:${event.lineno}:${event.colno}` : undefined)
   );
 });
-self.addEventListener('online', () => {
-  boundary.handleOnline();
-});
 self.addEventListener('unhandledrejection', (event) => {
   if (!(event.reason instanceof WebAssembly.RuntimeError)) {
     boundary.handleLog(`ERROR unhandled rejection in worker: ${String(event.reason)}`);
@@ -110,6 +123,7 @@ function errorStack(error: unknown): string | undefined {
 
 void core.then((instance) => {
   setLogHandler(boundary.handleLog);
+  setSpanHandler(boundary.handleSpan);
   instance.subscribeEvents(boundary.handleEvent);
 });
 

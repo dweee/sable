@@ -59,8 +59,8 @@
 }
 
 .composer:has([contenteditable='true']:focus) {
-  border-color: var(--primary-main);
-  box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring);
+  border-color: var(--focus-ring);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
 }
 
 .composer-row {
@@ -89,6 +89,15 @@
 .composer-formatting {
   grid-area: formatting;
   min-width: 0;
+}
+
+@container (width < 40rem) {
+  .composer-row.formatting-open {
+    grid-template-areas:
+      'field field field'
+      'formatting formatting formatting'
+      'before hint after';
+  }
 }
 
 .composer-before,
@@ -133,14 +142,12 @@
   position: relative;
 }
 
-@media (any-pointer: fine) {
-  @container (width >= 44rem) {
-    .composer-formatting .formatting {
-      flex-wrap: wrap;
-      height: auto;
-      justify-content: end;
-      overflow: visible;
-    }
+@media (pointer: fine) {
+  .composer-formatting .formatting {
+    flex-wrap: wrap;
+    height: auto;
+    justify-content: end;
+    overflow: visible;
   }
 }
 
@@ -246,10 +253,6 @@
     transform: scale(1.3);
     transition: transform var(--press-ms) linear;
   }
-
-  .composer {
-    transition: border-color var(--motion-fast) var(--motion-easing-standard);
-  }
 }
 
 .composer-row.short {
@@ -262,6 +265,10 @@
 
 .composer-row.short .composer-expand {
   display: none;
+}
+
+.composer-row.short .composer-field {
+  padding-inline-end: 0;
 }
 
 .composer-row.short .editor {

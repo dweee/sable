@@ -1,18 +1,27 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import { mediaPreviewSettings } from '#lib/settings/media-previews.svelte.js';
   import { onDestroy, onMount, tick, type Snippet, untrack } from 'svelte';
   import { on } from 'svelte/events';
   import { page } from '$app/state';
   import AppShell from '#lib/features/sidebar/AppShell.svelte';
   import SettingsPanel from '#lib/features/settings/SettingsPanel.svelte';
-  import { followSettingsLink } from '#lib/features/settings/settings-navigation.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import {
+    defaultSettingsSection,
+    followSettingsLink,
+    showSettingsOver,
+  } from '#lib/features/settings/settings-navigation.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { useCoreClient } from '#lib/core/context.js';
-  import { findRoomByPathId, provideRoomList, RoomList } from '#lib/rooms/room-list.svelte.js';
+  import {
+    findRoomByPathId,
+    provideRoomList,
+    RoomList,
+    roomListOptions,
+  } from '#lib/rooms/room-list.svelte.js';
   import { roomSectionPath } from '#lib/rooms/permalink.js';
-  import { rememberLastRoom } from '#lib/rooms/last-room.js';
+  import { HOME_SECTION, rememberLastRoom } from '#lib/rooms/last-room.js';
   import { provideSpaceSidebar, SpaceSidebar } from '#lib/spaces/sidebar-layout.svelte.js';
+  import { OpenRoomSearch, provideOpenRoomSearch } from '#lib/features/room/room-panels.svelte.js';
   import { PersonaStore, providePersonaStore } from '#lib/personas/personas.svelte.js';
   import { Bookmarks, provideBookmarks } from '#lib/rooms/bookmarks.svelte.js';
   import { EventItems, provideEventItems } from '#lib/features/room/messages/event-items.svelte.js';
@@ -20,15 +29,24 @@
     provideRoomScopes,
     RoomScopes,
   } from '#lib/features/room/messages/message-scope.svelte.js';
-  import { contextSearchPath } from '#lib/features/room/room-navigation.js';
+  import {
+    backToRoomList,
+    contextSearchPath,
+    createRoomPath,
+    trackRouteFocus,
+  } from '#lib/features/room/room-navigation.js';
   import { MESSAGE_SEARCH_FIELD_ID } from '#lib/features/search/message-search.svelte.js';
   import { InviteActions } from '#lib/rooms/invites.svelte.js';
   import { dismissedInvites } from '#lib/rooms/dismissed-invites.svelte.js';
-  import { endSystemCall, fulfillSystemAnswer } from '#lib/platform/calls.js';
+  import { presenceSharing } from '#lib/rooms/presence-sharing.svelte.js';
+  import { presenceOverride } from '#lib/rooms/presence-override.svelte.js';
+  import { dmSpaces } from '#lib/rooms/dm-spaces.svelte.js';
+  import { spaceNotifications } from '#lib/rooms/space-notifications.svelte.js';
   import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
   import { supporter } from '#lib/supporter/supporter.svelte.js';
   import { PresenceStore, providePresenceStore } from '#lib/rooms/presence.svelte.js';
-  import { goto } from '$app/navigation';
+  import { afterNavigate, goto, onNavigate } from '$app/navigation';
+  import { tabTransition } from '#lib/ui/tab-transition.js';
   import { afterOverlayPops } from '#lib/platform/overlay-back.svelte.js';
   import { resolve } from '$app/paths';
   import { i18n } from '#lib/i18n.js';
@@ -40,28 +58,35 @@
   import { hasPendingSetup } from '#lib/features/auth/setup/setup-record.js';
   import { readText } from '#lib/platform/local-json.js';
   import { watchScheduledQueue } from '#lib/features/composer/scheduled-sender.js';
+  import { watchSearchPeers } from '#lib/search/search-peer.js';
+  import { runtimeConfig } from '#lib/config/runtime-config.js';
   import {
     alertsNatively,
-    setNativeEncryptedContentAllowed,
+    forgetLeftNativeConversations,
+    setNativeNotificationPolicy,
     watchNativePushTokens,
     watchNativeNotificationActions,
     watchNativeNotificationClicks,
+    type NativeNotificationTarget,
   } from '#lib/platform/native-notifications.js';
   import { deliversWebPush } from '#lib/platform/notifications.js';
   import { hostsServiceWorker } from '#lib/platform/service-worker.js';
   import { followExternalLink } from '#lib/platform/external-links.js';
   import { windowActivity } from '#lib/platform/window-activity.js';
+  import { watchNetworkConditions } from '#lib/platform/network-conditions.js';
+  import { isNativeMobile } from '#lib/platform/os.js';
   import { setUnreadBadge } from '#lib/platform/badge.js';
   import { keepStorage } from '#lib/platform/persistent-storage.js';
-  import { closeWindow, quitApp } from '#lib/platform/window-decorations.js';
   import { electronBridge, type ScreenShareCandidate } from '#lib/platform/electron.js';
   import { type FaviconState, faviconState, setFavicon } from '#lib/ui/favicon.js';
+  import { faviconUrl } from '#lib/deployment/brand.js';
   import idleFavicon from '#lib/assets/favicon.png';
   import unreadFavicon from '#lib/assets/res/svg/unread.svg';
   import highlightFavicon from '#lib/assets/res/svg/highlight.svg';
   import { startSystemBarSync } from '#lib/platform/system-bars.js';
   import { installAndroidBack } from '#lib/platform/android-back.js';
   import {
+    selectPreferenceAccount,
     preferences,
     readReceiptIsPrivate,
     setPreference,
@@ -69,28 +94,26 @@
   import { accountSync } from '#lib/settings/account-sync.svelte.js';
   import {
     draftsDocumentFor,
-    recentEmojiDocument,
     scheduledDocumentFor,
     settingsDocument,
     workspaceDocument,
   } from '#lib/settings/sync-documents.js';
   import {
     registerNativePush,
+    retryNativePushNow,
     unregisterNativePush,
   } from '#lib/features/notifications/native-push.js';
   import { pushOverride } from '#lib/notifications/push-config.js';
-  import {
-    registerVoipPusher,
-    unregisterVoipPusher,
-  } from '#lib/features/notifications/voip-push.js';
-  import { watchVoipToken } from '#lib/platform/calls.js';
+  import { unregisterVoipPusher } from '#lib/features/notifications/voip-push.js';
   import {
     callNotificationAction,
     inviteNotificationAction,
-    openNativeNotification,
+    NativeNotificationOpener,
+    type NativeNotificationOpen,
     selectNotificationAccount,
     performNotificationAction,
   } from '#lib/features/notifications/native-actions.js';
+  import { trackNotificationOpening } from '#lib/features/notifications/notification-opening.svelte.js';
   import {
     NotificationCenter,
     provideNotificationCenter,
@@ -102,12 +125,16 @@
     type SystemAnswer,
   } from '#lib/features/call/incoming-calls.svelte.js';
   import { CallSession, provideCallSession } from '#lib/features/call/call-session.svelte.js';
+  import { SystemCalls } from '#lib/features/call/system-calls.svelte.js';
   import {
     effectiveVolume,
     screenVolumeKey,
   } from '#lib/features/call/participant-volumes.svelte.js';
   import {
+    boundServerIdentity,
+    currentServerUser,
     forgetPushSessions,
+    PUSH_ACTIVATION_TTL_MS,
     putPushContentPolicy,
     putRoomModes,
     RoomNameWriter,
@@ -122,16 +149,20 @@
   import { clearPushFailure, recordPushFailure } from '#lib/features/notifications/push-failure.js';
   import CommandPalette from '#lib/ui/shortcuts/CommandPalette.svelte';
   import ToastRegion from '#lib/ui/ToastRegion.svelte';
+  import { toasts } from '#lib/ui/toasts.svelte.js';
   import ShareTargetSheet from '#lib/features/share/ShareTargetSheet.svelte';
   import { ShareInbox, watchSharedContent } from '#lib/features/share/share-inbox.svelte.js';
   import ShortcutsHelpDialog from '#lib/ui/shortcuts/ShortcutsHelpDialog.svelte';
+  import { cycleRegion, focusRegion } from '#lib/ui/shortcuts/focus-regions.js';
   import { registerGlobalShortcuts } from '#lib/ui/shortcuts/global-shortcuts.js';
+  import { registerDesktopCallShortcuts } from '#lib/features/call/desktop-shortcuts.svelte.js';
   import { paletteState, shortcutsHelpState } from '#lib/ui/shortcuts/palette-state.svelte.js';
-  import { unreadRoomsByPriority } from '#lib/ui/shortcuts/room-jump.js';
+  import { unreadRoomAtOffset, unreadRoomsByPriority } from '#lib/ui/shortcuts/room-jump.js';
   import { markRoomsRead } from '#lib/features/sidebar/nav-rooms.js';
   import { hasUnread } from '#lib/rooms/unread.js';
   import { roomAtOffset } from '#lib/features/sidebar/visible-rooms.svelte.js';
   import { playSound, type NotificationSound } from '#lib/features/notifications/sound.js';
+  import MediaViewerHost from '#lib/ui/media/MediaViewerHost.svelte';
 
   interface Props {
     children: Snippet;
@@ -139,10 +170,21 @@
 
   let { children }: Props = $props();
   const core = useCoreClient();
+  const notificationOpener = new NativeNotificationOpener(core);
+  onDestroy(() => notificationOpener.cancel());
+  let stopSearchPeers: (() => void) | null = null;
+  let searchPeerKey: string | null = null;
+  let searchOptionsReady: Promise<unknown> = Promise.resolve();
+  onDestroy(() => stopSearchPeers?.());
   const roomList = new RoomList(core);
   provideRoomList(roomList);
+  $effect(() => {
+    roomList.setOptions(roomListOptions());
+  });
   const spaceSidebar = new SpaceSidebar();
   provideSpaceSidebar(spaceSidebar);
+  const openRoomSearch = new OpenRoomSearch();
+  provideOpenRoomSearch(openRoomSearch);
   providePersonaStore(new PersonaStore(core));
   const bookmarks = new Bookmarks(core.rpc.account);
   provideBookmarks(bookmarks);
@@ -154,8 +196,22 @@
   providePresenceStore(presence);
   const notifications = new NotificationCenter();
   provideNotificationCenter(notifications);
-  const callSession = new CallSession(core);
+  const callSession = new CallSession(core, {
+    roomName: (roomId) => roomList.byId(roomId)?.name,
+  });
   provideCallSession(callSession);
+  onMount(() => registerDesktopCallShortcuts(callSession));
+  $effect(() => {
+    const inputMode = preferences.callInputMode;
+    untrack(() => callSession.setInputMode(inputMode));
+  });
+  $effect.pre(() => {
+    selectPreferenceAccount(core.session?.account_id ?? null);
+  });
+  $effect(() => {
+    void core.accountRevision;
+    return () => void callSession.leave();
+  });
   let screenSharePick = $state.raw<{
     sources: ScreenShareCandidate[];
     settle: (id: string | null) => void;
@@ -174,30 +230,20 @@
         })
     )
   );
-  let systemCall = $state<{ callId: string; roomId: string } | null>(null);
+  const systemCalls = new SystemCalls(callSession);
+  systemCalls.track();
   const incomingCalls = new IncomingCalls(core, (answer) => void joinSystemAnswer(answer));
 
   async function joinSystemAnswer({ uuid, callId, roomId, hasVideo }: SystemAnswer): Promise<void> {
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     void goto(roomSectionPath(roomList.rooms, roomId));
-    try {
-      await callSession.join(roomId, {
+    await systemCalls.answer(uuid, callId, roomId, () =>
+      callSession.join(roomId, {
         microphone: !preferences.callMicrophoneMuted,
         camera: hasVideo,
-      });
-      systemCall = { callId, roomId };
-    } catch (error) {
-      console.debug('[sable call] system answer not joined', error);
-    } finally {
-      void fulfillSystemAnswer(uuid);
-    }
+      })
+    );
   }
-
-  $effect(() => {
-    const answered = systemCall;
-    if (answered === null || callSession.roomId === answered.roomId) return;
-    systemCall = null;
-    void endSystemCall(answered.callId);
-  });
 
   let callUserIds = $derived(
     new Map(callSession.members.map((member) => [member.identity, member.user_id]))
@@ -216,6 +262,24 @@
   const shareInbox = new ShareInbox();
 
   let openRoomId = $derived(findRoomByPathId(roomList.rooms, page.params.roomId)?.room_id ?? null);
+
+  let routeAccountId = $state<string | null>(null);
+  afterNavigate(() => {
+    routeAccountId = core.session?.account_id ?? null;
+  });
+  $effect(() => {
+    if (routeAccountId === null && core.session) routeAccountId = core.session.account_id;
+  });
+  let previousAccountRoute = $derived(
+    routeAccountId !== null &&
+      core.session !== null &&
+      core.session.account_id !== routeAccountId &&
+      (page.params.roomId !== undefined || page.params.spaceId !== undefined)
+  );
+  $effect(() => {
+    if (previousAccountRoute) void goto(resolve('/(app)/rooms'), { replace: true });
+  });
+
   let incoming = $derived(incomingCalls.calls.at(0) ?? null);
   let loadingAnimal = $derived(preferences.loadingAnimal || null);
 
@@ -251,6 +315,7 @@
       camera: call.hasVideo,
     });
     await afterOverlayPops();
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     await goto(roomSectionPath(roomList.rooms, call.roomId));
   }
 
@@ -291,10 +356,12 @@
       }
       return;
     }
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     void goto(roomSectionPath(roomList.rooms, roomId));
     void callSession.join(roomId, { microphone: !preferences.callMicrophoneMuted, camera: false });
   }
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
+  onNavigate((navigation) => tabTransition(navigation, !appLayout.current));
 
   let wasSignedIn = false;
 
@@ -325,7 +392,6 @@
     settingsDocument,
     workspaceDocument(spaceSidebar),
     draftsDocumentFor(core.session?.account_id ?? ''),
-    recentEmojiDocument,
     scheduledDocumentFor(core.session?.account_id ?? ''),
   ]);
 
@@ -352,7 +418,7 @@
   }
 
   const FAVICONS: Record<FaviconState, string> = {
-    idle: idleFavicon,
+    idle: faviconUrl() ?? idleFavicon,
     unread: unreadFavicon,
     highlight: highlightFavicon,
   };
@@ -460,40 +526,27 @@
     if (core.status !== 'ready') return;
 
     void core.rpc.notifications
-      .setContent({
-        visible: preferences.notificationContent,
-        encrypted: preferences.notificationEncryptedContent,
+      .setOptions({
+        enabled: preferences.systemNotifications,
+        content: preferences.notificationContent,
+        encrypted_content: preferences.notificationEncryptedContent,
+        sounds: preferences.notificationSounds,
+        notify_once: preferences.notifyOnce,
       })
       .catch((error: unknown) => {
-        console.warn('[sable notifications] content setting not applied', error);
+        console.warn('[sable notifications] notification settings not applied', error);
       });
 
-    void core.rpc.notifications
-      .setSounds({ enabled: preferences.notificationSounds })
-      .catch((error: unknown) => {
-        console.warn('[sable notifications] sounds setting not applied', error);
-      });
-
-    void core.rpc.notifications
-      .setNotifyOnce({ enabled: preferences.notifyOnce })
-      .catch((error: unknown) => {
-        console.warn('[sable notifications] notify-once setting not applied', error);
-      });
-
-    void core.rpc.notifications
-      .setEnabled({ enabled: preferences.systemNotifications })
-      .catch((error: unknown) => {
-        console.warn('[sable notifications] enabled setting not applied', error);
-      });
-
-    void setNativeEncryptedContentAllowed(
-      preferences.notificationContent && preferences.notificationEncryptedContent,
-      preferences.notificationContent,
-      preferences.systemNotifications,
-      preferences.notificationSounds,
-      preferences.notifyOnce,
-      preferences.clearNotificationsOnRead
-    ).catch((error: unknown) => {
+    void setNativeNotificationPolicy({
+      enabled: preferences.systemNotifications,
+      content: preferences.notificationContent,
+      encryptedContent: preferences.notificationContent && preferences.notificationEncryptedContent,
+      sounds: preferences.notificationSounds,
+      notifyOnce: preferences.notifyOnce,
+      clearOnRead: preferences.clearNotificationsOnRead,
+      privateReceipts: readReceiptIsPrivate(),
+      quietWhenActiveElsewhere,
+    }).catch((error: unknown) => {
       console.debug('[sable notifications] native content policy not applied', error);
     });
 
@@ -502,6 +555,84 @@
       encryptedContent: preferences.notificationEncryptedContent,
       notifyOnce: preferences.notifyOnce,
       clearOnRead: preferences.clearNotificationsOnRead,
+      quietWhenActiveElsewhere,
+    });
+  });
+
+  $effect(() => {
+    void core.accountRevision;
+    const sharing = preferences.searchSharing && typeof RTCPeerConnection !== 'undefined';
+    const peerKey =
+      core.status === 'ready' && sharing
+        ? `${core.session?.account_id}:${core.accountRevision}`
+        : null;
+    if (peerKey !== searchPeerKey) {
+      stopSearchPeers?.();
+      stopSearchPeers = null;
+      searchPeerKey = peerKey;
+    }
+    if (core.status !== 'ready') return;
+    let current = true;
+
+    searchOptionsReady = core.rpc.session.setSearchOptions({
+      disk_budget_mb: Number(preferences.searchIndexLimit),
+      crawler: preferences.searchCrawler,
+      sharing,
+      unmetered_only: preferences.searchUnmeteredOnly,
+      server_search: preferences.serverSearch,
+      tuning: {
+        crawl_pause_ms: Number(preferences.searchCrawlPause) * 1000,
+        trickle_pause_ms: Number(preferences.searchTricklePause) * 1000,
+        flush_interval_secs: Number(preferences.searchFlushInterval),
+        batch: Number(preferences.searchBatchSize),
+        base_events: Number(preferences.searchBaseEvents),
+        max_events: Number(preferences.searchMaxEvents),
+      },
+    });
+    void Promise.all([searchOptionsReady, runtimeConfig()])
+      .then(([, config]) => {
+        if (current && peerKey !== null && stopSearchPeers === null) {
+          stopSearchPeers = watchSearchPeers(core, {
+            stunServers: config.searchSharing.stunServers,
+            beforeStart: async () => {
+              await tick();
+              await searchOptionsReady;
+            },
+          });
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn('[sable search] search options not applied', error);
+      });
+    return () => {
+      current = false;
+    };
+  });
+
+  $effect(() => {
+    if (core.status !== 'ready') return;
+    void core.rpc.account
+      .setReadReceipts({ public: preferences.sendReadReceipts })
+      .catch((error: unknown) => {
+        console.warn('[sable receipts] read receipt setting not applied', error);
+      });
+  });
+
+  $effect(() => {
+    if (core.status !== 'ready') return;
+    void core.rpc.session
+      .setAppInForeground({ foreground: documentVisible })
+      .catch((error: unknown) => {
+        console.debug('[sable activity] foreground not applied', error);
+      });
+  });
+
+  $effect(() => {
+    if (core.status !== 'ready' || isNativeMobile()) return;
+    return watchNetworkConditions((conditions) => {
+      void core.rpc.session.setNetworkConditions(conditions).catch((error: unknown) => {
+        console.debug('[sable network] network conditions not applied', error);
+      });
     });
   });
 
@@ -509,38 +640,15 @@
     void core.accountRevision;
     if (core.status !== 'ready') return;
 
-    void core.rpc.session
-      .setSearchOptions({
-        disk_budget_mb: Number(preferences.searchIndexLimit),
-        crawler: preferences.searchCrawler,
-        unmetered_only: preferences.searchUnmeteredOnly,
-        server_search: preferences.serverSearch,
-        tuning: {
-          crawl_pause_ms: Number(preferences.searchCrawlPause) * 1000,
-          trickle_pause_ms: Number(preferences.searchTricklePause) * 1000,
-          flush_interval_secs: Number(preferences.searchFlushInterval),
-          batch: Number(preferences.searchBatchSize),
-          base_events: Number(preferences.searchBaseEvents),
-          max_events: Number(preferences.searchMaxEvents),
-        },
-        foreground: documentVisible,
-      })
-      .catch((error: unknown) => {
-        console.warn('[sable search] search options not applied', error);
-      });
-  });
-
-  $effect(() => {
-    void core.accountRevision;
-    if (core.status !== 'ready') return;
-
-    const message = preferences.presenceStatusMessage.trim();
-    const presence = preferences.sendPresence ? preferences.presence : 'offline';
-    const state = presence === 'online' && !active ? 'unavailable' : presence;
+    const revised = presenceOverride.supported;
+    const message = revised ? '' : preferences.presenceStatusMessage.trim();
+    const picked = revised ? 'online' : preferences.presence;
+    const presence = preferences.sendPresence ? picked : 'offline';
+    const away = presence === 'online' && (!active || idle);
     const status = preferences.sendPresence && message ? message : null;
     const timer = setTimeout(() => {
       void core.rpc.account
-        .setPresence({ presence: state, status_message: status })
+        .setPresence({ presence: away ? 'unavailable' : presence, status_message: status })
         .catch((error: unknown) => {
           console.debug('[sable presence] presence not sent', error);
         });
@@ -548,45 +656,60 @@
     return () => clearTimeout(timer);
   });
 
+  $effect(() => {
+    void core.accountRevision;
+    const accountId = core.session?.account_id;
+    if (core.status !== 'ready' || !accountId) return;
+
+    const write = (isActive: boolean): void => {
+      deviceActivityWritten = isActive;
+      void core.rpc.account.setDeviceActivity({ active: isActive }).catch((error: unknown) => {
+        console.warn('[sable activity] device activity not written', error);
+      });
+    };
+    if (preferences.pushInactiveTimeout === 'off') {
+      if (deviceActivityWritten) write(false);
+      return;
+    }
+    if (active && !idle) {
+      write(true);
+      const timer = setInterval(() => write(true), DEVICE_ACTIVITY_INTERVAL_MS);
+      return () => clearInterval(timer);
+    }
+
+    const delay = !active && !idle ? Number(preferences.pushInactiveTimeout) * 60_000 : 0;
+    const timer = setTimeout(() => write(false), delay);
+    return () => {
+      clearTimeout(timer);
+    };
+  });
+
   const pushDeviceName = $derived(pusherDisplayName(core));
 
   $effect(() => {
     void core.accountRevision;
     void pushDeviceName;
+    void preferences.richPushPayloads;
+    void preferences.pushEmbeddedServerUrl;
     if (core.status !== 'ready') return;
+    void unregisterVoipPusher(core);
 
     if (!preferences.systemNotifications) {
       void unregisterNativePush().catch((error: unknown) => {
         console.debug('[sable notifications] native push not unregistered', error);
       });
-      void unregisterVoipPusher(core);
       return;
     }
 
     void registerNativePush(pushOverride(), core.session, core.accounts).catch((error: unknown) => {
       console.debug('[sable notifications] native push not registered', error);
     });
-    void registerVoipPusher(core, core.session).catch((error: unknown) => {
-      console.debug('[sable notifications] voip pusher not registered', error);
-    });
   });
 
-  onMount(() => {
-    let disposed = false;
-    let stop: (() => void) | undefined;
-    void watchVoipToken((token) => {
-      if (core.status !== 'ready' || !preferences.systemNotifications) return;
-      void registerVoipPusher(core, core.session, token).catch((error: unknown) => {
-        console.debug('[sable notifications] rotated voip token not registered', error);
-      });
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else stop = unlisten;
-    });
-    return () => {
-      disposed = true;
-      stop?.();
-    };
+  $effect(() => {
+    if (windowActivity.visible && core.status === 'ready' && preferences.systemNotifications) {
+      void retryNativePushNow();
+    }
   });
 
   onMount(() => {
@@ -629,7 +752,8 @@
   $effect(() => {
     void core.session?.user_id;
     if (core.status !== 'ready' || !deliversWebPush()) return;
-    if (preferences.richPushPayloads) {
+    // The worker acks the MSC4174 validation push with it, whatever the payload format.
+    if (!preferences.systemNotifications) {
       void forgetPushSessions();
       return;
     }
@@ -660,7 +784,9 @@
     const override = pushOverride();
     void pushDeviceName;
 
+    let synced = 0;
     const resync = (): void => {
+      synced = Date.now();
       void syncPushSubscription(core, override).then(clearPushFailure, (error: unknown) => {
         recordPushFailure(error);
         console.debug('[sable notifications] push not registered', error);
@@ -668,6 +794,11 @@
     };
     resync();
 
+    // Retries a validation push missed while suspended, once its token has expired.
+    const stopVisible = on(document, 'visibilitychange', () => {
+      if (document.visibilityState === 'visible' && Date.now() - synced >= PUSH_ACTIVATION_TTL_MS)
+        resync();
+    });
     const stopGranted = onPermissionGranted(resync);
     const stopMessages = on(navigator.serviceWorker, 'message', (event) => {
       const message = (event as MessageEvent).data as
@@ -686,6 +817,7 @@
       }
     });
     return () => {
+      stopVisible();
       stopGranted();
       stopMessages();
     };
@@ -737,8 +869,7 @@
         (message.outcome === 'answer' || message.outcome === 'decline')
       ) {
         const outcome = message.outcome;
-        void openNativeNotification(
-          core,
+        void openFromNotification(
           { userId: message.userId, roomId: message.roomId, eventId: message.eventId ?? null },
           (roomId, eventId) => {
             answerFromNotification(roomId, eventId, outcome);
@@ -763,13 +894,13 @@
 
     const { roomId, userId, eventId } = pushedRoom;
     pushedRoom = null;
-    const opened =
-      userId === null
-        ? openNotification(roomId, eventId)
-        : openNativeNotification(core, { userId, roomId, eventId }, openNotification);
-    void opened.catch((error: unknown) => {
-      console.warn('[sable notifications] notification not opened', error);
-    });
+    const notifiedUser = userId ?? core.session?.user_id;
+    if (!notifiedUser) return;
+    void openFromNotification({ userId: notifiedUser, roomId, eventId }, openNotification).catch(
+      (error: unknown) => {
+        console.warn('[sable notifications] notification not opened', error);
+      }
+    );
   });
 
   $effect(() => {
@@ -783,11 +914,32 @@
     if (!('serviceWorker' in navigator)) return stop;
 
     const off = on(navigator.serviceWorker, 'message', (event) => {
-      const message = (event as MessageEvent).data as
-        | { type?: string; text?: string; files?: File[] }
+      const workerMessage = event as MessageEvent;
+      const message = workerMessage.data as
+        | { type?: string; serverUserId?: string | null; text?: string; files?: File[] }
         | undefined;
-      if (message?.type === 'sable:share')
-        shareInbox.accept(message.text ?? '', message.files ?? []);
+      if (message?.type === 'sable:server-user') {
+        workerMessage.ports[0]?.postMessage(boundServerIdentity());
+      } else if (
+        message?.type === 'sable:share' &&
+        (!import.meta.env.VITE_SABLE_SERVER_URL ||
+          (message.serverUserId && message.serverUserId === boundServerIdentity()))
+      ) {
+        if (!import.meta.env.VITE_SABLE_SERVER_URL) {
+          shareInbox.accept(message.text ?? '', message.files ?? []);
+        } else {
+          void currentServerUser()
+            .then((identity) => {
+              if (identity === message.serverUserId && identity === boundServerIdentity()) {
+                shareInbox.accept(message.text ?? '', message.files ?? []);
+              }
+            })
+            .catch((error: unknown) => {
+              console.warn('[sable share] shared content could not be verified', error);
+              toasts.error(i18n.t('errors.actionFailed'));
+            });
+        }
+      }
     });
     navigator.serviceWorker.controller?.postMessage({ type: 'sable:share-take' });
 
@@ -833,48 +985,106 @@
     void core.accountRevision;
     if (core.status !== 'ready') return;
 
-    void roomList.start().catch((error: unknown) => {
-      console.warn('[sable rooms] room list unavailable', error);
+    // Restarting these wipes the room list, so a state they read must not rerun this effect.
+    untrack(() => {
+      void roomList.start().catch((error: unknown) => {
+        console.warn('[sable rooms] room list unavailable', error);
+      });
+      void spaceSidebar.start(core);
+      const userId = core.session?.user_id;
+      notifications.start(core, (roomId, eventId) => {
+        if (!userId) return;
+        void openFromNotification({ userId, roomId, eventId }, openNotification).catch(
+          (error: unknown) => {
+            console.warn('[sable notifications] notification not opened', error);
+          }
+        );
+      });
+      presence.start(core);
+      dismissedInvites.start(core);
+      presenceSharing.start(core);
+      presenceOverride.start(core);
+      dmSpaces.start(core);
+      spaceNotifications.start(core);
+      mediaPreviewSettings.start(core);
+      profileOverrides.start(core);
+      supporter.start(core);
     });
-    void spaceSidebar.start(core);
-    notifications.start(core, openNotification);
-    presence.start(core);
-    dismissedInvites.start(core);
-    mediaPreviewSettings.start(core);
-    profileOverrides.start(core);
-    supporter.start(core);
     return () => {
       roomList.stop();
       spaceSidebar.stop();
       notifications.stop();
       presence.stop();
       dismissedInvites.stop();
+      presenceSharing.stop();
+      presenceOverride.stop();
+      dmSpaces.stop();
+      spaceNotifications.stop();
       mediaPreviewSettings.stop();
       profileOverrides.stop();
       supporter.stop();
     };
   });
 
+  $effect(() => {
+    if (roomList.settled) spaceNotifications.apply(roomList.rooms);
+  });
+
+  const LEFT_CONVERSATIONS_SETTLE_MS = 2_000;
+
+  $effect(() => {
+    void roomList.rooms;
+    if (!roomList.settled) return;
+    const timer = setTimeout(() => {
+      forgetLeftNativeConversations().catch((error: unknown) => {
+        console.debug('[sable notifications] left conversations not forgotten', error);
+      });
+    }, LEFT_CONVERSATIONS_SETTLE_MS);
+    return () => clearTimeout(timer);
+  });
+
   const NOTIFIED_ROOM_WAIT_MS = 10_000;
   const PRESENCE_SETTLE_MS = 2_000;
+  const DEVICE_ACTIVITY_INTERVAL_MS = 60_000;
+  let deviceActivityWritten = false;
 
   $effect(() => {
     const accountId = core.session?.account_id;
     if (core.status !== 'ready' || !accountId || !roomList.settled) return;
     const room = roomList.byId(openRoomId);
     if (room?.state === 'joined' && room.room_kind !== 'space' && !room.is_tombstoned) {
-      rememberLastRoom(accountId, room.room_id);
+      const section = page.url.pathname.startsWith('/home/')
+        ? HOME_SECTION
+        : (findRoomByPathId(roomList.rooms, page.params.spaceId)?.room_id ?? null);
+      rememberLastRoom(accountId, room.room_id, section);
     }
   });
 
-  async function openNotification(roomId: string, eventId: string | null): Promise<void> {
+  async function openFromNotification(
+    target: NativeNotificationTarget,
+    open: NativeNotificationOpen
+  ): Promise<void> {
+    const opening = await trackNotificationOpening(notificationOpener.open(target, open));
+    if (opening === 'unknown_account') toasts.error(i18n.t('nav.notificationAccountMissing'));
+    if (opening === 'switch_failed') toasts.error(i18n.t('nav.switchAccountFailed'));
+  }
+
+  async function openNotification(
+    roomId: string,
+    eventId: string | null,
+    isCurrent: () => boolean
+  ): Promise<void> {
     await tick();
+    if (!isCurrent()) return;
     await roomList.start();
+    if (!isCurrent()) return;
     await roomList.whenListed(roomId, NOTIFIED_ROOM_WAIT_MS);
+    if (!isCurrent()) return;
     if (roomList.rooms.find((room) => room.room_id === roomId)?.state === 'invited') {
       await goto(resolve('/(app)/inbox'));
       return;
     }
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     await goto(roomSectionPath(roomList.rooms, roomId), {
       state: eventId === null ? {} : { notified: eventId },
     });
@@ -887,6 +1097,8 @@
 
   let documentVisible = $derived(windowActivity.visible);
   let active = $derived(windowActivity.active);
+  let idle = $derived(windowActivity.idle);
+  let quietWhenActiveElsewhere = $derived(preferences.pushInactiveTimeout !== 'off');
 
   $effect(() => {
     roomList.setPresentationActive(active);
@@ -900,10 +1112,9 @@
   $effect(() => {
     if (core.status !== 'ready' || !alertsNatively()) return;
 
-    let stop: (() => void) | null = null;
-    let stopped = false;
+    const controller = new AbortController();
 
-    void Promise.all([
+    for (const watching of [
       watchNativeNotificationActions((action) => {
         const invite = inviteNotificationAction(action);
         if (invite !== null) {
@@ -914,135 +1125,163 @@
         }
         const call = callNotificationAction(action);
         if (call !== null) {
-          void openNativeNotification(core, action, (roomId, eventId) => {
+          void openFromNotification(action, (roomId, eventId) => {
             answerFromNotification(roomId, eventId, call);
           }).catch((error: unknown) => {
             console.debug('[sable notifications] call not answered', error);
           });
           return;
         }
-        void performNotificationAction(core, action, readReceiptIsPrivate()).catch(
-          (error: unknown) => {
-            console.debug('[sable notifications] action not performed', error);
-          }
-        );
-      }),
+        void performNotificationAction(core, action).catch((error: unknown) => {
+          console.debug('[sable notifications] action not performed', error);
+        });
+      }, controller.signal),
       watchNativeNotificationClicks((target) => {
-        void openNativeNotification(core, target, openNotification).catch((error: unknown) => {
+        void openFromNotification(target, openNotification).catch((error: unknown) => {
           console.warn('[sable notifications] notification not opened', error);
         });
-      }),
-    ])
-      .then((offs) => {
-        stop = () => {
-          for (const off of offs) off();
-        };
-        if (stopped) stop();
-      })
-      .catch((error: unknown) => {
+      }, controller.signal),
+    ]) {
+      void watching.catch((error: unknown) => {
         console.debug('[sable notifications] native listeners not attached', error);
       });
+    }
 
     return () => {
-      stopped = true;
-      stop?.();
+      controller.abort();
+      notificationOpener.cancel();
     };
   });
 
-  let unreadCycleIndex = 0;
+  trackRouteFocus();
 
   function jumpToRoom(roomId: string): void {
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     void goto(roomSectionPath(roomList.rooms, roomId));
   }
 
   $effect(() => {
-    return registerGlobalShortcuts({
-      'navigation.openRoomSearch': () => {
-        paletteState.open = true;
+    return registerGlobalShortcuts(
+      {
+        'navigation.openRoomSearch': () => {
+          paletteState.open = true;
+        },
+        'app.searchMessages': () => {
+          if (openRoomSearch.run()) return;
+          if (page.url.pathname.startsWith(resolve('search'))) {
+            document.getElementById(MESSAGE_SEARCH_FIELD_ID)?.focus();
+            return;
+          }
+          // eslint-disable-next-line svelte/no-navigation-without-resolve -- contextSearchPath() resolves the route itself
+          void goto(contextSearchPath(roomList.rooms, page.params.roomId, page.params.spaceId));
+        },
+        'app.openBookmarks': () => {
+          void goto(resolve('bookmarks'));
+        },
+        'app.createRoom': () => {
+          const space = findRoomByPathId(roomList.rooms, page.params.spaceId) ?? null;
+          void (
+            space === null
+              ? Promise.resolve(false)
+              : core.rpc.members
+                  .permissions({ room_id: space.room_id })
+                  .then((permissions) => permissions.can_manage_children)
+                  .catch(() => false)
+          ).then((canAddChildren) => {
+            // eslint-disable-next-line svelte/no-navigation-without-resolve -- createRoomPath() resolves the route itself
+            void goto(createRoomPath(roomList.rooms, space, canAddChildren));
+          });
+        },
+        'app.showShortcuts': () => {
+          shortcutsHelpState.open = true;
+        },
+        'call.toggleMute': (event) => {
+          if (event.repeat || callSession.desktopShortcutStatus === 'portal') return;
+          if (callSession.active && callSession.mediaReady) {
+            void callSession.toggleMicrophone();
+          }
+        },
+        'call.pushToTalk': {
+          press: () => {
+            void callSession.setTalking(true);
+          },
+          release: () => {
+            void callSession.setTalking(false);
+          },
+        },
+        'call.toggleDeafen': () => {
+          if (callSession.active) callSession.setDeafened(!callSession.deafened);
+        },
+        'call.toggleCamera': () => {
+          if (callSession.active && callSession.mediaReady) {
+            void callSession.setCameraEnabled(!callSession.transport.cameraEnabled);
+          }
+        },
+        'call.toggleScreenShare': () => {
+          if (callSession.active && callSession.mediaReady && callSession.canScreenShare) {
+            void callSession.toggleScreenShare();
+          }
+        },
+        'call.hangUp': () => {
+          if (callSession.active) void callSession.leave();
+        },
+        'app.openSettings': () => {
+          if (appLayout.current) showSettingsOver(defaultSettingsSection());
+          else void goto(resolve('/(app)/settings'));
+        },
+        'navigation.previousRoom': () => {
+          const target = roomAtOffset(openRoomId, -1);
+          if (target) jumpToRoom(target);
+        },
+        'navigation.nextRoom': () => {
+          const target = roomAtOffset(openRoomId, 1);
+          if (target) jumpToRoom(target);
+        },
+        'room.markRead': () => {
+          const room = roomList.byId(openRoomId);
+          markRoomsRead([room], core.rpc.timeline);
+        },
+        'room.markAllRead': () => {
+          markRoomsRead(roomList.rooms, core.rpc.timeline);
+        },
+        'room.close': () => {
+          if (openRoomId) backToRoomList();
+        },
+        'navigation.nextUnread': () => {
+          const unread = unreadRoomsByPriority(roomList.rooms, openRoomId, roomList.unreadFor);
+          const target = unread[0];
+          if (!target) return;
+          jumpToRoom(target.room_id);
+        },
+        'navigation.cycleNextUnread': () => {
+          const target = unreadRoomAtOffset(roomList.rooms, openRoomId, 1, roomList.unreadFor);
+          if (target) jumpToRoom(target.room_id);
+        },
+        'navigation.focusComposer': () => {
+          focusRegion('composer');
+        },
+        'navigation.focusTimeline': () => {
+          focusRegion('timeline');
+        },
+        'navigation.focusRoomList': () => {
+          focusRegion('rooms');
+        },
+        'navigation.focusSpaces': () => {
+          focusRegion('spaces');
+        },
+        'navigation.nextRegion': () => {
+          cycleRegion(1);
+        },
+        'navigation.previousRegion': () => {
+          cycleRegion(-1);
+        },
+        'navigation.cyclePreviousUnread': () => {
+          const target = unreadRoomAtOffset(roomList.rooms, openRoomId, -1, roomList.unreadFor);
+          if (target) jumpToRoom(target.room_id);
+        },
       },
-      'app.searchMessages': () => {
-        if (page.url.pathname.startsWith(resolve('search'))) {
-          document.getElementById(MESSAGE_SEARCH_FIELD_ID)?.focus();
-          return;
-        }
-        void goto(contextSearchPath(roomList.rooms, page.params.roomId, page.params.spaceId));
-      },
-      'app.openBookmarks': () => {
-        void goto(resolve('bookmarks'));
-      },
-      'app.createRoom': () => {
-        void goto(resolve('create-room'));
-      },
-      'app.showShortcuts': () => {
-        shortcutsHelpState.open = true;
-      },
-      'call.toggleMute': () => {
-        if (callSession.active && callSession.mediaReady) {
-          void callSession.setMicrophoneEnabled(!callSession.transport.microphoneEnabled);
-        }
-      },
-      'call.toggleDeafen': () => {
-        if (callSession.active) callSession.setDeafened(!callSession.deafened);
-      },
-      'call.toggleCamera': () => {
-        if (callSession.active && callSession.mediaReady) {
-          void callSession.setCameraEnabled(!callSession.transport.cameraEnabled);
-        }
-      },
-      'call.toggleScreenShare': () => {
-        if (callSession.active && callSession.mediaReady && callSession.canScreenShare) {
-          void callSession.toggleScreenShare();
-        }
-      },
-      'call.hangUp': () => {
-        if (callSession.active) void callSession.leave();
-      },
-      'app.openSettings': () => {
-        void goto(resolve('/(app)/settings'));
-      },
-      'app.closeWindow': () => {
-        void closeWindow();
-      },
-      'app.quit': () => {
-        void quitApp();
-      },
-      'navigation.previousRoom': () => {
-        const target = roomAtOffset(openRoomId, -1);
-        if (target) jumpToRoom(target);
-      },
-      'navigation.nextRoom': () => {
-        const target = roomAtOffset(openRoomId, 1);
-        if (target) jumpToRoom(target);
-      },
-      'room.markRead': () => {
-        const room = roomList.byId(openRoomId);
-        markRoomsRead([room], core.rpc.timeline, readReceiptIsPrivate());
-      },
-      'room.markAllRead': () => {
-        markRoomsRead(roomList.rooms, core.rpc.timeline, readReceiptIsPrivate());
-      },
-      'navigation.nextUnread': () => {
-        const unread = unreadRoomsByPriority(roomList.rooms, openRoomId, roomList.unreadFor);
-        const target = unread[0];
-        if (!target) return;
-        unreadCycleIndex = 0;
-        jumpToRoom(target.room_id);
-      },
-      'navigation.cycleNextUnread': () => {
-        const unread = unreadRoomsByPriority(roomList.rooms, null, roomList.unreadFor);
-        if (unread.length === 0) return;
-        unreadCycleIndex = (unreadCycleIndex + 1) % unread.length;
-        const target = unread[unreadCycleIndex];
-        if (target) jumpToRoom(target.room_id);
-      },
-      'navigation.cyclePreviousUnread': () => {
-        const unread = unreadRoomsByPriority(roomList.rooms, null, roomList.unreadFor);
-        if (unread.length === 0) return;
-        unreadCycleIndex = (unreadCycleIndex - 1 + unread.length) % unread.length;
-        const target = unread[unreadCycleIndex];
-        if (target) jumpToRoom(target.room_id);
-      },
-    });
+      (shortcut) => shortcut.category !== 'call' || callSession.active
+    );
   });
 </script>
 
@@ -1052,14 +1291,18 @@
   {#key core.accountRevision}
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <AppShell>
-      {@render children()}
+      {#if !previousAccountRoute}
+        {@render children()}
+      {/if}
     </AppShell>
+    <MediaViewerHost />
     {#if preferences.callScreenPreview && callSession.active && callSession.views === 0 && callSession.rooms.length > 0}
       {#await import('#lib/features/call/ScreenSharePreview.svelte') then { default: ScreenSharePreview }}
         <ScreenSharePreview
           session={callSession}
           onReturn={() => {
             if (callSession.roomId !== null) {
+              // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
               void goto(roomSectionPath(roomList.rooms, callSession.roomId));
             }
           }}
@@ -1077,16 +1320,14 @@
           />
         {/each}
       {/await}
-    {/if}
-    {#if callSession.choosingScreenSource}
-      {@const monitors = callSession.choosingScreenSource}
-      {#await import('#lib/features/call/ScreenShareSourceDialog.svelte') then { default: ScreenShareSourceDialog }}
-        <ScreenShareSourceDialog
-          {monitors}
-          onShare={(source) => void callSession.shareScreenFrom(source)}
-          onCancel={() => {
-            callSession.choosingScreenSource = null;
-          }}
+    {:else if callSession.mediaReady}
+      {#await import('#lib/features/call/NativeCallAudio.svelte') then { default: NativeCallAudio }}
+        <NativeCallAudio
+          participants={callSession.transport.participants}
+          deafened={callSession.deafened}
+          volumeOf={callVolumeOf}
+          setVolume={(identity, volume, screen) =>
+            callSession.setParticipantVolume(identity, volume, screen)}
         />
       {/await}
     {/if}
@@ -1149,6 +1390,10 @@
           ? i18n.t('app.pettingAnimal', { animal: loadingAnimal })
           : i18n.t('common.startingSable')}
       </h1>
+      {#if core.slowStart}
+        <p>{i18n.t('app.startSlow')}</p>
+        <Button onclick={() => void core.retryStart()}>{i18n.t('common.tryAgain')}</Button>
+      {/if}
     </div>
   </main>
 {/if}

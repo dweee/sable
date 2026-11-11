@@ -1,18 +1,21 @@
+use crate::now_ms;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use matrix_sdk::Room;
 use matrix_sdk::ruma::events::macros::EventContent;
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedRoomId, OwnedUserId};
+use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId};
 use matrix_sdk_base::crypto::CollectStrategy;
 use serde::{Deserialize, Serialize};
 
 use super::membership::CallMember;
 
-pub(crate) const KEY_BYTES: usize = 16;
+pub(crate) const KEY_BYTES: usize = 32;
+const MIN_RECEIVED_KEY_BYTES: usize = 16;
 pub(crate) const ROTATION_GRACE_MS: u64 = 10_000;
 pub(crate) const USE_KEY_DELAY_MS: u64 = 5_000;
 pub(crate) const RESHARE_INTERVAL_MS: u64 = 60_000;
+const KEY_ROTATION_INTERVAL_MS: u64 = 3_600_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct KeyPayload {
@@ -66,6 +69,13 @@ pub(crate) struct ToDeviceCallEncryptionKeysEventContent {
     pub(crate) session: SessionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sent_ts: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, EventContent)]
+#[ruma_event(type = "m.rtc.encryption_key", kind = ToDevice)]
+pub(crate) struct StableEncryptionKeyEventContent {
+    #[serde(flatten)]
+    pub(crate) content: ToDeviceCallEncryptionKeysEventContent,
 }
 
 impl ToDeviceCallEncryptionKeysEventContent {
@@ -148,7 +158,7 @@ pub(crate) fn plan_rollout(
     let anyone_left = still_valid
         .iter()
         .any(|shared| !members.iter().any(|member| member.same_generation(shared)));
-    if anyone_left {
+    if anyone_left || now_ms.saturating_sub(current.created_ts) >= KEY_ROTATION_INTERVAL_MS {
         return Rollout::Rotate {
             targets: members.to_vec(),
         };
@@ -232,6 +242,7 @@ pub(crate) struct KeyDistributor {
     identity: String,
     outbound: Option<OutboundKey>,
     last_sent_ms: u64,
+    wire: super::membership::RtcWire,
 }
 
 impl KeyDistributor {
@@ -250,7 +261,12 @@ impl KeyDistributor {
             identity,
             outbound: None,
             last_sent_ms: 0,
+            wire: super::membership::RtcWire::Deployed,
         }
+    }
+
+    pub(crate) const fn set_wire(&mut self, wire: super::membership::RtcWire) {
+        self.wire = wire;
     }
 
     pub(crate) async fn roll(&mut self, room: &Room, members: &[CallMember]) -> Rolled {
@@ -278,13 +294,14 @@ impl KeyDistributor {
                 }
                 let first = self.outbound.is_none();
                 let index = OutboundKey::next_index(self.outbound.as_ref());
-                let Ok(key) = OutboundKey::generate(index, now_ms()) else {
+                let Ok(mut key) = OutboundKey::generate(index, now_ms()) else {
                     tracing::error!("no entropy available for a call encryption key");
                     return Rolled::Nothing;
                 };
 
                 let reached = self.send(room, &key, &targets).await;
                 self.last_sent_ms = now_ms();
+                key.created_ts = self.last_sent_ms;
 
                 let announcement = Announcement {
                     identity: self.identity.clone(),
@@ -375,17 +392,16 @@ impl KeyDistributor {
                 reached.push(target.clone());
                 continue;
             }
-            let mut device = encryption
-                .get_device(&target.user_id, &target.device_id)
-                .await;
+            let Some(device_id) = target.device_id.as_deref() else {
+                continue;
+            };
+            let mut device = encryption.get_device(&target.user_id, device_id).await;
             if matches!(device, Ok(None)) && !queried.contains(&target.user_id) {
                 queried.push(target.user_id.clone());
                 if let Err(error) = encryption.request_user_identity(&target.user_id).await {
                     tracing::warn!(?error, "could not query a call member's devices");
                 }
-                device = encryption
-                    .get_device(&target.user_id, &target.device_id)
-                    .await;
+                device = encryption.get_device(&target.user_id, device_id).await;
             }
             match device {
                 Ok(Some(device)) => {
@@ -393,8 +409,9 @@ impl KeyDistributor {
                     reached.push(target.clone());
                 }
                 Ok(None) => tracing::warn!(
+                    reported = true,
                     user_id = %target.user_id,
-                    device_id = %target.device_id,
+                    device_id = %device_id,
                     "call member device is unknown, cannot send it a media key"
                 ),
                 Err(error) => tracing::warn!(?error, "could not look up a call member device"),
@@ -420,7 +437,11 @@ impl KeyDistributor {
         match encryption
             .encrypt_and_send_raw_to_device(
                 devices.iter().collect(),
-                "io.element.call.encryption_keys",
+                if self.wire == super::membership::RtcWire::Stable {
+                    "m.rtc.encryption_key"
+                } else {
+                    "io.element.call.encryption_keys"
+                },
                 raw.cast_unchecked(),
                 CollectStrategy::AllDevices,
             )
@@ -429,18 +450,20 @@ impl KeyDistributor {
             Ok(failures) if failures.is_empty() => reached,
             Ok(failures) => {
                 tracing::warn!(
+                    reported = true,
                     count = failures.len(),
                     "some call members did not receive the media key"
                 );
                 reached.retain(|member| {
                     !failures.iter().any(|(user_id, device_id)| {
-                        *user_id == member.user_id && *device_id == member.device_id
+                        *user_id == member.user_id
+                            && member.device_id.as_deref() == Some(device_id.as_ref())
                     })
                 });
                 reached
             }
             Err(error) => {
-                tracing::warn!(?error, "could not send the call media key");
+                tracing::warn!(reported = true, ?error, "could not send the call media key");
                 reached.retain(|member| member.is_own(&self.user_id, &self.device_id));
                 reached
             }
@@ -462,8 +485,9 @@ fn warn_unreached(unreached: &[CallMember], known: &[CallMember]) {
         .filter(|member| !known.iter().any(|known| known.same_generation(member)))
     {
         tracing::warn!(
+            reported = true,
             user_id = %member.user_id,
-            device_id = %member.device_id,
+            device_id = ?member.device_id,
             "a call member did not receive the media key"
         );
     }
@@ -474,11 +498,15 @@ pub(crate) fn decode_key(encoded: &str) -> Option<Vec<u8>> {
         .decode(encoded)
         .or_else(|_| STANDARD_NO_PAD.decode(encoded))
         .ok()
-        .filter(|key| key.len() >= KEY_BYTES)
+        .filter(|key| key.len() >= MIN_RECEIVED_KEY_BYTES)
 }
 
-pub(crate) fn now_ms() -> u64 {
-    MilliSecondsSinceUnixEpoch::now().get().into()
+pub(crate) fn decode_key_for_wire(
+    encoded: &str,
+    wire: super::membership::RtcWire,
+) -> Option<Vec<u8>> {
+    decode_key(encoded)
+        .filter(|key| wire != super::membership::RtcWire::Stable || key.len() >= KEY_BYTES)
 }
 
 #[cfg(test)]
@@ -493,16 +521,18 @@ mod tests {
 
     fn member(device: &str, created_ts: u64) -> CallMember {
         CallMember {
-            user_id: owned_user_id!("@erwan:localhost"),
-            device_id: device.into(),
+            user_id: owned_user_id!("@kris:localhost"),
+            device_id: Some(device.into()),
             member_id: None,
-            identity: format!("@erwan:localhost:{device}"),
+            identity: format!("@kris:localhost:{device}"),
             mode: crate::protocol::CallMode::Legacy,
             created_ts,
             joined_ts: created_ts,
             expires_at_ms: None,
             foci: Vec::new(),
             screen_sharing: false,
+            wire: super::super::membership::RtcWire::Deployed,
+            focus_servers: std::collections::HashMap::default(),
         }
     }
 
@@ -576,6 +606,30 @@ mod tests {
         assert_eq!(
             plan_rollout(Some(&current), &members, 1_100, 10_000),
             Rollout::Unchanged
+        );
+    }
+
+    #[test]
+    fn an_unchanged_roster_rotates_after_the_key_lifetime() {
+        let members = vec![member("LAPTOP", 100)];
+        let current = key_shared_with(&members, 1_000);
+        assert_eq!(
+            plan_rollout(
+                Some(&current),
+                &members,
+                1_000 + super::KEY_ROTATION_INTERVAL_MS - 1,
+                10_000
+            ),
+            Rollout::Unchanged
+        );
+        assert_eq!(
+            plan_rollout(
+                Some(&current),
+                &members,
+                1_000 + super::KEY_ROTATION_INTERVAL_MS,
+                10_000
+            ),
+            Rollout::Rotate { targets: members }
         );
     }
 
@@ -726,14 +780,35 @@ mod tests {
     }
 
     #[test]
-    fn test_a_key_longer_than_sixteen_bytes_is_accepted() {
+    fn accepts_legacy_and_current_key_lengths() {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD_NO_PAD;
 
-        let long = STANDARD_NO_PAD.encode([5u8; 32]);
-
-        assert_eq!(decode_key(&long).map(|key| key.len()), Some(32));
+        let current = OutboundKey::generate(0, 0).unwrap();
+        assert_eq!(
+            decode_key(&current.encoded()).map(|key| key.len()),
+            Some(32)
+        );
+        assert_eq!(
+            decode_key(&STANDARD_NO_PAD.encode([5u8; 16])).map(|key| key.len()),
+            Some(16)
+        );
         assert_eq!(decode_key(&STANDARD_NO_PAD.encode([5u8; 15])), None);
+    }
+
+    #[test]
+    fn stable_livekit_requires_at_least_32_bytes() {
+        use super::super::membership::RtcWire;
+        use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+
+        for length in [16, 31, 32, 64] {
+            let encoded = STANDARD_NO_PAD.encode(vec![5; length]);
+            assert_eq!(
+                super::decode_key_for_wire(&encoded, RtcWire::Stable).is_some(),
+                length >= 32,
+            );
+            assert!(super::decode_key_for_wire(&encoded, RtcWire::Deployed).is_some());
+        }
     }
 
     #[test]
@@ -755,10 +830,10 @@ mod tests {
     fn test_a_sent_key_carries_both_formats_for_older_receivers() {
         let distributor = KeyDistributor::new(
             owned_room_id!("!room:example.org"),
-            owned_user_id!("@erwan:localhost"),
+            owned_user_id!("@kris:localhost"),
             "LAPTOP".into(),
             "member".to_owned(),
-            "@erwan:localhost:LAPTOP".to_owned(),
+            "@kris:localhost:LAPTOP".to_owned(),
         );
         let key = OutboundKey::generate(6, 0).unwrap();
 
@@ -842,7 +917,7 @@ mod sdk_tests {
     fn member(user_id: &str, device_id: &str) -> CallMember {
         CallMember {
             user_id: user_id.try_into().unwrap(),
-            device_id: device_id.into(),
+            device_id: Some(device_id.into()),
             member_id: None,
             identity: format!("{user_id}:{device_id}"),
             mode: crate::protocol::CallMode::Legacy,
@@ -851,6 +926,8 @@ mod sdk_tests {
             expires_at_ms: None,
             foci: Vec::new(),
             screen_sharing: false,
+            wire: super::super::membership::RtcWire::Deployed,
+            focus_servers: std::collections::HashMap::default(),
         }
     }
 
@@ -883,12 +960,16 @@ mod sdk_tests {
         );
         Mock::given(method("PUT"))
             .and(path_regex(r"/sendToDevice/m\.room\.encrypted/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-            .expect(1)
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(300))
+                    .set_body_json(json!({})),
+            )
+            .expect(2)
             .mount(server.server())
             .await;
 
-        let distributor = KeyDistributor::new(
+        let mut distributor = KeyDistributor::new(
             owned_room_id!("!call:example.org"),
             owned_user_id!("@alice:example.org"),
             "ALICE".into(),
@@ -902,6 +983,12 @@ mod sdk_tests {
             .await;
 
         assert_eq!(reached, vec![bob_member]);
+        let start = now_ms();
+        assert!(matches!(
+            distributor.roll(&room, &reached).await,
+            Rolled::Rotated { .. }
+        ));
+        assert!(distributor.outbound.as_ref().unwrap().created_ts >= start + 250);
     }
 
     #[tokio::test]

@@ -1,21 +1,19 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import type { RoomListItemView } from '#src/generated/protocol';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
-  import { untrack } from 'svelte';
 
   import { useCoreClient } from '#lib/core/context.js';
   import { findRoomByPathId, roomPathParam, useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
 
   import JoinBeforeNavigate from './discovery/JoinBeforeNavigate.svelte';
   import RoomView from './RoomView.svelte';
 
   const core = useCoreClient();
   const roomList = useRoomList();
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
 
   let roomId = $derived(page.params.roomId ?? '');
   let eventId = $derived(page.url.searchParams.get('event'));
@@ -23,7 +21,7 @@
   let listedRoom = $derived(findRoomByPathId(roomList.rooms, roomId));
   let joined = $derived(listedRoom?.state === 'joined');
 
-  let mountedRoomId = $state(untrack(() => (appLayout.current ? roomId : null)));
+  let mountedRoomId = $state<string | null>(null);
   $effect(() => {
     const id = roomId;
     if (appLayout.current) {
@@ -41,6 +39,8 @@
       clearTimeout(timer);
     };
   });
+
+  let roomMounted = $derived(appLayout.current || mountedRoomId === roomId);
 
   let listed = $derived(roomList.settled);
 
@@ -81,7 +81,7 @@
   });
 </script>
 
-{#if (space === null || eventTimeline) && mountedRoomId === roomId}
+{#if (space === null || eventTimeline) && roomMounted}
   {#if joined || unlistedRoom || (!listed && roomId.startsWith('!'))}
     <RoomView {roomId} {eventId} {notifiedEventId} room={unlistedRoom} />
   {:else if listed}

@@ -27,3 +27,18 @@ test('does not mutate its input', () => {
 
   expect(stored).toEqual({ fontScale: 'large' });
 });
+
+test.each([
+  ['off', false],
+  ['room', true],
+  ['account', true],
+])('turns the %s latching scope into keep after shorthand %s', (personaLatching, expected) => {
+  expect(migrateSettings({ personaLatching }, 2)).toEqual({ personaKeepAfterShorthand: expected });
+});
+
+test('splits video acceleration into encode and decode', () => {
+  expect(migrateSettings({ hardwareVideoAcceleration: false }, 3)).toEqual({
+    hardwareVideoEncode: false,
+    hardwareVideoDecode: false,
+  });
+});

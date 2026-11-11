@@ -1,7 +1,6 @@
 import { scrubMatrixIds } from './scrubbers';
 
 const TITLE_LIMIT = 600;
-const OLM_ACCOUNT = 'matrix_sdk_crypto::olm::account:';
 
 export type WasmLogLevel = 'error' | 'warn' | 'info';
 
@@ -12,37 +11,40 @@ export function wasmLogLevel(line: string): WasmLogLevel {
   return 'info';
 }
 
-/** Only a warning in the SDK, but the room keys it carried are lost. */
-export function isUndecryptableToDevice(line: string): boolean {
-  return wasmLogLevel(line) === 'warn' && line.includes(OLM_ACCOUNT);
+/** Starts a line the Rust side decided to report, see `REPORTED_LOG_MARK` in `binding.rs`. */
+const REPORTED_MARK = '\u001e';
+const REPORTED_FIELD = /\sreported=true\b/;
+
+export function readCoreLine(line: string): { text: string; reported: boolean } {
+  const reported = line.startsWith(REPORTED_MARK);
+  return { text: reported ? line.slice(REPORTED_MARK.length) : line, reported };
 }
 
-const REPORTABLE_WARNINGS = [
-  'unable to decrypt a message',
-  'no call media key has arrived',
-  'a call media key is still unresolved',
-  'ignoring a call media key',
-  'a call member did not receive the media key',
-  'some call members did not receive the media key',
-  'could not send the call media key',
-  'call member device is unknown',
-  'matrix_sdk_crypto::session_manager::sessions:',
-  'matrix_sdk_crypto::session_manager::group_sessions:',
-  'matrix_sdk_crypto::gossiping::',
-];
-
-/** Warnings that explain a message or a call that could not be decrypted. */
-export function isReportableCoreWarning(line: string): boolean {
-  return wasmLogLevel(line) === 'warn' && REPORTABLE_WARNINGS.some((part) => line.includes(part));
+function withoutSpans(line: string): string {
+  let depth = 0;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === '{') depth += 1;
+    else if (char === '}') depth -= 1;
+    else if (depth === 0 && char === ':' && line[index + 1] === ' ') {
+      const prefix = line.slice(0, index);
+      return prefix.includes('{') ? line.slice(index + 2) : line;
+    }
+  }
+  return line;
 }
 
 export function wasmErrorTitle(line: string): string {
   const message = scrubMatrixIds(
-    line
-      .replace(/^\s*(?:ERROR|WARN)\s+/, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-  );
+    withoutSpans(
+      line
+        .replace(/^\s*(?:ERROR|WARN)\s+/, '')
+        .replace(REPORTED_FIELD, '')
+        .replace(/"?JsValue\([^]*$/, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+    )
+  ).replace(/[A-Za-z0-9+/]{40,}/g, '[KEY]');
   return message.length > TITLE_LIMIT ? `${message.slice(0, TITLE_LIMIT)}…` : message;
 }
 

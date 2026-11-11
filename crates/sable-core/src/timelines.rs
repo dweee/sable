@@ -1,4 +1,5 @@
 use crate::api::timeline::TimelineFocusView;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -15,20 +16,21 @@ use matrix_sdk::ruma::{
     serde::Raw,
 };
 use matrix_sdk_ui::timeline::{
-    RoomExt, Timeline, TimelineEventFocusThreadMode, TimelineFocus, default_event_filter,
+    EncryptedMessage, RoomExt, Timeline, TimelineEventFocusThreadMode, TimelineFocus,
+    default_event_filter,
 };
 
 use matrix_sdk_base::event_cache::Event;
 use matrix_sdk_common::serde_helpers::{extract_relation, extract_thread_root};
 
 use crate::ResultExt;
-use crate::protocol::{RpcError, SubscriptionId, TimelineItemView};
+use crate::protocol::{RpcCode, RpcError, SubscriptionId, TimelineItemView};
 use crate::view::{CUTE_EVENT_MSGTYPE, aggregation_item};
 
 use crate::{CachedTimeline, Core, SubscriptionKind, ThreadKey};
 
 const MAX_CACHED_INACTIVE_TIMELINES: usize = 4;
-const MAX_CACHED_THREAD_TIMELINES: usize = 4;
+pub(crate) const MAX_CACHED_THREAD_TIMELINES: usize = 4;
 const MAX_RELATION_DEPTH: usize = 4;
 
 /// The events an aggregation row may be built from, so a reaction on a thread
@@ -138,7 +140,7 @@ impl Core {
     pub(crate) async fn timeline(&self, room_id: &OwnedRoomId) -> Result<Arc<Timeline>, RpcError> {
         {
             let session = self.session.read().await;
-            session.as_ref().ok_or(RpcError::NotLoggedIn)?;
+            session.as_ref().ok_or(RpcCode::NotLoggedIn)?;
             if let Some(cached) = self.timelines.lock().await.get(room_id) {
                 return Ok(cached.timeline.clone());
             }
@@ -164,17 +166,18 @@ impl Core {
         let session = self.session.read().await;
         let room = session
             .as_ref()
-            .ok_or(RpcError::NotLoggedIn)?
+            .ok_or(RpcCode::NotLoggedIn)?
             .client
             .get_room(room_id)
-            .ok_or(RpcError::UnknownRoom)?;
+            .ok_or(RpcCode::UnknownRoom)?;
         {
             let mut timelines = self.timelines.lock().await;
-            if let Some(cached) = timelines.get_mut(room_id)
+            if let Some(cached) = timelines.get(room_id)
                 && cached.hidden_events == hidden_events
             {
-                cached.last_access = self.next_timeline_access();
-                return Ok(cached.timeline.clone());
+                let timeline = cached.timeline.clone();
+                timelines.to_back(room_id);
+                return Ok(timeline);
             }
         }
 
@@ -197,10 +200,11 @@ impl Core {
             })
             .collect::<std::collections::HashSet<_>>();
         let mut timelines = self.timelines.lock().await;
-        match timelines.get_mut(room_id) {
+        match timelines.get(room_id) {
             Some(cached) if cached.hidden_events == hidden_events => {
-                cached.last_access = self.next_timeline_access();
-                Ok(cached.timeline.clone())
+                let timeline = cached.timeline.clone();
+                timelines.to_back(room_id);
+                Ok(timeline)
             }
             _ => {
                 let inactive = timelines
@@ -210,8 +214,7 @@ impl Core {
                 if inactive >= MAX_CACHED_INACTIVE_TIMELINES
                     && let Some(evicted) = timelines
                         .iter()
-                        .filter(|(id, _)| !subscribed_room_ids.contains(*id))
-                        .min_by_key(|(_, cached)| cached.last_access)
+                        .find(|(id, _)| !subscribed_room_ids.contains(*id))
                         .map(|(id, _)| id.clone())
                 {
                     timelines.remove(&evicted);
@@ -221,7 +224,6 @@ impl Core {
                     CachedTimeline {
                         timeline: timeline.clone(),
                         hidden_events,
-                        last_access: self.next_timeline_access(),
                     },
                 );
                 Ok(timeline)
@@ -231,6 +233,43 @@ impl Core {
 }
 
 impl Core {
+    /// The redecryptor misses keys a push client stored while the app was in the background.
+    pub(crate) async fn retry_cached_decryption(&self) {
+        let mut timelines: Vec<Arc<Timeline>> = self
+            .timelines
+            .lock()
+            .await
+            .values()
+            .map(|cached| cached.timeline.clone())
+            .collect();
+        timelines.extend(
+            self.thread_timelines
+                .lock()
+                .await
+                .iter()
+                .map(|(_, cached)| cached.timeline.clone()),
+        );
+        for timeline in timelines {
+            let sessions: BTreeSet<String> = timeline
+                .items()
+                .await
+                .iter()
+                .filter_map(
+                    |item| match item.as_event()?.content().as_unable_to_decrypt()? {
+                        EncryptedMessage::MegolmV1AesSha2 { session_id, .. } => {
+                            Some(session_id.clone())
+                        }
+                        _ => None,
+                    },
+                )
+                .collect();
+            if !sessions.is_empty() {
+                timeline.retry_decryption(sessions).await;
+            }
+        }
+        self.refresh_encrypted_replies(None, |_| true).await;
+    }
+
     pub(crate) async fn timeline_for(
         &self,
         room_id: &OwnedRoomId,
@@ -251,16 +290,44 @@ impl Core {
         let Some(subscription) = subscription else {
             return self.timeline_for(room_id, thread_root).await;
         };
-        let timeline = self
+        let (timeline, subscribed_root) = self
             .subscriptions
             .lock()
             .await
             .get(&subscription)
-            .filter(|subscription| subscription.thread_root.as_ref() == thread_root)
-            .and_then(|subscription| subscription.timeline.clone())
-            .ok_or(RpcError::UnknownSubscription)?;
+            .and_then(|subscription| {
+                subscription
+                    .timeline
+                    .clone()
+                    .map(|timeline| (timeline, subscription.thread_root.clone()))
+            })
+            .ok_or(RpcCode::UnknownSubscription)?;
         if timeline.room().room_id() != room_id {
-            return Err(RpcError::UnknownSubscription);
+            return Err(RpcCode::UnknownSubscription.into());
+        }
+        if subscribed_root.as_ref() == thread_root {
+            return Ok(timeline);
+        }
+        if subscribed_root.is_some() || !timeline.is_threaded() {
+            return Err(RpcCode::UnknownSubscription.into());
+        }
+        let root = thread_root.ok_or(RpcCode::UnknownSubscription)?;
+        // Event-focused timelines infer their thread from the target event.
+        let belongs = timeline
+            .items()
+            .await
+            .iter()
+            .filter_map(|item| item.as_event())
+            .any(|event| {
+                event.event_id() == Some(root.as_ref())
+                    || event
+                        .content()
+                        .as_msglike()
+                        .and_then(|message| message.thread_root.as_ref())
+                        == Some(root)
+            });
+        if !belongs {
+            return Err(RpcCode::UnknownSubscription.into());
         }
         Ok(timeline)
     }
@@ -280,15 +347,14 @@ impl Core {
         let session = self.session.read().await;
         let room = session
             .as_ref()
-            .ok_or(RpcError::NotLoggedIn)?
+            .ok_or(RpcCode::NotLoggedIn)?
             .client
             .get_room(room_id)
-            .ok_or(RpcError::UnknownRoom)?;
+            .ok_or(RpcCode::UnknownRoom)?;
         let key: ThreadKey = (room_id.clone(), root_event_id.clone());
         {
             let mut threads = self.thread_timelines.lock().await;
             if let Some(cached) = threads.get_mut(&key) {
-                cached.last_access = self.next_timeline_access();
                 return Ok(cached.timeline.clone());
             }
         }
@@ -304,24 +370,14 @@ impl Core {
 
         let mut threads = self.thread_timelines.lock().await;
         if let Some(cached) = threads.get_mut(&key) {
-            cached.last_access = self.next_timeline_access();
             return Ok(cached.timeline.clone());
         }
 
-        if threads.len() >= MAX_CACHED_THREAD_TIMELINES
-            && let Some(evicted) = threads
-                .iter()
-                .min_by_key(|(_, cached)| cached.last_access)
-                .map(|(id, _)| id.clone())
-        {
-            threads.remove(&evicted);
-        }
         threads.insert(
             key,
             CachedTimeline {
                 timeline: timeline.clone(),
                 hidden_events: false,
-                last_access: self.next_timeline_access(),
             },
         );
         Ok(timeline)
@@ -433,7 +489,7 @@ pub(crate) async fn build_room_timeline(
 ) -> Result<Timeline, matrix_sdk_ui::timeline::Error> {
     let builder = room
         .timeline_builder()
-        .with_unable_to_decrypt_hook(crate::utd::hook(&room.client()))
+        .with_unable_to_decrypt_hook(crate::utd::hook(room))
         .with_focus(match focus {
             TimelineFocusView::Live => TimelineFocus::Live {
                 hide_threaded_events: true,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
@@ -29,6 +30,7 @@
   import PresenceDot from '#lib/ui/primitives/PresenceDot.svelte';
   import StatusBadge from '#lib/ui/primitives/StatusBadge.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
+  import { usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { resolveUserStatus } from '#lib/rooms/user-status.js';
   import {
     LEGACY_STATUS_FIELDS,
@@ -43,33 +45,41 @@
   import FormField from '#lib/ui/primitives/FormField.svelte';
   import ProfileCard from '#lib/ui/primitives/ProfileCard.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
-  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import StatusEmojiPicker from '#lib/features/settings/StatusEmojiPicker.svelte';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
+  import {
+    ownPresence,
+    presenceChoices,
+    setOwnPresence,
+  } from '#lib/rooms/presence-override.svelte.js';
   import { AccountDirectory } from './account-directory.svelte.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
+  import QrCodeIcon from 'phosphor-svelte/lib/QrCodeIcon';
+  import QrLinkDialog from '../qr-login/QrLinkDialog.svelte';
 
   const core = useCoreClient();
+  const presenceStore = usePresenceStore();
   const accountProfiles = new AccountDirectory(core);
   const signOut = new SignOutGuard(core);
   let switchingAccountId = $state<string | null>(null);
   let accountSwitching = $state(true);
   let removing = $state(false);
   let removeAccountId = $state<string | null>(null);
+  let linkingDevice = $state(false);
   let error = $state<string | null>(null);
   let profile = $state.raw<ProfileView | null>(null);
   let activeAccountId = $derived(core.session?.account_id);
   let activeUserId = $derived(core.session?.user_id ?? '');
   let displayName = $derived(profile?.display_name ?? activeUserId);
-  let userStatus = $derived(
-    resolveUserStatus(profile, { statusMessage: preferences.presenceStatusMessage })
-  );
+  let userStatus = $derived(resolveUserStatus(profile, presenceStore.get(activeUserId)));
   let profileColor = $derived(profile?.hero_color ?? 'var(--primary-container)');
-  let presenceOptions = $derived<OptionCard<PresenceView>[]>([
-    { value: 'online', label: i18n.t('presence.online') },
-    { value: 'unavailable', label: i18n.t('presence.unavailable') },
-    { value: 'offline', label: i18n.t('presence.offline') },
-  ]);
-  let statusDraft = $state(preferences.presenceStatusMessage);
-  let presenceDraft = $state<PresenceView>(preferences.presence);
+  let presence = $derived(ownPresence());
+  let presenceOptions = $derived<OptionCard<PresenceView>[]>(
+    presenceChoices().map((value) => ({ value, label: i18n.t(`presence.${value}`) }))
+  );
+  let statusDraft = $state('');
+  let statusEmojiDraft = $state('');
+  let presenceDraft = $state<PresenceView>(ownPresence());
   let statusOpen = $state(false);
   let statusSaving = $state(false);
   let statusError = $state<string | null>(null);
@@ -108,17 +118,16 @@
     statusSaving = true;
     statusError = null;
     const text = truncateUtf8(statusDraft.trim(), MAX_STATUS_TEXT_BYTES);
-    const status = statusContent(text, userStatus?.emoji);
+    const status = statusContent(text, statusEmojiDraft);
     try {
-      if (text !== ownStatus) {
+      if (text !== ownStatus || (status?.emoji ?? '') !== (userStatus?.emoji ?? '')) {
         await core.setProfileField(STATUS_FIELD, status);
         for (const [field] of legacyDeletes(profile?.legacy_fields ?? [], LEGACY_STATUS_FIELDS)) {
           await core.setProfileField(field, null);
         }
         profile = profile ? { ...profile, status } : await core.userProfile(activeUserId);
       }
-      setPreference('presenceStatusMessage', text);
-      setPreference('presence', presenceDraft);
+      await setOwnPresence(presenceDraft, text);
       statusOpen = false;
     } catch (cause) {
       console.warn('[sable nav] saving status failed', cause);
@@ -169,9 +178,7 @@
   }
 </script>
 
-<svelte:head>
-  <title>{i18n.t('nav.manageAccounts')} - Sable</title>
-</svelte:head>
+<PageTitle title={i18n.t('nav.manageAccounts')} />
 
 {#snippet statusBubble()}
   <button
@@ -179,29 +186,24 @@
     type="button"
     aria-haspopup="dialog"
     aria-expanded={statusOpen}
-    aria-label={`${i18n.t('presence.setStatus')}: ${i18n.t(`presence.${preferences.presence}`)}${ownStatus ? `, ${ownStatus}` : ''}`}
+    aria-label={`${i18n.t('presence.setStatus')}: ${i18n.t(`presence.${presence}`)}${ownStatus ? `, ${ownStatus}` : ''}`}
     onclick={() => {
       statusDraft = ownStatus;
-      presenceDraft = preferences.presence;
+      statusEmojiDraft = userStatus?.emoji ?? '';
+      presenceDraft = presence;
       statusError = null;
       statusOpen = true;
     }}
   >
     <span class="status-bubble-presence">
-      <PresenceDot presence={preferences.presence} label="" size="medium" />
-      {i18n.t(`presence.${preferences.presence}`)}
+      <PresenceDot {presence} label="" size="medium" />
+      {i18n.t(`presence.${presence}`)}
     </span>
     <span class={['status-bubble-text', { placeholder: !ownStatus }]}
       >{#if userStatus?.emoji}<span>{userStatus.emoji}</span>
-      {/if}{ownStatus || i18n.t('common.whatAreYouUpTo')}</span
+      {/if}{ownStatus || i18n.t('common.statusPlaceholder')}</span
     >
   </button>
-{/snippet}
-
-{#snippet editProfile()}
-  <Button variant="secondary" onclick={() => void goto(resolve('settings/account'))}
-    ><PencilSimpleIcon aria-hidden="true" />{i18n.t('nav.editProfile')}</Button
-  >
 {/snippet}
 
 <main class="account-manager" aria-label={i18n.t('nav.profile')} {@attach scrollHint}>
@@ -220,18 +222,50 @@
       nameColorLight={profile?.name_color_light}
       nameColorDark={profile?.name_color_dark}
       crest={preferences.sendPresence ? statusBubble : undefined}
-      actions={editProfile}
-    />
-    <Button variant="secondary" block onclick={() => void goto(resolve('settings'))}
-      ><GearIcon aria-hidden="true" />{i18n.t('nav.settings')}</Button
     >
+      {#snippet actions()}
+        <div class="account-buttons">
+          <Button
+            size="small"
+            variant="primary"
+            class="account-edit"
+            onclick={() => void goto(resolve('settings/account'))}
+          >
+            <PencilSimpleIcon aria-hidden="true" />{i18n.t('nav.editProfile')}</Button
+          >
+          <Button
+            size="small"
+            variant="secondary"
+            class="account-settings"
+            onclick={() => void goto(resolve('settings'))}
+          >
+            <GearIcon aria-hidden="true" />{i18n.t('nav.settings')}</Button
+          >
+          {#if core.oauthMetadata !== null}
+            <Button
+              size="small"
+              variant="secondary"
+              class="account-link"
+              onclick={() => {
+                linkingDevice = true;
+              }}
+            >
+              <QrCodeIcon aria-hidden="true" />{i18n.t('qrLogin.linkDeviceAction')}</Button
+            >
+          {/if}
+        </div>
+      {/snippet}
+    </ProfileCard>
   </div>
 
   <section class="account-list" aria-labelledby="account-list-title">
     <header class="account-list-heading">
       <h2 id="account-list-title">{i18n.t('nav.accounts')}</h2>
       {#if accountSwitching}
-        <Button variant="secondary" onclick={() => void goto(resolve('login?addAccount=1'))}
+        <Button
+          size="small"
+          variant="secondary"
+          onclick={() => void goto(resolve('login?addAccount=1'))}
           ><PlusIcon aria-hidden="true" />{i18n.t('common.addAccount')}</Button
         >
       {/if}
@@ -317,6 +351,7 @@
   <Button
     variant="secondary"
     class="sign-out"
+    block
     loading={signOut.checking}
     onclick={() => void signOut.request(() => logoutWithPush(core, pushOverride()))}
     ><SignOutIcon aria-hidden="true" />{i18n.t('settings.logout')}</Button
@@ -344,13 +379,16 @@
       onSelect={(value) => (presenceDraft = value)}
     />
     <FormField fieldId="presence-status-message" label={i18n.t('presence.statusMessage')}>
-      <TextInput
-        id="presence-status-message"
-        bind:value={statusDraft}
-        disabled={statusSaving}
-        maxlength={MAX_STATUS_TEXT_BYTES}
-        placeholder={i18n.t('common.whatAreYouUpTo')}
-      />
+      <div class="status-message-input">
+        <TextInput
+          id="presence-status-message"
+          bind:value={statusDraft}
+          disabled={statusSaving}
+          maxlength={MAX_STATUS_TEXT_BYTES}
+          placeholder={i18n.t('common.statusPlaceholder')}
+        />
+        <StatusEmojiPicker bind:value={statusEmojiDraft} disabled={statusSaving} />
+      </div>
     </FormField>
     {#if statusError}<Alert variant="critical" role="alert">{statusError}</Alert>{/if}
     <DialogActions>
@@ -360,14 +398,17 @@
       <Button
         type="submit"
         loading={statusSaving}
-        disabled={statusDraft.trim() === ownStatus && presenceDraft === preferences.presence}
-        >{i18n.t('common.save')}</Button
+        disabled={statusDraft.trim() === ownStatus &&
+          statusEmojiDraft === (userStatus?.emoji ?? '') &&
+          presenceDraft === presence}>{i18n.t('common.save')}</Button
       >
     </DialogActions>
   </form>
 </BottomSheet>
 
 <SignOutWarningDialog guard={signOut} />
+
+<QrLinkDialog bind:open={linkingDevice} mode="grant" />
 
 <DialogFrame
   open={accountToRemove !== null}
@@ -419,6 +460,9 @@
 
   .account-profile :global(.profile-card) {
     --profile-avatar-size: 5rem;
+
+    border: var(--border-width) solid var(--surface-container-line);
+    border-radius: var(--radius);
   }
 
   .account-profile :global(.profile-card .profile-card-cover) {
@@ -456,6 +500,32 @@
 
   .account-profile :global(.profile-card-user-id svg) {
     margin-top: var(--space-100);
+  }
+
+  .account-buttons {
+    display: grid;
+    gap: var(--space-200);
+    grid-template-areas:
+      'edit edit'
+      'settings link';
+    grid-template-columns: 1fr auto;
+    width: 100%;
+
+    :global(.account-edit) {
+      grid-area: edit;
+    }
+
+    :global(.account-settings) {
+      grid-area: settings;
+    }
+
+    :global(.account-settings:last-child) {
+      grid-column-end: link;
+    }
+
+    :global(.account-link) {
+      grid-area: link;
+    }
   }
 
   .account-list {
@@ -646,7 +716,7 @@
       grid-column: 1 / -1;
     }
 
-    .account-row :global(.account-select > svg) {
+    .account-row :global(.account-select > .status-icon) {
       grid-column: 3;
       grid-row: 1;
       justify-self: center;
@@ -657,6 +727,12 @@
       right: var(--space-400);
       top: var(--space-400);
     }
+  }
+
+  .status-message-input {
+    align-items: center;
+    display: flex;
+    gap: var(--space-100);
   }
 
   .status-sheet {

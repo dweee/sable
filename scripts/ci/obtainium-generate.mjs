@@ -11,9 +11,13 @@ const isNightly = tag.startsWith('nightly-');
 const apkName = `sable-${version}-android-universal.apk`;
 const apkUrl = `${server}/${repository}/releases/download/${tag}/${apkName}`;
 
+// Releases also carry per-ABI FOSS APKs; keep Obtainium on the universal one.
+const apkFilterRegEx = 'android-universal\\.apk$';
+
 // Obtainium fills in every other setting from its own defaults on import.
 const additionalSettings = {
   about: `The next Sable Matrix client${isNightly ? ' (nightly)' : ''}`,
+  apkFilterRegEx,
   fallbackToOlderReleases: true,
   ...(isNightly && {
     includePrereleases: true,
@@ -27,7 +31,7 @@ const config = {
       id: isNightly ? 'moe.sable.next.nightly' : 'moe.sable.client',
       url: `${server}/${repository}`,
       author: 'SableClient',
-      name: isNightly ? 'Sable v2 Nightly' : 'Sable',
+      name: isNightly ? 'Sable Nightly' : 'Sable',
       installedVersion: null,
       latestVersion: version,
       apkUrls: JSON.stringify([[apkName, apkUrl]]),

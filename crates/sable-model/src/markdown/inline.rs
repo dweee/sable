@@ -22,19 +22,23 @@ pub(super) enum Mark {
     Link(String),
 }
 
-pub(super) const LINK: u8 = 10;
-const CODE: u8 = 3;
-const SPOILER: u8 = 9;
-const COLOR: u8 = 7;
-const BG_COLOR: u8 = 8;
+// Spoilers wrap other marks so formatting changes keep a single reveal target.
+const SPOILER: u8 = 0;
+pub(super) const LINK: u8 = 1;
+pub(super) const STRONG: u8 = 2;
+pub(super) const EM: u8 = 3;
+pub(super) const STRIKE: u8 = 4;
+const CODE: u8 = 5;
+const COLOR: u8 = 9;
+const BG_COLOR: u8 = 10;
 
 impl Mark {
     /// The composer schema's mark order, which is also the order marks nest in.
-    pub const fn rank(&self) -> u8 {
+    pub(super) const fn rank(&self) -> u8 {
         match self {
-            Self::Strong => 0,
-            Self::Em => 1,
-            Self::Strike => 2,
+            Self::Strong => STRONG,
+            Self::Em => EM,
+            Self::Strike => STRIKE,
             Self::Code => CODE,
             Self::Color(_) => COLOR,
             Self::BgColor(_) => BG_COLOR,
@@ -43,9 +47,13 @@ impl Mark {
         }
     }
 
-    /// `code` excludes every other mark; every mark excludes its own type.
+    /// `code` excludes colours; every mark excludes its own type.
     const fn excludes(&self, other: &Self) -> bool {
-        matches!(self, Self::Code) || self.rank() == other.rank()
+        self.rank() == other.rank()
+            || matches!(
+                (self, other),
+                (Self::Code, Self::Color(_) | Self::BgColor(_))
+            )
     }
 }
 
@@ -94,6 +102,10 @@ pub(super) enum Token {
         datetime: String,
         label: String,
     },
+    Math {
+        latex: String,
+        display: bool,
+    },
     Open(Mark),
     Close(u8),
     /// Closes a link, keeping the source after its label in case MFM claims
@@ -116,16 +128,21 @@ pub(super) enum Inline {
         label: String,
         marks: Vec<Mark>,
     },
+    Math {
+        latex: String,
+        marks: Vec<Mark>,
+    },
     Pill(usize),
 }
 
 impl Inline {
-    pub fn marks(&self) -> &[Mark] {
+    pub(super) fn marks(&self) -> &[Mark] {
         match self {
             Self::Text(_, marks)
             | Self::Break(marks)
             | Self::Image { marks, .. }
-            | Self::Time { marks, .. } => marks,
+            | Self::Time { marks, .. }
+            | Self::Math { marks, .. } => marks,
             Self::Pill(_) => &[],
         }
     }
@@ -207,7 +224,7 @@ fn link_end(pieces: &[Piece], open: usize, hi: usize) -> usize {
     hi
 }
 
-/// markdown-it's raw source for `pieces`, one char per entry; escaped punctuation keeps its backslash.
+/// markdown-it's raw source for `pieces`, one char per entry. Escaped punctuation keeps its backslash, and a space an entity wrote is no space.
 fn projection(pieces: &[Piece], lo: usize, hi: usize, limit: usize) -> Vec<(char, usize)> {
     let mut chars = Vec::new();
     for (index, piece) in pieces.iter().enumerate().take(hi).skip(lo) {
@@ -219,7 +236,14 @@ fn projection(pieces: &[Piece], lo: usize, hi: usize, limit: usize) -> Vec<(char
                 if glyph.literal && glyph.c.is_ascii_punctuation() {
                     chars.push(('\\', index));
                 }
-                chars.push((glyph.c, index));
+                chars.push((
+                    if glyph.literal && glyph.c.is_whitespace() {
+                        '&'
+                    } else {
+                        glyph.c
+                    },
+                    index,
+                ));
             }
             Piece::Token(Token::Code(code)) => {
                 chars.push(('`', index));
@@ -477,6 +501,10 @@ pub(super) fn fold(tokens: Vec<Token>) -> Vec<Inline> {
                 label,
                 marks: marks.clone(),
             }),
+            Token::Math { latex, .. } => nodes.push(Inline::Math {
+                latex,
+                marks: marks.clone(),
+            }),
             Token::Open(mark) => marks = add_mark(&marks, mark),
             Token::Close(rank) => marks.retain(|mark| mark.rank() != rank),
             Token::LinkEnd(_) => marks.retain(|mark| mark.rank() != LINK),
@@ -502,16 +530,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn code_drops_every_other_mark_and_a_mark_cannot_join_code() {
-        let strong = vec![Mark::Strong, Mark::Link("u".to_owned())];
-        assert_eq!(add_mark(&strong, Mark::Code), vec![Mark::Code]);
-        assert_eq!(add_mark(&[Mark::Code], Mark::Spoiler), vec![Mark::Code]);
+    fn code_keeps_other_marks_but_drops_colours() {
+        let strong = vec![Mark::Link("u".to_owned()), Mark::Strong];
+        assert_eq!(
+            add_mark(&strong, Mark::Code),
+            vec![Mark::Link("u".to_owned()), Mark::Strong, Mark::Code]
+        );
+        assert_eq!(
+            add_mark(&[Mark::Color("#000000".to_owned())], Mark::Code),
+            vec![Mark::Code]
+        );
+        assert_eq!(
+            add_mark(&[Mark::Code], Mark::Color("#000000".to_owned())),
+            vec![Mark::Code]
+        );
     }
 
     #[test]
     fn a_mark_takes_its_rank_and_replaces_its_own_type() {
         let set = add_mark(&[Mark::Link("u".to_owned())], Mark::Strong);
-        assert_eq!(set, vec![Mark::Strong, Mark::Link("u".to_owned())]);
+        assert_eq!(set, vec![Mark::Link("u".to_owned()), Mark::Strong]);
         let recolored = add_mark(
             &[Mark::Color("#000000".to_owned())],
             Mark::Color("#ffffff".to_owned()),

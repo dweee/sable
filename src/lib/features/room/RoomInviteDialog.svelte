@@ -4,6 +4,7 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
+  import { isUserId } from '#lib/guards.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -23,7 +24,6 @@
 
   let { open, room, onOpenChange }: Props = $props();
   const core = useCoreClient();
-  const userIdPattern = /^@[^:\s]+:\S+$/;
 
   let draft = $state('');
   let invalid = $state(false);
@@ -63,7 +63,7 @@
   async function invite(candidate = draft.trim()): Promise<void> {
     const target = roomId;
     if (!target || inviting) return;
-    if (!userIdPattern.test(candidate)) {
+    if (!isUserId(candidate)) {
       invalid = true;
       return;
     }
@@ -149,6 +149,7 @@
       {#if suggestions.length > 0}
         <ul class="suggestions" {@attach scrollHint}>
           {#each suggestions as entry (entry.user_id)}
+            {@const name = entry.display_name ?? entry.user_id}
             <li>
               <button
                 type="button"
@@ -158,14 +159,9 @@
                   document.getElementById('room-invite-user')?.focus();
                 }}
               >
-                <Avatar
-                  size="small"
-                  id={entry.user_id}
-                  src={entry.avatar_url}
-                  name={entry.display_name ?? entry.user_id}
-                />
+                <Avatar size="small" id={entry.user_id} src={entry.avatar_url} {name} />
                 <span class="identity">
-                  <span class="name">{entry.display_name ?? entry.user_id}</span>
+                  <span class="name">{name}</span>
                   <span class="user-id">{entry.user_id}</span>
                 </span>
               </button>
@@ -175,9 +171,7 @@
       {/if}
 
       {#if invalid}
-        <Alert variant="critical" role="alert"
-          >{i18n.t('common.aUserIdLooksLikeSomeoneserver')}</Alert
-        >
+        <Alert variant="critical" role="alert">{i18n.t('common.userIdFormatHint')}</Alert>
       {:else if failed}
         <Alert variant="critical" role="alert">{i18n.t('room.inviteSendFailed')}</Alert>
       {:else if invited}

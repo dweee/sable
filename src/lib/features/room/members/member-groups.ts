@@ -61,6 +61,29 @@ export function groupMemberEvents(items: readonly TimelineItemView[]): TimelineU
       start += 1;
     }
   }
+  return withGroupReceiptsHoisted(units);
+}
+
+function withGroupReceiptsHoisted(units: TimelineUnit[]): TimelineUnit[] {
+  let holder = -1;
+  units.forEach((unit, index) => {
+    if (unit.group === null) {
+      if (unit.item.event_id !== null) holder = index;
+      return;
+    }
+    if (holder < 0 || !unit.group.some((member) => member.read_by.length > 0)) return;
+    const item = units[holder].item;
+    const readTimestamps: Record<string, number> = { ...item.read_timestamps };
+    for (const member of unit.group) Object.assign(readTimestamps, member.read_timestamps);
+    units[holder] = {
+      ...units[holder],
+      item: {
+        ...item,
+        read_by: [...new Set([...item.read_by, ...unit.group.flatMap((member) => member.read_by)])],
+        read_timestamps: readTimestamps,
+      },
+    };
+  });
   return units;
 }
 
@@ -77,10 +100,16 @@ export interface MemberGroupSegment {
 function groupUser(item: TimelineItemView): MemberGroupUser | null {
   const content = item.content;
   if (content.kind === 'membership') {
-    return { userId: content.user_id, name: content.display_name ?? content.user_id };
+    return {
+      userId: content.user_id,
+      name: content.display_name ?? content.user_id,
+    };
   }
   if (content.kind === 'profile_change') {
-    return { userId: content.user_id, name: item.sender_name ?? content.user_id };
+    return {
+      userId: content.user_id,
+      name: item.sender_name ?? content.user_id,
+    };
   }
   return null;
 }

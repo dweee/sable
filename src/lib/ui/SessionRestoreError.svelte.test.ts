@@ -4,16 +4,12 @@ import { beforeEach, expect, test, vi } from 'vitest';
 import { goto } from '$app/navigation';
 vi.mock('#lib/core/context.js');
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
-vi.mock('#lib/migrations/v1/migration.js', () => ({ skipV1Migration: vi.fn() }));
-import { skipV1Migration } from '#lib/migrations/v1/migration.js';
 import { core } from '#lib/core/__mocks__/context.js';
 import SessionRestoreError from './SessionRestoreError.svelte';
 
 beforeEach(() => {
   Object.assign(core, {
     status: 'error',
-    migrationFailed: false,
-    migrationError: null,
     accounts: [],
     start: vi.fn(),
     beginSignInRecovery: vi.fn(),
@@ -79,7 +75,7 @@ test('can select another saved account while restoration is blocked', async () =
   });
   render(SessionRestoreError);
   expect(screen.queryByRole('button', { name: /@one:x/ })).not.toBeInTheDocument();
-  await fireEvent.click(screen.getByRole('button', { name: /@two:x/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Switch account: @two:x/ }));
   expect(core.switchAccount).toHaveBeenCalledWith('healthy');
   expect(goto).toHaveBeenCalledWith('/rooms');
 });
@@ -90,34 +86,26 @@ test('a failed account switch leaves retry and sign-in available', async () => {
     switchAccount: vi.fn().mockRejectedValue(new Error('missing crypto')),
   });
   render(SessionRestoreError);
-  await fireEvent.click(screen.getByRole('button', { name: /@one:x/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Switch account: @one:x/ }));
   expect(goto).not.toHaveBeenCalled();
   expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled();
   expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
 });
 
-test('migration failures preserve data and show retry without a misleading fresh-device sign-in', () => {
-  Object.assign(core, { migrationFailed: true });
-  render(SessionRestoreError);
-  expect(screen.getByText(/Your original data is still saved/)).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument();
-});
-
-test('a failed migration can be skipped so the app starts', async () => {
-  const start = vi.fn();
+test('signs a saved account in again on its own device', async () => {
   Object.assign(core, {
-    migrationFailed: true,
-    migrationError: 'A v1 account is incomplete; its data has been kept',
-    start,
+    accounts: [
+      {
+        account_id: 'a2',
+        user_id: '@one:x',
+        device_id: 'ONE',
+        homeserver: 'https://x',
+        needs_reauth: false,
+      },
+    ],
   });
   render(SessionRestoreError);
-  expect(
-    screen.getByText('A v1 account is incomplete; its data has been kept')
-  ).toBeInTheDocument();
-  await fireEvent.click(screen.getByRole('button', { name: 'Continue without v1 data' }));
-  await vi.waitFor(() => {
-    expect(start).toHaveBeenCalledOnce();
-  });
-  expect(skipV1Migration).toHaveBeenCalledOnce();
+  await fireEvent.click(screen.getByRole('button', { name: 'Sign in again: @one:x' }));
+  expect(goto).toHaveBeenCalledWith('/login?addAccount=1&reauth=a2&server=https%3A%2F%2Fx');
+  expect(core.beginSignInRecovery).toHaveBeenCalledOnce();
 });

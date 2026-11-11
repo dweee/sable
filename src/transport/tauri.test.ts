@@ -40,6 +40,18 @@ test.each([undefined, false, true])(
   }
 );
 
+test('sends an RTC frame as raw bytes with the session in a header', async () => {
+  invoke.mockResolvedValue(new Uint8Array([3]).buffer);
+  const transport = createTauriTransport();
+  const frame = new Uint8Array([1, 2]);
+
+  await expect(transport.rtcData('session id', frame)).resolves.toEqual(new Uint8Array([3]));
+  const call = invoke.mock.calls.at(-1) ?? [];
+  expect(call[0]).toBe('rtc_data');
+  expect(call[1]).toBe(frame);
+  expect(headersOf(call)).toEqual({ session: 'session%20id' });
+});
+
 test('percent-encodes the attachment request header', async () => {
   invoke.mockResolvedValue(undefined);
   const transport = createTauriTransport();
@@ -97,44 +109,6 @@ test('a throwing listener neither escapes the channel nor stops the batch', () =
   expect(captureException).toHaveBeenCalledTimes(2);
 });
 
-test('a video stream is not whole until the end-of-stream marker arrives', async () => {
-  let channel: { onmessage: ((chunk: unknown) => void) | null } | undefined;
-  invoke.mockImplementation((command: string, args: unknown) => {
-    if (command === 'stream_video') {
-      channel = (args as { chunks: typeof channel }).chunks;
-    }
-    return Promise.resolve(undefined);
-  });
-  const transport = createTauriTransport();
-  const settle = async () => {
-    for (let i = 0; i < 4; i++) await Promise.resolve();
-  };
-
-  const chunks: Uint8Array[] = [];
-  let settled = false;
-  const streaming = transport
-    .streamVideo('mxc://example.org/clip', 1, (chunk) => chunks.push(chunk))
-    .then(() => {
-      settled = true;
-    });
-
-  // The command resolves long before the channel has drained, so resolving on
-  // it handed the renderer a random prefix of the video.
-  await settle();
-  expect(settled).toBe(false);
-
-  channel?.onmessage?.(new Uint8Array([1, 2, 3]).buffer);
-  channel?.onmessage?.(new Uint8Array([4]).buffer);
-  await settle();
-  expect(settled).toBe(false);
-
-  channel?.onmessage?.(new ArrayBuffer(0));
-  await streaming;
-
-  expect(settled).toBe(true);
-  expect(chunks.flatMap((chunk) => [...chunk])).toEqual([1, 2, 3, 4]);
-});
-
 test('a cache reset goes through the core and still resolves when the core fails it', async () => {
   invoke.mockImplementation((command: string) =>
     command === 'call' ? Promise.reject(new Error('failed')) : Promise.resolve(undefined)
@@ -150,4 +124,32 @@ test('a cache reset goes through the core and still resolves when the core fails
     params: {},
   });
   expect(captureException).toHaveBeenCalledTimes(1);
+});
+
+test.each(['attachment', 'gallery'])('carries %s thumbnails as binary', async (kind) => {
+  invoke.mockResolvedValue(undefined);
+  const transport = createTauriTransport();
+  const attachment = {
+    filename: 'video.mp4',
+    mime: 'video/mp4',
+    bytes: new Uint8Array([1, 2]),
+    thumbnail: { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 },
+  };
+  if (kind === 'attachment') {
+    await transport.sendAttachment({ roomId: '!room:example.org', ...attachment });
+  } else {
+    await transport.sendGallery({
+      roomId: '!room:example.org',
+      attachments: [attachment, attachment],
+    });
+  }
+  const call = invoke.mock.calls.at(-1) ?? [];
+  expect(call[0]).toBe(kind === 'attachment' ? 'send_attachment' : 'send_gallery');
+  const bytes = call[1] as Uint8Array;
+  const header = new DataView(bytes.buffer);
+  expect(header.getBigUint64(0, true)).toBe(2n);
+  expect(header.getBigUint64(8, true)).toBe(3n);
+  expect(bytes.slice(24, 29)).toEqual(new Uint8Array([1, 2, 255, 216, 255]));
+  expect(decodeURIComponent(headersOf(call).request)).not.toContain('bytes');
+  if (kind === 'gallery') expect(bytes.slice(29)).toEqual(bytes.slice(0, 29));
 });

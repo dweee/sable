@@ -7,14 +7,9 @@ const mocks = vi.hoisted(() => ({ isTauri: vi.fn(), osType: vi.fn(), invoke: vi.
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: mocks.isTauri, invoke: mocks.invoke }));
 vi.mock('@tauri-apps/plugin-os', () => ({ type: mocks.osType }));
 
-import { listPushDistributors, registerNativePushConfig } from './push';
+import { listPushDistributors, registerNativePushConfig, unregisterNativePushConfig } from './push';
 
-import {
-  deliversNativePush,
-  deliversWebPush,
-  presentsInApp,
-  usesPushGateway,
-} from './notifications';
+import { deliversNativePush, deliversWebPush, presentsInApp, pushPlatform } from './notifications';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -58,34 +53,23 @@ test('a Tauri shell takes no web push even with the APIs present', () => {
   expect(deliversWebPush()).toBe(false);
 });
 
-test('only a mobile Tauri build registers a native pusher', async () => {
-  mocks.isTauri.mockReturnValue(true);
+test('Electron takes no web push even with the APIs present', () => {
+  mocks.isTauri.mockReturnValue(false);
+  vi.stubGlobal('navigator', { serviceWorker: {} });
+  vi.stubGlobal('PushManager', function PushManager() {});
+  vi.stubGlobal('sableElectron', {});
 
-  mocks.osType.mockReturnValue('ios');
-  await expect(deliversNativePush()).resolves.toBe(true);
-
-  mocks.osType.mockReturnValue('android');
-  await expect(deliversNativePush()).resolves.toBe(true);
-
-  mocks.osType.mockReturnValue('linux');
-  await expect(deliversNativePush()).resolves.toBe(false);
+  expect(deliversWebPush()).toBe(false);
+  expect(pushPlatform()).toBe('desktop');
 });
 
-test('a plain browser registers no native pusher', async () => {
-  mocks.isTauri.mockReturnValue(false);
-  await expect(deliversNativePush()).resolves.toBe(false);
-});
-
-test('only the desktop shell has no push gateway to configure', () => {
-  mocks.isTauri.mockReturnValue(false);
-  expect(usesPushGateway()).toBe(true);
-
+test('a mobile build registers a native pusher and a plain browser does not', () => {
   mocks.isTauri.mockReturnValue(true);
   mocks.osType.mockReturnValue('android');
-  expect(usesPushGateway()).toBe(true);
+  expect(deliversNativePush()).toBe(true);
 
-  mocks.osType.mockReturnValue('linux');
-  expect(usesPushGateway()).toBe(false);
+  mocks.isTauri.mockReturnValue(false);
+  expect(deliversNativePush()).toBe(false);
 });
 
 test('distributor discovery is limited to Android', async () => {
@@ -132,4 +116,25 @@ test('forwards the built-in server and account through the native command', asyn
       accounts: [{ user_id: '@bob:example.org', device_id: 'OTHER' }],
     },
   });
+});
+
+test('unregisters only the supplied account and device', async () => {
+  mocks.isTauri.mockReturnValue(true);
+  mocks.osType.mockReturnValue('android');
+
+  await unregisterNativePushConfig({ user_id: '@alice:example.org', device_id: 'DEVICE' });
+
+  expect(mocks.invoke).toHaveBeenLastCalledWith('unregister_push', {
+    userId: '@alice:example.org',
+    deviceId: 'DEVICE',
+  });
+});
+
+test('unregisters all accounts only when no account is supplied', async () => {
+  mocks.isTauri.mockReturnValue(true);
+  mocks.osType.mockReturnValue('android');
+
+  await unregisterNativePushConfig();
+
+  expect(mocks.invoke).toHaveBeenLastCalledWith('unregister_push', undefined);
 });

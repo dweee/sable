@@ -4,22 +4,31 @@
     reason = "every export rejects with the JSON `RpcError` as its message"
 )]
 
+#[cfg(windows)]
+mod screen_audio;
+
+mod call_shortcuts;
+
 use std::{
     io::{self, Write},
     sync::{
-        Arc, Mutex, Once, PoisonError,
+        Arc, Mutex, Once, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
 };
 
 use napi::{
-    Status,
-    bindgen_prelude::Buffer,
+    Env, Status,
+    bindgen_prelude::{Buffer, PromiseRaw},
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use napi_derive::napi;
 use sable_core::{
     Core,
+    binding::{
+        DEFAULT_LOG_FILTER, EVENT_BATCH_LIMIT, REPORTED_LOG_MARK, encode_event_batch,
+        is_reported_event, rpc_error_json,
+    },
     protocol::{CoreEvent, RpcError},
     store::ExclusiveFileSessionStore,
 };
@@ -27,46 +36,31 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 type Callback = ThreadsafeFunction<String, (), String, Status, false>;
 
-const EVENT_BATCH_LIMIT: usize = 256;
-
-const DEFAULT_LOG_FILTER: &str = "info,matrix_sdk::http_client=off,matrix_sdk::latest_events::latest_event::builder=off,matrix_sdk_base::room::display_name=off";
-
 const PANIC_MARKER: &str = "SABLE_CORE_PANIC ";
 
 static LOG_HANDLER: Mutex<Option<Callback>> = Mutex::new(None);
 static LOG_CAPTURE: AtomicBool = AtomicBool::new(false);
 static INIT: Once = Once::new();
+static LOG_FILTER: OnceLock<
+    tracing_subscriber::reload::Handle<
+        tracing_subscriber::filter::Targets,
+        tracing_subscriber::Registry,
+    >,
+> = OnceLock::new();
 
-fn js_err(error: &RpcError) -> napi::Error {
-    let json = serde_json::to_string(error)
-        .unwrap_or_else(|_| r#"{"code":"failed","log_id":"serialization failed"}"#.to_owned());
-    napi::Error::new(Status::GenericFailure, json)
+fn log_targets(filter: &str) -> tracing_subscriber::filter::Targets {
+    filter.parse().unwrap_or_else(|_| {
+        tracing_subscriber::filter::Targets::new().with_default(tracing::Level::INFO)
+    })
 }
 
-fn encode_batch(batch: &[CoreEvent]) -> Option<String> {
-    match serde_json::to_string(batch) {
-        Ok(json) => return Some(json),
-        Err(error) => {
-            tracing::error!(
-                ?error,
-                "a core event batch did not serialize; dropping what fails"
-            );
-        }
-    }
-
-    let kept: Vec<&CoreEvent> = batch
-        .iter()
-        .filter(|event| serde_json::to_string(event).is_ok())
-        .collect();
-
-    if kept.is_empty() {
-        return None;
-    }
-    serde_json::to_string(&kept).ok()
+fn js_err(error: impl Into<RpcError>) -> napi::Error {
+    napi::Error::new(Status::GenericFailure, rpc_error_json(&error.into()))
 }
 
 struct JsLogWriter {
     capturing: bool,
+    reported: bool,
     line: String,
 }
 
@@ -90,10 +84,11 @@ impl Drop for JsLogWriter {
         }
         let handler = LOG_HANDLER.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(handler) = handler.as_ref() {
-            handler.call(
-                std::mem::take(&mut self.line),
-                ThreadsafeFunctionCallMode::NonBlocking,
-            );
+            let mut line = std::mem::take(&mut self.line);
+            if self.reported {
+                line.insert(0, REPORTED_LOG_MARK);
+            }
+            handler.call(line, ThreadsafeFunctionCallMode::NonBlocking);
         }
     }
 }
@@ -106,21 +101,25 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeJsLogWriter {
     fn make_writer(&'a self) -> Self::Writer {
         JsLogWriter {
             capturing: LOG_CAPTURE.load(Ordering::Relaxed),
+            reported: false,
             line: String::new(),
         }
     }
 
     fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        let reported = is_reported_event(meta);
         JsLogWriter {
             capturing: LOG_CAPTURE.load(Ordering::Relaxed)
-                || meta.level() == &tracing::Level::ERROR,
+                || meta.level() == &tracing::Level::ERROR
+                || reported,
+            reported,
             line: String::new(),
         }
     }
 }
 
 fn init(filter: &str) {
-    use tracing_subscriber::{filter::Targets, prelude::*};
+    use tracing_subscriber::prelude::*;
 
     INIT.call_once(|| {
         let previous = std::panic::take_hook();
@@ -129,10 +128,10 @@ fn init(filter: &str) {
             eprintln!("{PANIC_MARKER}{}", info.to_string().replace('\n', " "));
         }));
 
-        let targets = filter
-            .parse::<Targets>()
-            .unwrap_or_else(|_| Targets::new().with_default(tracing::Level::INFO));
-        let _ = tracing_subscriber::registry()
+        let (targets, handle) = tracing_subscriber::reload::Layer::new(log_targets(filter));
+        if tracing_subscriber::registry()
+            .with(targets)
+            .with(sable_core::binding::ErrorLayer::default())
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_ansi(false)
@@ -144,9 +143,20 @@ fn init(filter: &str) {
                     .without_time()
                     .with_writer(MakeJsLogWriter),
             )
-            .with(targets)
-            .try_init();
+            .try_init()
+            .is_ok()
+        {
+            let _ = LOG_FILTER.set(handle);
+        }
     });
+}
+
+#[napi]
+pub fn set_log_filter(filter: Option<String>) {
+    let filter = filter.unwrap_or_else(|| DEFAULT_LOG_FILTER.to_owned());
+    if let Some(handle) = LOG_FILTER.get() {
+        let _ = handle.reload(log_targets(&filter));
+    }
 }
 
 #[napi]
@@ -157,6 +167,31 @@ pub fn set_log_handler(notify: Callback) {
 #[napi]
 pub fn set_log_capture(enabled: bool) {
     LOG_CAPTURE.store(enabled, Ordering::Relaxed);
+}
+
+/// Must succeed before a `SableCore` is made.
+///
+/// # Errors
+/// When the keyring `data_dir` keeps its keys in is unavailable.
+#[napi]
+pub fn install_keyring(
+    service: String,
+    data_dir: String,
+    log_filter: Option<String>,
+) -> napi::Result<()> {
+    init(&log_filter.unwrap_or_else(|| DEFAULT_LOG_FILTER.to_owned()));
+    sable_core::secrets::install_os_keyring_or_files(service, &std::path::PathBuf::from(data_dir))
+        .map_err(|error| napi::Error::new(Status::GenericFailure, error.to_string()))
+}
+
+/// Must run before a `SableCore` is made.
+///
+/// # Errors
+/// When `url` is not a usable proxy or a proxy was already set.
+#[napi]
+pub fn set_proxy(url: String) -> napi::Result<()> {
+    sable_core::tls::set_proxy(url)
+        .map_err(|error| napi::Error::new(Status::GenericFailure, error.to_string()))
 }
 
 #[napi]
@@ -184,75 +219,134 @@ impl SableCore {
     }
 
     #[napi]
-    pub async fn restore(&self) {
-        if !matches!(self.core.v1_migration_complete().await, Ok(true)) {
-            return;
-        }
-        if let Err(error) =
-            Box::pin(self.core.run(sable_core::api::session::RestoreParams {})).await
-        {
-            tracing::warn!(?error, "early session restore failed");
-        }
+    pub fn restore<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
+        // Keep JS-owned borrows on this thread: pending futures are dropped by Tokio at shutdown.
+        let core = self.core.clone();
+        env.spawn_future(async move {
+            if let Err(error) = Box::pin(core.run(sable_core::api::session::RestoreParams {})).await
+            {
+                tracing::warn!(?error, "early session restore failed");
+            }
+            Ok(())
+        })
     }
 
     #[napi]
-    pub async fn call(&self, method: String, params: String) -> napi::Result<String> {
-        Box::pin(self.core.call(&method, &params))
-            .await
-            .map(|json| Box::<str>::from(json).into_string())
-            .map_err(|error| js_err(&error))
-    }
-
-    #[napi]
-    pub async fn fetch_media(
+    pub fn set_active<'env>(
         &self,
+        env: &'env Env,
+        active: bool,
+    ) -> napi::Result<PromiseRaw<'env, ()>> {
+        let core = self.core.clone();
+        env.spawn_future(async move {
+            core.update_app_active(active).await;
+            Ok(())
+        })
+    }
+
+    #[napi]
+    pub fn call<'env>(
+        &self,
+        env: &'env Env,
+        method: String,
+        params: String,
+    ) -> napi::Result<PromiseRaw<'env, String>> {
+        let core = self.core.clone();
+        env.spawn_future(async move {
+            Box::pin(core.call(&method, &params))
+                .await
+                .map(|json| Box::<str>::from(json).into_string())
+                .map_err(js_err)
+        })
+    }
+
+    #[napi]
+    pub fn fetch_media<'env>(
+        &self,
+        env: &'env Env,
         source: String,
         width: u32,
         height: u32,
         background: bool,
-    ) -> napi::Result<Buffer> {
-        self.core
-            .fetch_media(source, width, height, background)
-            .await
-            .map(Buffer::from)
-            .map_err(|error| js_err(&error))
+    ) -> napi::Result<PromiseRaw<'env, Buffer>> {
+        let core = self.core.clone();
+        env.spawn_future_with_callback(
+            async move {
+                core.fetch_media(source, width, height, background)
+                    .await
+                    .map_err(js_err)
+            },
+            |_env, bytes| Ok(Buffer::from(bytes)),
+        )
     }
 
     #[napi]
-    pub async fn forget_media(&self, source: String) -> napi::Result<()> {
-        self.core
-            .forget_media(source)
-            .await
-            .map_err(|error| js_err(&error))
+    pub fn forget_media<'env>(
+        &self,
+        env: &'env Env,
+        source: String,
+    ) -> napi::Result<PromiseRaw<'env, ()>> {
+        let core = self.core.clone();
+        env.spawn_future(async move { core.forget_media(source).await.map_err(js_err) })
     }
 
     #[napi]
-    pub async fn send_attachment(&self, request: String, bytes: Buffer) -> napi::Result<()> {
-        let request = serde_json::from_str(&request)
-            .map_err(|error| js_err(&self.core.failed("send_attachment", error)))?;
-        self.core
-            .send_attachment(request, bytes.to_vec())
-            .await
-            .map_err(|error| js_err(&error))
+    pub fn send_attachment<'env>(
+        &self,
+        env: &'env Env,
+        request: String,
+        bytes: Buffer,
+    ) -> napi::Result<PromiseRaw<'env, ()>> {
+        let core = self.core.clone();
+        let bytes = Vec::from(bytes);
+        env.spawn_future(async move {
+            let request = serde_json::from_str(&request)
+                .map_err(|error| js_err(core.failed_with("send_attachment", &error)))?;
+            core.send_attachment(request, bytes).await.map_err(js_err)
+        })
     }
 
     #[napi]
-    pub async fn send_gallery(&self, request: String, items: String) -> napi::Result<()> {
-        let request = serde_json::from_str(&request)
-            .map_err(|error| js_err(&self.core.failed("send_gallery", error)))?;
-        let items = serde_json::from_str(&items).map_err(|_| js_err(&RpcError::InvalidMedia))?;
-        self.core
-            .send_gallery(request, items)
-            .await
-            .map_err(|error| js_err(&error))
+    pub fn send_gallery<'env>(
+        &self,
+        env: &'env Env,
+        request: String,
+        bytes: Buffer,
+    ) -> napi::Result<PromiseRaw<'env, ()>> {
+        let core = self.core.clone();
+        let bytes = Vec::from(bytes);
+        env.spawn_future(async move {
+            let request = serde_json::from_str(&request)
+                .map_err(|error| js_err(core.failed_with("send_gallery", &error)))?;
+            core.send_gallery(request, bytes).await.map_err(js_err)
+        })
     }
 
     #[napi]
-    pub async fn upload_media(&self, mime: String, bytes: Buffer) -> napi::Result<String> {
-        self.core
-            .upload_media(mime, bytes.to_vec())
-            .await
-            .map_err(|error| js_err(&error))
+    pub fn upload_media<'env>(
+        &self,
+        env: &'env Env,
+        mime: String,
+        bytes: Buffer,
+    ) -> napi::Result<PromiseRaw<'env, String>> {
+        let core = self.core.clone();
+        let bytes = Vec::from(bytes);
+        env.spawn_future(async move { core.upload_media(mime, bytes).await.map_err(js_err) })
+    }
+
+    #[napi]
+    pub fn rtc_data<'env>(
+        &self,
+        env: &'env Env,
+        session_id: String,
+        frame: Buffer,
+    ) -> napi::Result<PromiseRaw<'env, Buffer>> {
+        let core = self.core.clone();
+        let frame = Vec::from(frame);
+        env.spawn_future_with_callback(
+            async move { core.rtc_data(&session_id, &frame).await.map_err(js_err) },
+            |_env, bytes| Ok(Buffer::from(bytes)),
+        )
     }
 
     #[napi]
@@ -267,7 +361,7 @@ impl SableCore {
         napi::bindgen_prelude::spawn(async move {
             let mut batch = Vec::new();
             while events.recv_many(&mut batch, EVENT_BATCH_LIMIT).await > 0 {
-                let encoded = encode_batch(&batch);
+                let encoded = encode_event_batch(&batch);
                 batch.clear();
                 if let Some(json) = encoded {
                     on_events.call(json, ThreadsafeFunctionCallMode::NonBlocking);

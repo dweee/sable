@@ -1,5 +1,7 @@
 import { vi, type Mock } from 'vitest';
-import { createRpc, type Rpc } from '#src/generated/protocol';
+import { defaultE2eePolicy } from '#lib/deployment/e2ee-policy.js';
+import { MemberPreviews } from '#lib/rooms/member-previews.svelte.js';
+import { createRpc, type OAuthMetadataView, type Rpc } from '#src/generated/protocol';
 
 const pending = () => new Promise<never>(() => {});
 
@@ -31,6 +33,7 @@ export function createCoreStub<T extends Record<string, unknown> & { rpc?: RpcOv
 ) {
   const { rpc: rpcOverrides = {}, ...rest } = overrides;
   const stub = {
+    memberPreviews: new MemberPreviews(),
     session: null as unknown,
     accounts: [] as unknown[],
     fetchMedia: vi.fn<(...args: never[]) => Promise<Uint8Array<ArrayBuffer>>>(pending),
@@ -43,12 +46,21 @@ export function createCoreStub<T extends Record<string, unknown> & { rpc?: RpcOv
     refreshUserProfile: vi.fn<(...args: never[]) => Promise<unknown>>(() =>
       Promise.reject(new Error('profile unavailable'))
     ),
+    e2eePolicy: vi.fn(() => Promise.resolve(defaultE2eePolicy)),
     subscribeEvents: vi.fn(() => () => {}),
     onProfileChanged: vi.fn(() => () => {}),
+    oauthMetadata: null as OAuthMetadataView | null,
     rpc: mockRpc(
       {
-        members: { powerLevelTags: vi.fn(() => Promise.resolve({})) },
-        messages: { reactionShortcodes: vi.fn(() => Promise.resolve([])) },
+        members: {
+          powerLevelTags: vi.fn(() => Promise.resolve({})),
+          member: vi.fn(() => Promise.resolve(null)),
+        },
+        messages: {
+          reactionShortcodes: vi.fn(() => Promise.resolve([])),
+          frequentReactions: vi.fn(() => Promise.resolve([])),
+          rememberEmoji: vi.fn(() => Promise.resolve(null)),
+        },
         room_state: {
           event: vi.fn(() => Promise.resolve(null)),
           memberListThreshold: vi.fn(() => Promise.resolve(null)),

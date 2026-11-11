@@ -4,8 +4,8 @@ use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use serde::{Deserialize, Serialize};
 
 use super::Handler;
-use crate::protocol::{RpcError, SidebarItemView, SpaceHierarchyRoomView, SpaceParentView};
-use crate::{Core, view};
+use crate::protocol::{RpcCode, RpcError, SidebarItemView, SpaceHierarchyRoomView, SpaceParentView};
+use crate::{Core, ResultExt, view};
 
 domain! {
     add,
@@ -15,6 +15,7 @@ domain! {
     remove,
     sidebar,
     set_sidebar,
+    set_avatar_override,
     room_has_space_parent,
     unjoined_space_parents,
 }
@@ -48,13 +49,15 @@ pub struct SetChildOrderParams {
     pub room_id: OwnedRoomId,
     #[serde(default)]
     pub order: Option<String>,
+    #[serde(default)]
+    pub via: Option<Vec<String>>,
 }
 
 impl Handler for SetChildOrderParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.set_space_child_order(&self.space_id, &self.room_id, self.order)
+        core.set_space_child_order(&self.space_id, &self.room_id, self.order, self.via)
             .await
     }
 }
@@ -67,13 +70,15 @@ pub struct SetChildSuggestedParams {
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub room_id: OwnedRoomId,
     pub suggested: bool,
+    #[serde(default)]
+    pub via: Option<Vec<String>>,
 }
 
 impl Handler for SetChildSuggestedParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.set_space_child_suggested(&self.space_id, &self.room_id, self.suggested)
+        core.set_space_child_suggested(&self.space_id, &self.room_id, self.suggested, self.via)
             .await
     }
 }
@@ -123,10 +128,10 @@ impl Handler for RemoveParams {
             .send_state_event_raw(
                 "m.space.child",
                 self.room_id.as_str(),
-                &serde_json::Value::Object(serde_json::Map::new()),
+                serde_json::Value::Object(serde_json::Map::new()),
             )
             .await
-            .map_err(|error| core.room_error("remove_from_space", error))?;
+            .or_failed(core, "remove_from_space")?;
         Ok(())
     }
 }
@@ -157,9 +162,26 @@ impl Handler for SetSidebarParams {
             .iter()
             .any(|room_id| RoomId::parse(room_id).is_err())
         {
-            return Err(RpcError::UnknownRoom);
+            return Err(RpcCode::UnknownRoom.into());
         }
         core.set_space_sidebar(&self.items).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetAvatarOverrideParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    pub url: Option<String>,
+}
+
+impl Handler for SetAvatarOverrideParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.set_avatar_override(&self.room_id, self.url.as_deref())
+            .await
     }
 }
 
@@ -193,6 +215,6 @@ impl Handler for UnjoinedSpaceParentsParams {
     async fn run(self, core: &Arc<Core>) -> Result<Vec<SpaceParentView>, RpcError> {
         let client = core.client().await?;
         let room = core.room(&self.room_id).await?;
-        Ok(crate::cosmetics::unjoined_space_parents(&client, &room).await)
+        Ok(crate::cosmetics::unjoined_space_parents(core, &client, &room).await)
     }
 }

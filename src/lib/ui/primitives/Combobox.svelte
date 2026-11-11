@@ -2,6 +2,7 @@
   import { Combobox as BitsCombobox } from 'bits-ui';
   import { i18n } from '#lib/i18n.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
   import CaretDownIcon from 'phosphor-svelte/lib/CaretDownIcon';
   import TextInput from './TextInput.svelte';
   import './menu.css';
@@ -112,20 +113,22 @@
   </div>
 
   <BitsCombobox.Portal>
-    <BitsCombobox.Content sideOffset={4}>
+    <BitsCombobox.Content sideOffset={4} collisionPadding={collisionPadding()}>
       {#snippet child({ wrapperProps, props, open })}
         {#if open && filteredItems.length > 0}
           <div {...wrapperProps} {...overlayLayer()} class="combobox-positioner">
-            <div {...props} class="menu-surface combobox-menu" {@attach scrollHint}>
-              {#each filteredItems as item (item.value)}
-                <BitsCombobox.Item value={item.value} label={item.label} disabled={item.disabled}>
-                  {#snippet child({ props })}
-                    <div {...props} class="menu-item">
-                      {item.label}
-                    </div>
-                  {/snippet}
-                </BitsCombobox.Item>
-              {/each}
+            <div {...props} class="menu-surface combobox-menu">
+              <div class="menu-scroll-content" {@attach scrollHint}>
+                {#each filteredItems as item (item.value)}
+                  <BitsCombobox.Item value={item.value} label={item.label} disabled={item.disabled}>
+                    {#snippet child({ props })}
+                      <div {...props} class="menu-item">
+                        {item.label}
+                      </div>
+                    {/snippet}
+                  </BitsCombobox.Item>
+                {/each}
+              </div>
             </div>
           </div>
         {/if}

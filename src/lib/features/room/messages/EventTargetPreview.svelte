@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
-  import ArrowBendUpLeftIcon from 'phosphor-svelte/lib/ArrowBendUpLeftIcon';
+  import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpRightIcon';
 
   import type { MemberView, TimelineItemView } from '#src/generated/protocol';
 
@@ -14,6 +14,7 @@
   import { memberName, senderDisplayColors } from '../members/members.js';
   import { eventPreview, reactionKey } from '#lib/model/model.js';
   import { fallbackText } from './reply-fallback';
+  import { isCustomReaction, reactionText } from './reaction-emote-label.js';
   import { replyPreviewBody } from './reply-preview';
   import { hasSenderRoles, useSenderRoles } from '../members/sender-roles';
   import SenderName from '../members/SenderName.svelte';
@@ -39,7 +40,7 @@
     members = [],
     currentUserId = null,
     reply = false,
-    icon: Icon = ArrowBendUpLeftIcon,
+    icon: Icon = ReplyIcon,
     onJump,
     body,
   }: Props = $props();
@@ -83,7 +84,11 @@
       const key = reactionKey(content.content);
       return {
         sender: item.sender,
-        body: key ? t('timeline.replyToReaction', { key }) : t('timeline.redacted'),
+        body: key
+          ? t('timeline.replyToReaction', {
+              key: isCustomReaction(key) ? t('timeline.customEmote') : reactionText(key),
+            })
+          : t('timeline.redacted'),
       };
     }
     return { sender: item.sender, body: replyPreviewBody(content) || stateEventText(item, t) };

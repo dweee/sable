@@ -1,6 +1,6 @@
-# Contributing to Sable v2
+# Contributing to Sable
 
-Everyone taking part in Sable v2 follows the
+Everyone taking part in Sable follows the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
 Before opening a pull request, run:
@@ -33,7 +33,7 @@ one, `git rebase --signoff origin/main` a whole branch. Force-push with
 
 ## AI-generated content
 
-**Sable v2 declines any contribution believed to include or derive from
+**Sable declines any contribution believed to include or derive from
 AI-generated content, including ChatGPT, Claude, Copilot, Llama and similar
 tools.**
 
@@ -66,12 +66,13 @@ default: patch
 Short user-facing summary of the change.
 ```
 
-Use `major`, `minor`, `patch`, `docs` or `note`. The `internal` label skips the check for maintenance work with no user-facing impact.
+Use `major`, `minor`, `feature` (listed under Features, released as a patch), `patch`, `docs` or `note`. The `internal` label skips the check for maintenance work with no user-facing impact.
 
 ### Release flow
 
 - Every push to `main` runs `prepare-release`, which keeps a `release` pull request up to date: it bumps `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `Cargo.lock`, writes `CHANGELOG.md`, the Android changelogs under `fastlane/` and the Flatpak metainfo release entry.
 - Merging that pull request runs `knope release`, which tags `vX.Y.Z` and creates the release. The tag starts the build.
 - Both workflows need a `RELEASE_TOKEN` secret: a personal access token that can write contents and pull requests. The run token cannot start the tag build.
-- After a release the build workflow publishes to the package repositories. Each step skips itself when its secret is unset: `AUR_KEY` (an SSH key for `sable-bin`, and `sable-nightly-bin` on nightlies), `HOMEBREW_TAP_TOKEN` (a token for `SableClient/homebrew-sable` on Forgejo, installed with `brew tap SableClient/sable https://git.sable.moe/SableClient/homebrew-sable.git`), `HOMEBREW_GITHUB_TAP_TOKEN` (a token for the existing `SableClient/homebrew-sable` tap on GitHub, which gets the same cask), `FLATHUB_TOKEN` (opens the update PR on `flathub/moe.sable.client`, which must exist first) and `PLAY_SERVICE_ACCOUNT_JSON` (a Google Play service account key; uploads the universal AAB of stable releases to the `internal` track of `moe.sable.client`, which must already exist in the Play Console with its first upload done by hand).
+- After a release the build workflow publishes to the package repositories. Each step skips itself when its secret is unset: `AUR_KEY` (an SSH key for `sable-bin`, and `sable-nightly-bin` on nightlies), `HOMEBREW_TAP_TOKEN` (a token for `SableClient/homebrew-sable` on Forgejo, installed with `brew tap SableClient/sable https://git.sable.moe/SableClient/homebrew-sable.git`), `HOMEBREW_GITHUB_TAP_TOKEN` (a token for the existing `SableClient/homebrew-sable` tap on GitHub, which gets the same cask) and `PLAY_SERVICE_ACCOUNT_JSON` (a Google Play service account key; uploads the universal AAB of stable releases to the `internal` track of `moe.sable.client`, which must already exist in the Play Console with its first upload done by hand).
+- Flathub release updates use its built-in data checker and flathubbot. Maintain the published manifest in [`flathub/moe.sable.client`](https://github.com/flathub/moe.sable.client); this repository does not open automated Flathub pull requests.
 - Preview a release with `pnpm run knope -- release --dry-run`, and validate the config with `pnpm run knope -- --validate`.

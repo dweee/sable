@@ -3,18 +3,22 @@
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
+  import Switch from '#lib/ui/primitives/Switch.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import RoomChecklist from '../RoomChecklist.svelte';
 
   interface Props {
     open?: boolean;
     fromRoomId: string;
-    onForward: (toRoomIds: string[]) => void;
+    metadataLocked?: boolean;
+    onForward: (toRoomIds: string[], includeMetadata: boolean) => void;
   }
 
-  let { open = $bindable(false), fromRoomId, onForward }: Props = $props();
+  let { open = $bindable(false), fromRoomId, metadataLocked = false, onForward }: Props = $props();
   const roomList = useRoomList();
   let search = $state('');
+  let includeMetadata = $state(true);
+
   let selected = $state.raw<string[]>([]);
   const fieldId = $props.id();
 
@@ -24,9 +28,7 @@
         (room) =>
           room.state === 'joined' && room.room_kind !== 'space' && room.room_id !== fromRoomId
       )
-      .filter((room) =>
-        (room.name ?? room.room_id).toLowerCase().includes(search.trim().toLowerCase())
-      )
+      .filter((room) => room.display_name.toLowerCase().includes(search.trim().toLowerCase()))
   );
 
   function send(): void {
@@ -35,7 +37,7 @@
     open = false;
     search = '';
     selected = [];
-    onForward(rooms);
+    onForward(rooms, metadataLocked || includeMetadata);
   }
 
   function cancel(): void {
@@ -55,14 +57,26 @@
       aria-label={i18n.t('common.searchRooms')}
     />
     {#if targets.length === 0}
-      <p class="empty">{i18n.t('common.noRoomsMatchThatSearch')}</p>
+      <p class="empty">{i18n.t('common.noRoomsMatch')}</p>
     {:else}
       <RoomChecklist
         class="targets"
         rooms={targets}
         bind:selected
-        label={(room) => room.name ?? room.room_id}
+        label={(room) => room.display_name}
       />
+    {/if}
+
+    <div class="metadata">
+      <span>{i18n.t('timeline.forwardIncludeMetadata')}</span>
+      <Switch
+        bind:checked={includeMetadata}
+        disabled={metadataLocked}
+        label={i18n.t('timeline.forwardIncludeMetadata')}
+      />
+    </div>
+    {#if metadataLocked}
+      <p class="empty">{i18n.t('timeline.forwardMetadataPreserved')}</p>
     {/if}
 
     <div class="actions">
@@ -96,6 +110,13 @@
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
     margin: 0;
+  }
+
+  .metadata {
+    align-items: center;
+    display: flex;
+    gap: var(--space-300);
+    justify-content: space-between;
   }
 
   .actions {

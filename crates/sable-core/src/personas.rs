@@ -1,7 +1,7 @@
-use crate::api::personas::DisableRoomParams;
 use crate::api::personas::ReorderParams;
 use crate::api::personas::SaveParams;
 use crate::api::personas::SetSelectionParams;
+use crate::api::personas::{AccountRoomParams, DisableRoomParams};
 use std::collections::{BTreeMap, BTreeSet};
 
 use matrix_sdk::Room;
@@ -20,9 +20,10 @@ use serde_with::{DefaultOnError, MapSkipError, VecSkipError, serde_as};
 use crate::Core;
 use crate::ResultExt;
 use crate::profiles::pronoun_sets;
+use crate::protocol::PersonaAlternateAvatarView;
 use crate::protocol::{
-    PerMessageProfileView, PersonaCatalogView, PersonaSelectionView, PersonaTriggerView,
-    PersonaView, PluralkitImportView, PronounView, RpcError,
+    PerMessageProfileView, PersonaCatalogView, PersonaSelectionView, PersonaSortFlagsView,
+    PersonaTriggerView, PersonaView, PluralkitImportView, PronounView, RpcCode, RpcError,
 };
 
 const CATALOG_V3: &str = "fi.mau.msc4461.per_message_profiles.v3";
@@ -30,6 +31,14 @@ const CATALOG_V2: &str = "fi.mau.msc4461.per_message_profiles.v2";
 const SELECTION_PREFIX: &str = "fyi.cisnt.permessageprofile";
 
 pub(crate) const PER_MESSAGE_PROFILE: &str = "com.beeper.per_message_profile";
+
+pub(crate) fn is_persona_event(event_type: &str) -> bool {
+    event_type == CATALOG_V3
+        || event_type == CATALOG_V2
+        || event_type
+            .strip_prefix(SELECTION_PREFIX)
+            .is_some_and(|scope| scope.starts_with('.'))
+}
 
 fn selection_event(scope: &str) -> GlobalAccountDataEventType {
     GlobalAccountDataEventType::from(format!("{SELECTION_PREFIX}.{scope}"))
@@ -47,6 +56,9 @@ struct TriggerIn {
     #[serde_as(deserialize_as = "DefaultOnError")]
     #[serde(default)]
     keep_trigger: Option<bool>,
+    #[serde_as(as = "NonBlankVerbatim")]
+    #[serde(default, rename = "net.f0rest.alternate_avatar_id")]
+    alternate_avatar_id: Option<String>,
 }
 
 impl TriggerIn {
@@ -59,6 +71,7 @@ impl TriggerIn {
             prefix: self.prefix,
             suffix: self.suffix,
             keep_trigger: self.keep_trigger.unwrap_or(false),
+            alternate_avatar_id: self.alternate_avatar_id,
         })
     }
 }
@@ -87,6 +100,7 @@ impl TriggerV2In {
                 prefix: trigger.prefix,
                 suffix: trigger.suffix,
                 keep_trigger: false,
+                alternate_avatar_id: None,
             });
         let prefixes = self
             .prefix
@@ -96,6 +110,7 @@ impl TriggerV2In {
                 prefix: Some(prefix),
                 suffix: None,
                 keep_trigger: false,
+                alternate_avatar_id: None,
             });
         let suffixes = self
             .suffix
@@ -105,6 +120,7 @@ impl TriggerV2In {
                 prefix: None,
                 suffix: Some(suffix),
                 keep_trigger: false,
+                alternate_avatar_id: None,
             });
 
         circumfixes.chain(prefixes).chain(suffixes).collect()
@@ -152,6 +168,42 @@ impl PluralkitIn {
 
 #[serde_as]
 #[derive(Deserialize)]
+struct AlternateAvatarIn {
+    #[serde_as(as = "NonBlank")]
+    #[serde(default)]
+    id: Option<String>,
+    #[serde_as(as = "NonBlank")]
+    #[serde(default)]
+    avatar_url: Option<String>,
+}
+
+impl AlternateAvatarIn {
+    fn into_view(self) -> Option<PersonaAlternateAvatarView> {
+        Some(PersonaAlternateAvatarView {
+            id: self.id?,
+            avatar_url: self.avatar_url?,
+        })
+    }
+}
+
+#[serde_as]
+#[derive(Deserialize)]
+struct SortFlagsIn {
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default)]
+    hidden: Option<bool>,
+}
+
+impl SortFlagsIn {
+    fn into_view(self) -> Option<PersonaSortFlagsView> {
+        Some(PersonaSortFlagsView {
+            hidden: self.hidden?,
+        })
+    }
+}
+
+#[serde_as]
+#[derive(Deserialize)]
 struct PersonaIn {
     #[serde_as(as = "NonBlank")]
     #[serde(default)]
@@ -179,6 +231,26 @@ struct PersonaIn {
     #[serde_as(deserialize_as = "DefaultOnError")]
     #[serde(default, rename = "net.f0rest.last_used")]
     last_used: Option<u64>,
+    #[serde(default, rename = "net.f0rest.alternate_avatars")]
+    alternate_avatars: Option<Vec<AlternateAvatarIn>>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default, rename = "net.f0rest.biography")]
+    biography: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default, rename = "net.f0rest.banner_url")]
+    banner_url: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default, rename = "net.f0rest.is_animal")]
+    pub is_animal: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default, rename = "net.f0rest.has_animal")]
+    pub has_animal: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default, rename = "net.f0rest.animal_need")]
+    pub animal_need: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default, rename = "net.f0rest.sort_flags")]
+    pub sort_flags: Option<SortFlagsIn>,
 }
 
 impl PersonaIn {
@@ -192,6 +264,13 @@ impl PersonaIn {
             None => self.trigger.map_or_else(Vec::new, TriggerV2In::into_views),
         };
 
+        let alternate_avatars = self.alternate_avatars.map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(AlternateAvatarIn::into_view)
+                .collect()
+        });
+
         Some(PersonaView {
             id: self.id?,
             display_name: self.displayname?,
@@ -202,6 +281,13 @@ impl PersonaIn {
             triggers,
             pluralkit: self.pluralkit.and_then(PluralkitIn::into_view),
             last_used: self.last_used,
+            alternate_avatars,
+            biography: self.biography,
+            banner_url: self.banner_url,
+            is_animal: self.is_animal,
+            has_animal: self.has_animal,
+            animal_need: self.animal_need,
+            sort_flags: self.sort_flags.and_then(SortFlagsIn::into_view),
         })
     }
 }
@@ -228,12 +314,26 @@ fn personas_from_catalog(content: &Value) -> Vec<PersonaView> {
         .and_then(|catalog| catalog.profiles)
         .or_else(|| Wrapped::deserialize(content).ok()?.content?.profiles);
 
-    let mut seen = BTreeSet::new();
-    profiles
+    let personas: Vec<_> = profiles
         .into_iter()
         .flatten()
         .filter_map(PersonaIn::into_view)
-        .filter(|persona| seen.insert(persona.id.clone()))
+        .collect();
+    let mut taken: BTreeSet<_> = personas.iter().map(|persona| persona.id.clone()).collect();
+    let mut seen = BTreeSet::new();
+    personas
+        .into_iter()
+        .map(|mut persona| {
+            if !seen.insert(persona.id.clone()) {
+                let mut n = 2;
+                while taken.contains(&format!("{}-{n}", persona.id)) {
+                    n += 1;
+                }
+                persona.id = format!("{}-{n}", persona.id);
+                taken.insert(persona.id.clone());
+            }
+            persona
+        })
         .collect()
 }
 
@@ -273,13 +373,63 @@ struct LookOut {
     pronouns: Vec<PronounOut>,
     #[serde(rename = "eu.she-a.color", skip_serializing_if = "Option::is_none")]
     colors: Option<ColorsOut>,
+    #[serde(
+        rename = "net.f0rest.biography",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub biography: Option<String>,
+    #[serde(
+        rename = "net.f0rest.banner_url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub banner_url: Option<String>,
+    #[serde(
+        rename = "net.f0rest.is_animal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub is_animal: Option<String>,
+    #[serde(
+        rename = "net.f0rest.has_animal",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub has_animal: Option<String>,
+    #[serde(
+        rename = "net.f0rest.animal_need",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub animal_need: Option<String>,
 }
 
-impl LookOut {
-    fn new(pronouns: &[PronounView], on_light: Option<&str>, on_dark: Option<&str>) -> Self {
+impl From<&PersonaView> for LookOut {
+    fn from(persona: &PersonaView) -> Self {
         Self {
-            pronouns: pronouns.iter().map(Into::into).collect(),
-            colors: ColorsOut::new(on_light.map(str::to_owned), on_dark.map(str::to_owned)),
+            pronouns: persona.pronouns.iter().map(Into::into).collect(),
+            colors: ColorsOut::new(
+                persona.color_on_light.clone(),
+                persona.color_on_dark.clone(),
+            ),
+            biography: persona.biography.clone(),
+            banner_url: persona.banner_url.clone(),
+            is_animal: persona.is_animal.clone(),
+            has_animal: persona.has_animal.clone(),
+            animal_need: persona.animal_need.clone(),
+        }
+    }
+}
+
+impl From<&PerMessageProfileView> for LookOut {
+    fn from(profile: &PerMessageProfileView) -> Self {
+        Self {
+            pronouns: profile.pronouns.iter().map(Into::into).collect(),
+            colors: ColorsOut::new(
+                profile.color_on_light.clone(),
+                profile.color_on_dark.clone(),
+            ),
+            biography: profile.biography.clone(),
+            banner_url: profile.banner_url.clone(),
+            is_animal: profile.is_animal.clone(),
+            has_animal: profile.has_animal.clone(),
+            animal_need: profile.animal_need.clone(),
         }
     }
 }
@@ -314,6 +464,11 @@ struct TriggerOut {
     suffix: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     keep_trigger: bool,
+    #[serde(
+        rename = "net.f0rest.alternate_avatar_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    alternate_avatar_id: Option<String>,
 }
 
 impl From<&PersonaTriggerView> for TriggerOut {
@@ -322,6 +477,36 @@ impl From<&PersonaTriggerView> for TriggerOut {
             prefix: trigger.prefix.clone(),
             suffix: trigger.suffix.clone(),
             keep_trigger: trigger.keep_trigger,
+            alternate_avatar_id: trigger.alternate_avatar_id.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AlternateAvatarOut {
+    id: String,
+    avatar_url: String,
+}
+
+impl From<&PersonaAlternateAvatarView> for AlternateAvatarOut {
+    fn from(avatar: &PersonaAlternateAvatarView) -> Self {
+        Self {
+            id: avatar.id.clone(),
+            avatar_url: avatar.avatar_url.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SortFlagsOut {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    hidden: bool,
+}
+
+impl From<&PersonaSortFlagsView> for SortFlagsOut {
+    fn from(sort_flags: &PersonaSortFlagsView) -> Self {
+        Self {
+            hidden: sort_flags.hidden,
         }
     }
 }
@@ -345,6 +530,16 @@ struct PersonaOut {
         skip_serializing_if = "Option::is_none"
     )]
     last_used: Option<u64>,
+    #[serde(
+        rename = "net.f0rest.alternate_avatars",
+        skip_serializing_if = "Option::is_none"
+    )]
+    alternate_avatars: Option<Vec<AlternateAvatarOut>>,
+    #[serde(
+        rename = "net.f0rest.sort_flags",
+        skip_serializing_if = "Option::is_none"
+    )]
+    sort_flags: Option<SortFlagsOut>,
 }
 
 impl From<&PersonaView> for PersonaOut {
@@ -353,14 +548,15 @@ impl From<&PersonaView> for PersonaOut {
             id: persona.id.clone(),
             displayname: persona.display_name.clone(),
             avatar_url: persona.avatar_url.clone(),
-            look: LookOut::new(
-                &persona.pronouns,
-                persona.color_on_light.as_deref(),
-                persona.color_on_dark.as_deref(),
-            ),
+            look: persona.into(),
             pluralkit: persona.pluralkit.as_ref().map(Into::into),
             triggers: persona.triggers.iter().map(Into::into).collect(),
             last_used: persona.last_used,
+            alternate_avatars: persona
+                .alternate_avatars
+                .as_ref()
+                .map(|vec| vec.iter().map(Into::into).collect()),
+            sort_flags: persona.sort_flags.as_ref().map(Into::into),
         }
     }
 }
@@ -380,6 +576,9 @@ struct SelectionIn {
     #[serde_as(deserialize_as = "DefaultOnError")]
     #[serde(default)]
     valid_until: Option<u64>,
+    #[serde_as(as = "NonBlank")]
+    #[serde(default)]
+    alternate_avatar_id: Option<String>,
 }
 
 impl SelectionIn {
@@ -387,6 +586,7 @@ impl SelectionIn {
         Some(PersonaSelectionView {
             persona_id: self.profile_id?,
             valid_until: self.valid_until,
+            alternate_avatar_id: self.alternate_avatar_id,
         })
     }
 }
@@ -397,6 +597,8 @@ struct SelectionOut {
     profile_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     valid_until: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alternate_avatar_id: Option<String>,
 }
 
 impl From<&PersonaSelectionView> for SelectionOut {
@@ -404,6 +606,7 @@ impl From<&PersonaSelectionView> for SelectionOut {
         Self {
             profile_id: selection.persona_id.clone(),
             valid_until: selection.valid_until,
+            alternate_avatar_id: selection.alternate_avatar_id.clone(),
         }
     }
 }
@@ -425,6 +628,8 @@ struct AccountSelectionOut {
 #[derive(Debug, Clone)]
 enum RoomAssociation {
     Persona(PersonaSelectionView),
+    /// Sends as the account, while typed triggers still pick a persona.
+    Account,
     Disabled,
 }
 
@@ -432,6 +637,7 @@ impl Serialize for RoomAssociation {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Persona(selection) => SelectionOut::from(selection).serialize(serializer),
+            Self::Account => serializer.serialize_bool(true),
             Self::Disabled => serializer.serialize_bool(false),
         }
     }
@@ -448,7 +654,7 @@ impl AssociationIn {
     fn into_association(self) -> Option<RoomAssociation> {
         match self {
             Self::Off(false) => Some(RoomAssociation::Disabled),
-            Self::Off(true) => None,
+            Self::Off(true) => Some(RoomAssociation::Account),
             Self::Persona(selection) => selection.into_view().map(RoomAssociation::Persona),
         }
     }
@@ -521,11 +727,7 @@ pub(crate) fn profile_value(profile: &PerMessageProfileView) -> Value {
             .filter(|name| !name.is_empty())
             .map(clamp_field),
         avatar_url: profile.avatar_url.clone(),
-        look: LookOut::new(
-            &profile.pronouns,
-            profile.color_on_light.as_deref(),
-            profile.color_on_dark.as_deref(),
-        ),
+        look: profile.into(),
         has_fallback: profile.has_fallback,
     };
     // Strings, bools and lists of them always serialize.
@@ -647,19 +849,139 @@ fn catalog_from_backup(backup: &str) -> Option<Value> {
         .then(|| catalog.clone())
 }
 
+#[cfg(not(target_family = "wasm"))]
+async fn space_associations(
+    client: &matrix_sdk::Client,
+    room_id: &matrix_sdk::ruma::RoomId,
+    associations: &BTreeMap<String, RoomAssociation>,
+) -> Vec<RoomAssociation> {
+    let mut rooms = vec![room_id.to_owned()];
+    let mut seen = BTreeSet::new();
+    let mut selections = Vec::new();
+    for _ in 0..=4 {
+        let mut parents = Vec::new();
+        for room in rooms {
+            if !seen.insert(room.clone()) {
+                continue;
+            }
+            if let Some(association) = associations.get(room.as_str()) {
+                selections.push(association.clone());
+            }
+            parents.extend(crate::view::listing_spaces(None, client, &room).await);
+        }
+        rooms = parents;
+        if rooms.is_empty() {
+            break;
+        }
+    }
+    selections
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn notification_profile(
+    client: &matrix_sdk::Client,
+    room_id: &matrix_sdk::ruma::RoomId,
+) -> matrix_sdk::Result<Option<PerMessageProfileView>> {
+    async fn data(
+        client: &matrix_sdk::Client,
+        event_type: GlobalAccountDataEventType,
+    ) -> matrix_sdk::Result<Option<Value>> {
+        client
+            .account()
+            .fetch_account_data(event_type)
+            .await?
+            .map(|raw| raw.deserialize_as::<Value>().map_err(Into::into))
+            .transpose()
+    }
+    let associations = data(client, selection_event("roomassociation"))
+        .await?
+        .as_ref()
+        .map(room_associations)
+        .unwrap_or_default();
+    if matches!(
+        associations.get(room_id.as_str()),
+        Some(RoomAssociation::Account | RoomAssociation::Disabled)
+    ) {
+        return Ok(None);
+    }
+    let account = data(client, selection_event("globalassociation"))
+        .await?
+        .as_ref()
+        .and_then(|content| {
+            AccountSelectionIn::deserialize(content)
+                .ok()?
+                .association?
+                .into_view()
+        });
+    let catalog = match data(client, CATALOG_V3.into()).await? {
+        Some(catalog) => Some(catalog),
+        None => data(client, CATALOG_V2.into()).await?,
+    };
+    let personas = catalog
+        .as_ref()
+        .map(personas_from_catalog)
+        .unwrap_or_default();
+    let mut selections = space_associations(client, room_id, &associations).await;
+    selections.extend(account.map(RoomAssociation::Persona));
+    let now = crate::now_ms();
+    for association in selections {
+        let selection = match association {
+            RoomAssociation::Account | RoomAssociation::Disabled => return Ok(None),
+            RoomAssociation::Persona(selection) => selection,
+        };
+        if selection.valid_until.is_some_and(|until| until <= now) {
+            continue;
+        }
+        if let Some(persona) = personas
+            .iter()
+            .find(|profile| profile.id == selection.persona_id)
+        {
+            let avatar_url = selection
+                .alternate_avatar_id
+                .as_ref()
+                .and_then(|id| {
+                    persona
+                        .alternate_avatars
+                        .as_ref()?
+                        .iter()
+                        .find(|avatar| &avatar.id == id)
+                })
+                .map_or_else(
+                    || persona.avatar_url.clone(),
+                    |avatar| Some(avatar.avatar_url.clone()),
+                );
+            return Ok(Some(PerMessageProfileView {
+                id: Some(persona.id.clone()),
+                display_name: sable_model::text::visible_name(persona.display_name.clone()),
+                avatar_url,
+                pronouns: persona.pronouns.clone(),
+                color_on_light: persona.color_on_light.clone(),
+                color_on_dark: persona.color_on_dark.clone(),
+                has_fallback: false,
+                biography: None,
+                banner_url: None,
+                is_animal: None,
+                has_animal: None,
+                animal_need: None,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 impl Core {
-    pub(crate) async fn edit_local_with_persona(
+    pub(crate) async fn edit_local_message(
         &self,
         room: &Room,
         transaction_id: &TransactionId,
         message: RoomMessageEventContentWithoutRelation,
-        profile: &PerMessageProfileView,
+        profile: Option<&PerMessageProfileView>,
     ) -> Result<bool, RpcError> {
         let (echoes, _updates) = room
             .send_queue()
             .subscribe()
             .await
-            .or_failed(self, "edit_local_with_persona")?;
+            .or_failed(self, "edit_local_message")?;
 
         let Some((serialized, handle)) = echoes.into_iter().find_map(|echo| {
             if echo.transaction_id != *transaction_id {
@@ -681,24 +1003,31 @@ impl Core {
             .raw()
             .0
             .deserialize_as_unchecked::<Value>()
-            .or_failed(self, "edit_local_with_persona")?;
-        let mut value =
-            serde_json::to_value(&message).or_failed(self, "edit_local_with_persona")?;
-        if let Some(object) = value.as_object_mut()
-            && let Some(relation) = previous.get("m.relates_to")
-        {
-            object.insert("m.relates_to".to_owned(), relation.clone());
+            .or_failed(self, "edit_local_message")?;
+        let mut value = serde_json::to_value(&message).or_failed(self, "edit_local_message")?;
+        if let Some(object) = value.as_object_mut() {
+            for key in [
+                "m.relates_to",
+                crate::link_previews::BUNDLED_LINK_PREVIEWS,
+                crate::link_previews::LEGACY_BUNDLED_LINK_PREVIEWS,
+            ] {
+                if let Some(retained) = previous.get(key) {
+                    object.insert(key.to_owned(), retained.clone());
+                }
+            }
         }
-        stamp_profile(&mut value, profile);
+        if let Some(profile) = profile {
+            stamp_profile(&mut value, profile);
+        }
         ensure_empty_mentions(&mut value);
 
         let raw = Raw::<AnyMessageLikeEventContent>::from_json_string(value.to_string())
-            .or_failed(self, "edit_local_with_persona")?;
+            .or_failed(self, "edit_local_message")?;
 
         handle
             .edit_raw(raw, "m.room.message".to_owned())
             .await
-            .or_failed(self, "edit_local_with_persona")
+            .or_failed(self, "edit_local_message")
     }
 
     pub(crate) async fn edit_with_persona(
@@ -747,11 +1076,18 @@ impl Core {
     async fn persona_account_data(
         &self,
         event_type: GlobalAccountDataEventType,
+        fetch: bool,
     ) -> Result<Option<Value>, RpcError> {
-        let Some(raw) = self
-            .global_account_data(event_type, "personas: fetch_account_data")
-            .await?
-        else {
+        let raw = if fetch {
+            self.global_account_data(event_type, "personas: fetch_account_data")
+                .await?
+        } else {
+            let client = self.client().await?;
+            self.with_open_stores(async || client.account().account_data_raw(event_type).await)
+                .await
+                .or_failed(self, "personas: stored_account_data")?
+        };
+        let Some(raw) = raw else {
             return Ok(None);
         };
 
@@ -760,9 +1096,9 @@ impl Core {
             .or_failed(self, "personas_deserialize")
     }
 
-    async fn load_personas(&self) -> Result<Vec<PersonaView>, RpcError> {
+    async fn load_personas(&self, fetch: bool) -> Result<Vec<PersonaView>, RpcError> {
         if let Some(content) = self
-            .persona_account_data(GlobalAccountDataEventType::from(CATALOG_V3))
+            .persona_account_data(GlobalAccountDataEventType::from(CATALOG_V3), fetch)
             .await?
             && content.get("profiles").is_some()
         {
@@ -770,14 +1106,14 @@ impl Core {
         }
 
         let Some(content) = self
-            .persona_account_data(GlobalAccountDataEventType::from(CATALOG_V2))
+            .persona_account_data(GlobalAccountDataEventType::from(CATALOG_V2), fetch)
             .await?
         else {
             return Ok(Vec::new());
         };
 
         let personas = personas_from_catalog(&content);
-        if personas.is_empty() {
+        if personas.is_empty() || !fetch {
             return Ok(personas);
         }
 
@@ -788,7 +1124,7 @@ impl Core {
     /// A backup file is the v3 catalog event wrapped under its own type.
     pub(crate) async fn persona_backup(&self) -> Result<String, RpcError> {
         let content = self
-            .persona_account_data(GlobalAccountDataEventType::from(CATALOG_V3))
+            .persona_account_data(GlobalAccountDataEventType::from(CATALOG_V3), true)
             .await?;
         serde_json::to_string_pretty(&json!({ CATALOG_V3: content }))
             .or_failed(self, "persona_backup")
@@ -797,11 +1133,12 @@ impl Core {
     pub(crate) fn check_persona_backup(backup: &str) -> Result<(), RpcError> {
         catalog_from_backup(backup)
             .map(drop)
-            .ok_or(RpcError::InvalidBackup)
+            .ok_or_else(|| RpcCode::InvalidBackup.into())
     }
 
     pub(crate) async fn restore_persona_backup(&self, backup: &str) -> Result<(), RpcError> {
-        let catalog = catalog_from_backup(backup).ok_or(RpcError::InvalidBackup)?;
+        let _guard = self.account_data_lock.lock().await;
+        let catalog = catalog_from_backup(backup).ok_or(RpcCode::InvalidBackup)?;
         self.put_global_account_data(
             GlobalAccountDataEventType::from(CATALOG_V3),
             &catalog,
@@ -821,9 +1158,12 @@ impl Core {
         .await
     }
 
-    async fn account_selection(&self) -> Result<Option<PersonaSelectionView>, RpcError> {
+    async fn account_selection(
+        &self,
+        fetch: bool,
+    ) -> Result<Option<PersonaSelectionView>, RpcError> {
         Ok(self
-            .persona_account_data(selection_event("globalassociation"))
+            .persona_account_data(selection_event("globalassociation"), fetch)
             .await?
             .as_ref()
             .and_then(|content| {
@@ -834,49 +1174,73 @@ impl Core {
             }))
     }
 
-    async fn room_selections(&self) -> Result<BTreeMap<String, RoomAssociation>, RpcError> {
+    async fn room_selections(
+        &self,
+        fetch: bool,
+    ) -> Result<BTreeMap<String, RoomAssociation>, RpcError> {
         Ok(self
-            .persona_account_data(selection_event("roomassociation"))
+            .persona_account_data(selection_event("roomassociation"), fetch)
             .await?
             .as_ref()
             .map(room_associations)
             .unwrap_or_default())
     }
 
-    pub(crate) async fn personas(&self) -> Result<PersonaCatalogView, RpcError> {
+    async fn catalog_view(&self, fetch: bool) -> Result<PersonaCatalogView, RpcError> {
         let mut rooms = BTreeMap::new();
+        let mut account_rooms = Vec::new();
         let mut disabled_rooms = Vec::new();
-        for (room_id, association) in self.room_selections().await? {
+        for (room_id, association) in self.room_selections(fetch).await? {
             match association {
                 RoomAssociation::Persona(selection) => {
                     rooms.insert(room_id, selection);
                 }
+                RoomAssociation::Account => account_rooms.push(room_id),
                 RoomAssociation::Disabled => disabled_rooms.push(room_id),
             }
         }
 
         Ok(PersonaCatalogView {
-            personas: self.load_personas().await?,
-            account: self.account_selection().await?,
+            personas: self.load_personas(fetch).await?,
+            account: self.account_selection(fetch).await?,
             rooms,
+            account_rooms,
             disabled_rooms,
         })
+    }
+
+    pub(crate) async fn personas(&self) -> Result<PersonaCatalogView, RpcError> {
+        let _guard = self.account_data_lock.lock().await;
+        match self.catalog_view(true).await {
+            Ok(catalog) => Ok(catalog),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "using the stored persona catalog after a fetch failed"
+                );
+                self.catalog_view(false).await
+            }
+        }
     }
 
     pub(crate) async fn save_persona(
         &self,
         SaveParams {
             persona,
+            base_persona,
             previous_id,
         }: SaveParams,
     ) -> Result<Vec<PersonaView>, RpcError> {
         let _guard = self.account_data_lock.lock().await;
         let replaced = previous_id.unwrap_or_else(|| persona.id.clone());
-        let mut personas = self.load_personas().await?;
+        let mut personas = self.load_personas(true).await?;
 
         personas.retain(|existing| existing.id != persona.id || existing.id == replaced);
         match personas.iter_mut().find(|existing| existing.id == replaced) {
-            Some(existing) => *existing = persona.clone(),
+            Some(existing) => {
+                merge_persona(existing, &base_persona, &persona);
+                existing.id.clone_from(&persona.id);
+            }
             None => personas.push(persona.clone()),
         }
 
@@ -891,7 +1255,7 @@ impl Core {
 
     pub(crate) async fn remove_persona(&self, id: &str) -> Result<Vec<PersonaView>, RpcError> {
         let _guard = self.account_data_lock.lock().await;
-        let mut personas = self.load_personas().await?;
+        let mut personas = self.load_personas(true).await?;
         personas.retain(|persona| persona.id != id);
 
         self.save_personas(&personas).await?;
@@ -905,7 +1269,7 @@ impl Core {
         ReorderParams { ids }: ReorderParams,
     ) -> Result<Vec<PersonaView>, RpcError> {
         let _guard = self.account_data_lock.lock().await;
-        let personas = self.load_personas().await?;
+        let personas = self.load_personas(true).await?;
         let mut reordered = Vec::with_capacity(personas.len());
         for id in ids {
             if let Some(persona) = personas.iter().find(|persona| persona.id == id)
@@ -926,11 +1290,12 @@ impl Core {
     }
 
     async fn repoint_selections(&self, from: &str, to: Option<&str>) -> Result<(), RpcError> {
-        if let Some(account) = self.account_selection().await?
+        if let Some(account) = self.account_selection(true).await?
             && account.persona_id == from
         {
             let selection = to.map(|id| PersonaSelectionView {
                 persona_id: id.to_owned(),
+                alternate_avatar_id: account.alternate_avatar_id,
                 valid_until: account.valid_until,
             });
             self.put_global_account_data(
@@ -943,7 +1308,7 @@ impl Core {
             .await?;
         }
 
-        let mut rooms = self.room_selections().await?;
+        let mut rooms = self.room_selections(true).await?;
         let affected: Vec<String> = rooms
             .iter()
             .filter(|(_, association)| {
@@ -991,11 +1356,13 @@ impl Core {
             room_id,
             persona_id,
             valid_until,
+            alternate_avatar_id,
         }: SetSelectionParams,
     ) -> Result<(), RpcError> {
         let _guard = self.account_data_lock.lock().await;
         let selection = persona_id.map(|persona_id| PersonaSelectionView {
             persona_id,
+            alternate_avatar_id,
             valid_until,
         });
 
@@ -1011,7 +1378,7 @@ impl Core {
                 .await;
         };
 
-        let mut rooms = self.room_selections().await?;
+        let mut rooms = self.room_selections(true).await?;
         match selection {
             Some(selection) => {
                 rooms.insert(room_id.to_string(), RoomAssociation::Persona(selection));
@@ -1029,9 +1396,37 @@ impl Core {
         DisableRoomParams { room_id }: DisableRoomParams,
     ) -> Result<(), RpcError> {
         let _guard = self.account_data_lock.lock().await;
-        let mut rooms = self.room_selections().await?;
+        let mut rooms = self.room_selections(true).await?;
         rooms.insert(room_id.to_string(), RoomAssociation::Disabled);
         self.write_room_selections(rooms).await
+    }
+
+    pub(crate) async fn account_room_personas(
+        &self,
+        AccountRoomParams { room_id }: AccountRoomParams,
+    ) -> Result<(), RpcError> {
+        let _guard = self.account_data_lock.lock().await;
+        let mut rooms = self.room_selections(true).await?;
+        rooms.insert(room_id.to_string(), RoomAssociation::Account);
+        self.write_room_selections(rooms).await
+    }
+}
+
+fn merge_persona(current: &mut PersonaView, base: &PersonaView, incoming: &PersonaView) {
+    let (Ok(Value::Object(base)), Ok(Value::Object(incoming)), Ok(Value::Object(mut merged))) = (
+        serde_json::to_value(base),
+        serde_json::to_value(incoming),
+        serde_json::to_value(&*current),
+    ) else {
+        return;
+    };
+    for (field, value) in incoming {
+        if base.get(&field) != Some(&value) {
+            merged.insert(field, value);
+        }
+    }
+    if let Ok(persona) = serde_json::from_value(Value::Object(merged)) {
+        *current = persona;
     }
 }
 
@@ -1076,6 +1471,18 @@ mod tests {
             .expect("a persona")
     }
 
+    #[test]
+    fn persona_catalog_and_selection_events_are_persona_events() {
+        assert!(super::is_persona_event(
+            "fi.mau.msc4461.per_message_profiles.v3"
+        ));
+        assert!(super::is_persona_event(
+            "fyi.cisnt.permessageprofile.roomassociation"
+        ));
+        assert!(!super::is_persona_event("fyi.cisnt.permessageprofileother"));
+        assert!(!super::is_persona_event("m.direct"));
+    }
+
     fn profile(display_name: &str, has_fallback: bool) -> PerMessageProfileView {
         PerMessageProfileView {
             id: Some("kris".to_owned()),
@@ -1085,6 +1492,11 @@ mod tests {
             color_on_light: None,
             color_on_dark: None,
             has_fallback,
+            biography: None,
+            banner_url: None,
+            is_animal: None,
+            has_animal: None,
+            animal_need: None,
         }
     }
 
@@ -1130,6 +1542,25 @@ mod tests {
                     "!kris:example.org": { "profileId": "kris", "validUntil": 20 },
                 }
             })
+        );
+    }
+
+    #[test]
+    fn a_room_sending_as_the_account_round_trips_as_true() {
+        let content = json!({ "associations": { "!plain:example.org": true } });
+
+        let rooms = room_associations(&content);
+
+        assert!(matches!(
+            rooms.get("!plain:example.org"),
+            Some(RoomAssociation::Account)
+        ));
+        assert_eq!(
+            serde_json::to_value(RoomAssociationsOut {
+                associations: rooms
+            })
+            .expect("serializable"),
+            content
         );
     }
 
@@ -1274,19 +1705,26 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_id_keeps_its_first_entry() {
+    fn a_repeated_id_is_kept_under_a_free_id() {
         let catalog = json!({
             "profiles": [
                 { "id": "kris", "displayname": "Kris" },
-                { "id": "sam", "displayname": "Sam" },
+                { "id": "kris-2", "displayname": "Sam" },
                 { "id": "kris", "displayname": "Other Kris" },
             ],
         });
-        let names: Vec<_> = personas_from_catalog(&catalog)
+        let ids: Vec<_> = personas_from_catalog(&catalog)
             .into_iter()
-            .map(|persona| persona.display_name)
+            .map(|persona| (persona.id, persona.display_name))
             .collect();
-        assert_eq!(names, vec!["Kris", "Sam"]);
+        assert_eq!(
+            ids,
+            vec![
+                ("kris".to_owned(), "Kris".to_owned()),
+                ("kris-2".to_owned(), "Sam".to_owned()),
+                ("kris-3".to_owned(), "Other Kris".to_owned()),
+            ]
+        );
     }
 
     #[test]
@@ -1447,5 +1885,48 @@ mod tests {
             display_name: None,
             ..profile("Kris", true)
         }
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_server_serves_the_stored_catalog() {
+        use crate::{Core, session::Session, store::MemorySessionStore};
+        use matrix_sdk::test_utils::mocks::MatrixMockServer;
+        use matrix_sdk_ui::sync_service::SyncService;
+        use std::sync::Arc;
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path_regex},
+        };
+
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        server
+            .mock_sync()
+            .ok_and_run(&client, |builder| {
+                builder.add_custom_global_account_data(json!({
+                    "type": super::CATALOG_V3,
+                    "content": { "profiles": [{ "id": "kris", "displayname": "Kris" }] }
+                }));
+            })
+            .await;
+        let (core, _events) =
+            Core::new("offline-personas", Box::new(MemorySessionStore::default()));
+        *core.session.write().await = Some(Session {
+            account_id: "test".into(),
+            client: client.clone(),
+            sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
+            homeserver: server.server().uri(),
+            oauth: false,
+        });
+        let _unreachable = Mock::given(method("GET"))
+            .and(path_regex("/account_data/"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount_as_scoped(server.server())
+            .await;
+
+        let catalog = core.personas().await.unwrap();
+
+        assert_eq!(catalog.personas.len(), 1);
+        assert_eq!(catalog.personas[0].id, "kris");
     }
 }

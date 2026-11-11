@@ -1,9 +1,6 @@
 import { on } from 'svelte/events';
 import { createSubscriber } from 'svelte/reactivity';
 
-import { watchWindowFocus } from './window-decorations.js';
-
-let nativeFocused: boolean | null = null;
 let pageShown = true;
 let wasActive = true;
 let inactiveSince = 0;
@@ -12,9 +9,7 @@ const RESUME_GRACE_MS = 8000;
 const MIN_INACTIVE_MS = 30000;
 
 function isActive(): boolean {
-  return (
-    pageShown && document.visibilityState === 'visible' && (nativeFocused ?? document.hasFocus())
-  );
+  return pageShown && document.visibilityState === 'visible' && document.hasFocus();
 }
 
 function noteActivity(): void {
@@ -31,22 +26,6 @@ const subscribe = createSubscriber((notify) => {
     noteActivity();
     notify();
   };
-  let stopped = false;
-  let unlisten = (): void => {};
-  void watchWindowFocus((focused) => {
-    if (stopped) return;
-    nativeFocused = focused;
-    update();
-  })
-    .then((stop) => {
-      if (stopped) stop();
-      else unlisten = stop;
-    })
-    .catch(() => {
-      if (stopped) return;
-      nativeFocused = null;
-      update();
-    });
   const hide = () => {
     pageShown = false;
     update();
@@ -65,10 +44,44 @@ const subscribe = createSubscriber((notify) => {
     on(document, 'resume', show),
   ];
   return () => {
-    stopped = true;
-    unlisten();
-    nativeFocused = null;
     pageShown = true;
+    for (const off of offs) off();
+  };
+});
+
+const IDLE_AFTER_MS = 5 * 60_000;
+let idle = false;
+let lastInputAt = 0;
+
+const subscribeIdle = createSubscriber((notify) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const check = (): void => {
+    const quiet = performance.now() - lastInputAt;
+    if (quiet < IDLE_AFTER_MS) {
+      timer = setTimeout(check, IDLE_AFTER_MS - quiet);
+      return;
+    }
+    idle = true;
+    notify();
+  };
+  const input = (): void => {
+    lastInputAt = performance.now();
+    if (!idle) return;
+    idle = false;
+    notify();
+    timer = setTimeout(check, IDLE_AFTER_MS);
+  };
+  lastInputAt = performance.now();
+  timer = setTimeout(check, IDLE_AFTER_MS);
+  const offs = [
+    on(window, 'pointermove', input, { passive: true }),
+    on(window, 'pointerdown', input, { passive: true }),
+    on(window, 'keydown', input, { passive: true }),
+    on(window, 'wheel', input, { passive: true }),
+  ];
+  return () => {
+    clearTimeout(timer);
+    idle = false;
     for (const off of offs) off();
   };
 });
@@ -82,6 +95,11 @@ export const windowActivity = {
   get active(): boolean {
     subscribe();
     return isActive();
+  },
+
+  get idle(): boolean {
+    subscribeIdle();
+    return idle;
   },
 
   get recentlyResumed(): boolean {

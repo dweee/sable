@@ -1,17 +1,30 @@
-import type { PersonaTriggerView, PersonaView, PronounView } from '#src/generated/protocol';
-import { splitDisplayNamePronouns } from './pronouns';
+import * as v from 'valibot';
 
-export interface PluralkitMember {
-  id: string;
-  uuid?: string | null;
-  name: string;
-  display_name?: string | null;
-  color?: string | null;
-  pronouns?: string | null;
-  avatar_url?: string | null;
-  description?: string | null;
-  proxy_tags?: { prefix?: string | null; suffix?: string | null }[] | null;
-}
+import type { PersonaTriggerView, PersonaView, PronounView } from '#src/generated/protocol';
+import { splitPluralkitNamePronouns } from './pronouns';
+
+const OptionalText = v.nullish(v.string());
+const MemberSchema = v.looseObject({
+  id: v.string(),
+  name: v.string(),
+  uuid: OptionalText,
+  display_name: OptionalText,
+  color: OptionalText,
+  pronouns: OptionalText,
+  avatar_url: OptionalText,
+  description: OptionalText,
+  proxy_tags: v.nullish(v.array(v.looseObject({ prefix: OptionalText, suffix: OptionalText }))),
+});
+const MembersSchema = v.array(MemberSchema);
+const ExportSchema = v.union([
+  MembersSchema,
+  v.pipe(
+    v.object({ members: MembersSchema }),
+    v.transform((value) => value.members)
+  ),
+]);
+
+export type PluralkitMember = v.InferOutput<typeof MemberSchema>;
 
 const API = 'https://api.pluralkit.me/v2';
 
@@ -31,27 +44,17 @@ export async function fetchPluralkitMembers(
   });
   if (!response.ok) throw new Error(`pluralkit responded ${String(response.status)}`);
 
-  const members: unknown = await response.json();
-  if (!Array.isArray(members)) throw new Error('pluralkit returned no member list');
-  return members as PluralkitMember[];
-}
-
-function isMember(value: unknown): value is PluralkitMember {
-  if (typeof value !== 'object' || value === null) return false;
-  const { id, name } = value as Record<string, unknown>;
-  return typeof id === 'string' && typeof name === 'string';
+  const result = v.safeParse(MembersSchema, await response.json());
+  if (!result.success) throw new Error('pluralkit returned an invalid member list');
+  return result.output;
 }
 
 export function parsePluralkitExport(text: string): PluralkitMember[] {
-  const parsed: unknown = JSON.parse(text);
-  const members: unknown =
-    typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as { members?: unknown }).members
-      : parsed;
-  if (!Array.isArray(members) || !members.every(isMember)) {
+  const result = v.safeParse(ExportSchema, JSON.parse(text));
+  if (!result.success) {
     throw new Error('not a PluralKit member list');
   }
-  return members;
+  return result.output;
 }
 
 function colors(
@@ -79,6 +82,7 @@ function triggers(tags: PluralkitMember['proxy_tags']): PersonaTriggerView[] {
       prefix: tag.prefix ?? null,
       suffix: tag.suffix ?? null,
       keep_trigger: false,
+      alternate_avatar_id: null,
     }))
     .filter((trigger) => trigger.prefix !== null || trigger.suffix !== null);
 }
@@ -88,33 +92,53 @@ export type PluralkitImportOptions = {
 };
 
 export function personaFromPluralkit(
+  id: string,
   member: PluralkitMember,
   avatarUrl: string | null,
-  options: PluralkitImportOptions = {}
+  options: PluralkitImportOptions = {},
+  existing?: PersonaView
 ): PersonaView {
   let display_name = member.display_name?.trim();
   let pronoun_set = pronouns(member.pronouns);
 
   if (options.extractPronouns && display_name) {
-    const parsed = splitDisplayNamePronouns(display_name);
+    const parsed = splitPluralkitNamePronouns(display_name);
     display_name = parsed.name;
     pronoun_set = parsed.pronouns;
   }
 
   return {
-    id: member.name,
+    id,
     display_name: display_name || member.name,
     avatar_url: avatarUrl,
     pronouns: pronoun_set,
     ...colors(member.color),
-    triggers: triggers(member.proxy_tags),
+    triggers: triggers(member.proxy_tags).map((trigger) => {
+      const kept = existing?.triggers.find(
+        (old) => old.prefix === trigger.prefix && old.suffix === trigger.suffix
+      );
+      return kept
+        ? {
+            ...trigger,
+            keep_trigger: kept.keep_trigger,
+            alternate_avatar_id: kept.alternate_avatar_id,
+          }
+        : trigger;
+    }),
     pluralkit: {
       id: member.id,
       uuid: member.uuid ?? null,
       avatar_url: member.avatar_url ?? null,
-      description: member.description ?? null,
+      description: existing?.pluralkit?.description ?? null,
     },
-    last_used: null,
+    last_used: existing?.last_used ?? null,
+    alternate_avatars: existing?.alternate_avatars ?? null,
+    biography: existing?.biography ?? null,
+    banner_url: existing?.banner_url ?? null,
+    is_animal: existing?.is_animal ?? null,
+    has_animal: existing?.has_animal ?? null,
+    animal_need: existing?.animal_need ?? null,
+    sort_flags: existing?.sort_flags ?? null,
   };
 }
 

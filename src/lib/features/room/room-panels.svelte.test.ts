@@ -1,5 +1,8 @@
+// @vitest-environment happy-dom
+
+import { flushSync } from 'svelte';
 import { expect, test, vi } from 'vitest';
-import { RoomPanels } from './room-panels.svelte.js';
+import { OpenRoomSearch, RoomPanels } from './room-panels.svelte.js';
 
 test('opening a thread closes competing panels', () => {
   const panels = new RoomPanels();
@@ -71,4 +74,82 @@ test('the desktop member list preference survives a reload', async () => {
   const again = await import('./room-panels.svelte.js');
   expect(new again.RoomPanels().desktopMembersOpen).toBe(true);
   vi.unstubAllGlobals();
+});
+
+test('replacing one panel with another is a swap, opening or closing one is not', () => {
+  const panels = new RoomPanels();
+  panels.closeMembers(true);
+  panels.toggleSearch();
+  expect(panels.swapped).toBe(false);
+  panels.toggleNotifications();
+  expect(panels.swapped).toBe(true);
+  panels.toggleNotifications();
+  expect(panels.swapped).toBe(false);
+  panels.toggleThreads();
+  panels.openThread('$root');
+  expect(panels.swapped).toBe(true);
+  panels.toggleWidgets();
+  expect(panels.swapped).toBe(true);
+});
+
+test('the notifications panel replaces any other open panel', () => {
+  const panels = new RoomPanels();
+  panels.toggleSearch();
+  panels.toggleNotifications();
+  expect(panels.searchOpen).toBe(false);
+  expect(panels.notificationsOpen).toBe(true);
+  panels.toggleNotifications();
+  expect(panels.notificationsOpen).toBe(false);
+});
+
+test('the search shortcut reaches only the room that is still open', () => {
+  const search = new OpenRoomSearch();
+  expect(search.run()).toBe(false);
+  const first = vi.fn();
+  const second = vi.fn();
+  const leaveFirst = search.register(first);
+  const leaveSecond = search.register(second);
+  leaveFirst();
+
+  expect(search.run()).toBe(true);
+  expect(second).toHaveBeenCalledTimes(1);
+  expect(first).not.toHaveBeenCalled();
+  leaveSecond();
+  expect(search.run()).toBe(false);
+});
+
+test('closing a panel opened over the member list returns to it', () => {
+  const panels = new RoomPanels();
+  panels.toggleMembers(true);
+  panels.toggleSearch();
+  panels.searchOpen = false;
+  expect(panels.desktopMembersOpen).toBe(true);
+  panels.toggleNotifications();
+  panels.toggleNotifications();
+  expect(panels.desktopMembersOpen).toBe(true);
+
+  panels.toggleMembers(true);
+  panels.toggleSearch();
+  panels.toggleSearch();
+  expect(panels.side).toBeNull();
+});
+
+test('resetting the panels from an effect does not close the next one opened', () => {
+  const panels = new RoomPanels();
+  let runs = 0;
+  const cleanup = $effect.root(() => {
+    $effect(() => {
+      runs += 1;
+      panels.reset();
+    });
+  });
+  flushSync();
+  expect(runs).toBe(1);
+
+  panels.toggleThreads();
+  flushSync();
+
+  expect(panels.threadsOpen).toBe(true);
+  expect(runs).toBe(1);
+  cleanup();
 });

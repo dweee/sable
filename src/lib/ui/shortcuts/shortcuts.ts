@@ -6,16 +6,21 @@ export type ShortcutId =
   | 'app.createRoom'
   | 'app.showShortcuts'
   | 'app.openSettings'
-  | 'app.closeWindow'
-  | 'app.quit'
   | 'navigation.openRoomSearch'
   | 'navigation.previousRoom'
   | 'navigation.nextRoom'
   | 'navigation.nextUnread'
   | 'navigation.cycleNextUnread'
   | 'navigation.cyclePreviousUnread'
+  | 'navigation.focusComposer'
+  | 'navigation.focusTimeline'
+  | 'navigation.focusRoomList'
+  | 'navigation.focusSpaces'
+  | 'navigation.nextRegion'
+  | 'navigation.previousRegion'
   | 'room.markRead'
   | 'room.markAllRead'
+  | 'room.close'
   | 'room.replyOlder'
   | 'room.replyNewer'
   | 'room.editOlder'
@@ -25,6 +30,7 @@ export type ShortcutId =
   | 'call.toggleCamera'
   | 'call.toggleScreenShare'
   | 'call.hangUp'
+  | 'call.pushToTalk'
   | 'composer.strong'
   | 'composer.em'
   | 'composer.underline'
@@ -52,7 +58,6 @@ export interface ShortcutDefinition {
   category: 'general' | 'navigation' | 'room' | 'call' | 'composer';
   binding: string;
   allowInEditable?: boolean;
-  desktopOnly?: boolean;
 }
 
 export const SHORTCUT_CATEGORIES: ReadonlyArray<{
@@ -106,22 +111,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: 'mod+,',
   },
   {
-    id: 'app.closeWindow',
-    labelKey: 'shortcuts.closeWindow',
-    category: 'general',
-    binding: 'mod+w',
-    allowInEditable: true,
-    desktopOnly: true,
-  },
-  {
-    id: 'app.quit',
-    labelKey: 'shortcuts.quit',
-    category: 'general',
-    binding: 'mod+q',
-    allowInEditable: true,
-    desktopOnly: true,
-  },
-  {
     id: 'navigation.previousRoom',
     labelKey: 'shortcuts.previousRoom',
     category: 'navigation',
@@ -146,12 +135,56 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     labelKey: 'shortcuts.cycleNextUnread',
     category: 'navigation',
     binding: 'alt+shift+down',
+    allowInEditable: true,
   },
   {
     id: 'navigation.cyclePreviousUnread',
     labelKey: 'shortcuts.cyclePreviousUnread',
     category: 'navigation',
     binding: 'alt+shift+up',
+    allowInEditable: true,
+  },
+  {
+    id: 'navigation.focusComposer',
+    labelKey: 'shortcuts.focusComposer',
+    category: 'navigation',
+    binding: 'alt+shift+c',
+    allowInEditable: true,
+  },
+  {
+    id: 'navigation.focusTimeline',
+    labelKey: 'shortcuts.focusTimeline',
+    category: 'navigation',
+    binding: 'alt+shift+t',
+    allowInEditable: true,
+  },
+  {
+    id: 'navigation.focusRoomList',
+    labelKey: 'shortcuts.focusRoomList',
+    category: 'navigation',
+    binding: 'alt+shift+r',
+    allowInEditable: true,
+  },
+  {
+    id: 'navigation.focusSpaces',
+    labelKey: 'shortcuts.focusSpaces',
+    category: 'navigation',
+    binding: 'alt+shift+s',
+    allowInEditable: true,
+  },
+  {
+    id: 'navigation.nextRegion',
+    labelKey: 'shortcuts.nextRegion',
+    category: 'navigation',
+    binding: 'f6',
+    allowInEditable: true,
+  },
+  {
+    id: 'navigation.previousRegion',
+    labelKey: 'shortcuts.previousRegion',
+    category: 'navigation',
+    binding: 'shift+f6',
+    allowInEditable: true,
   },
   {
     id: 'room.markRead',
@@ -164,6 +197,12 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     labelKey: 'shortcuts.markAllRead',
     category: 'room',
     binding: 'mod+shift+escape',
+  },
+  {
+    id: 'room.close',
+    labelKey: 'shortcuts.closeRoom',
+    category: 'room',
+    binding: 'alt+w',
   },
   {
     id: 'room.replyOlder',
@@ -222,6 +261,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: 'mod+shift+h',
   },
   {
+    id: 'call.pushToTalk',
+    labelKey: 'shortcuts.pushToTalk',
+    category: 'call',
+    binding: 'mod+shift+t',
+    allowInEditable: true,
+  },
+  {
     id: 'composer.strong',
     labelKey: 'composer.bold',
     category: 'composer',
@@ -260,7 +306,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: 'composer.sub',
     labelKey: 'composer.subscript',
     category: 'composer',
-    binding: 'mod+,',
+    binding: 'mod+shift+,',
     allowInEditable: true,
   },
   {
@@ -337,7 +383,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: 'composer.toggleSource',
     labelKey: 'composer.markdownSource',
     category: 'composer',
-    binding: 'mod+shift+m',
+    binding: 'mod+shift+l',
     allowInEditable: true,
   },
   {
@@ -363,17 +409,9 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   },
 ] as const;
 
-export function shortcutScope(shortcut: Pick<ShortcutDefinition, 'category'>): string {
-  return shortcut.category === 'composer' ? 'composer' : 'global';
-}
-
 export function shortcutsConflicts(isMac: boolean): ReturnType<typeof findShortcutConflicts> {
   return findShortcutConflicts(
-    SHORTCUTS.map((shortcut) => ({
-      id: shortcut.id,
-      binding: shortcut.binding,
-      scope: shortcutScope(shortcut),
-    })),
+    SHORTCUTS.map((shortcut) => ({ id: shortcut.id, binding: shortcut.binding })),
     isMac
   );
 }

@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
   const remembered = { mode: 'agenda' as 'agenda' | 'month', monthStart: null as number | null };
 </script>
@@ -33,7 +34,7 @@
   import { formatDate, formatTime } from '#lib/ui/date-time.js';
   import { currentLocale, i18n } from '#lib/i18n.js';
   import { findRoomByPathId, useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { preferences, readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
@@ -313,10 +314,9 @@
       .markRead({
         room_id: resolvedRoomId,
         event_id: null,
-        private_receipt: readReceiptIsPrivate(),
         thread_root: null,
         subscription: null,
-        fully_read: false,
+        fully_read: true,
       })
       .catch((error: unknown) => {
         console.warn('[sable calendar] mark as read failed', error);
@@ -409,9 +409,7 @@
   }
 </script>
 
-<svelte:head>
-  <title>{roomName}</title>
-</svelte:head>
+<PageTitle title={roomName} />
 
 <main class="calendar-page" aria-label={i18n.t('calendar.label')} data-inset-owner="top">
   <PanelHeader title={roomName} titleSize="h1">
@@ -431,6 +429,7 @@
         <PanelHeaderButton
           label={i18n.t('timeline.eventTimeline')}
           onclick={() => {
+            // eslint-disable-next-line svelte/no-navigation-without-resolve -- eventTimelinePath() resolves the route itself
             void goto(eventTimelinePath(resolvedRoomId));
           }}
         >
@@ -456,7 +455,7 @@
       />
     {/snippet}
   </PanelHeader>
-  <RoomBannerStrip {roomId} />
+  <RoomBannerStrip roomId={resolvedRoomId} />
 
   <div class="calendar-content" {@attach scrollHint}>
     <div class="calendar-range">

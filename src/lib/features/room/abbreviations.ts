@@ -1,18 +1,12 @@
 import escapeStringRegexp from 'escape-string-regexp';
 
-import type { RoomListItemView } from '#src/generated/protocol';
+import type { AbbreviationView } from '#src/generated/protocol';
 
 import type { AbbreviationEntry } from './settings/abbreviations';
 
-const MAX_SPACE_DEPTH = 4;
-
 const SKIP_SELECTOR = 'a, abbr, code, pre, time, .code-head, [data-mx-maths], [data-mx-spoiler]';
 
-export interface AbbreviationMatch {
-  term: string;
-  definition: string;
-  cased: boolean;
-}
+export type AbbreviationMatch = AbbreviationView;
 
 export type AbbreviationMap = ReadonlyMap<string, readonly AbbreviationMatch[]>;
 
@@ -42,7 +36,7 @@ export function abbreviationPattern(map: AbbreviationMap): RegExp | null {
   const terms = [...map.keys()]
     .sort((left, right) => right.length - left.length)
     .map(escapeStringRegexp);
-  return new RegExp(`\\b(?:${terms.join('|')})\\b`, 'gi');
+  return new RegExp(`(?<![\\p{L}\\p{N}_])(?:${terms.join('|')})(?![\\p{L}\\p{N}_])`, 'giu');
 }
 
 function resolveMatch(map: AbbreviationMap, text: string): AbbreviationMatch | undefined {
@@ -52,58 +46,6 @@ function resolveMatch(map: AbbreviationMap, text: string): AbbreviationMatch | u
     bucket.find((match) => match.cased && match.term === text) ??
     bucket.find((match) => !match.cased)
   );
-}
-
-export function ancestorSpaceIds(rooms: readonly RoomListItemView[], roomId: string): string[] {
-  return ancestorSpaceLevels(rooms, roomId).reverse().flat();
-}
-
-export function ancestorSpaceLevels(
-  rooms: readonly RoomListItemView[],
-  roomId: string
-): string[][] {
-  const levels: string[][] = [];
-  const seen = new Set([roomId]);
-  let frontier = [roomId];
-
-  for (let depth = 0; depth < MAX_SPACE_DEPTH && frontier.length > 0; depth += 1) {
-    const parents = rooms.filter(
-      (space) =>
-        space.room_kind === 'space' &&
-        space.state === 'joined' &&
-        !seen.has(space.room_id) &&
-        space.space_children.some((child) => frontier.includes(child.room_id))
-    );
-    for (const parent of parents) seen.add(parent.room_id);
-    frontier = parents.map((parent) => parent.room_id);
-    if (frontier.length > 0) levels.push(frontier);
-  }
-
-  return levels;
-}
-
-export function descendantRoomIds(rooms: readonly RoomListItemView[], spaceId: string): string[] {
-  const joined = new Map(
-    rooms.filter((room) => room.state === 'joined').map((room) => [room.room_id, room])
-  );
-  const seen = new Set([spaceId]);
-  const found: string[] = [];
-  let frontier = [spaceId];
-
-  while (frontier.length > 0) {
-    const next: string[] = [];
-    for (const id of frontier) {
-      for (const child of joined.get(id)?.space_children ?? []) {
-        if (seen.has(child.room_id) || !joined.has(child.room_id)) continue;
-        seen.add(child.room_id);
-        found.push(child.room_id);
-        next.push(child.room_id);
-      }
-    }
-    frontier = next;
-  }
-
-  return found;
 }
 
 export function markAbbreviations(root: HTMLElement, map: AbbreviationMap, pattern: RegExp): void {

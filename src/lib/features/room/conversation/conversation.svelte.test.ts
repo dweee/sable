@@ -22,6 +22,7 @@ import { Conversation } from './conversation.svelte';
 
 vi.mock('#lib/core/api/messages.svelte.js', () => ({ sendMessage: vi.fn(), editMessage: vi.fn() }));
 import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
+import { testPersona } from '#lib/personas/persona.ts';
 
 const ROOM = '!room:example.org';
 
@@ -51,8 +52,15 @@ function setup(
   const sendGallery = vi.fn(() => Promise.resolve());
   const sendGif = vi.fn(() => Promise.resolve());
   const sendLocation = vi.fn(() => Promise.resolve());
+  const createPoll = vi.fn(() => Promise.resolve());
+  const votePoll = vi.fn(() => Promise.resolve());
+  const endPoll = vi.fn(() => Promise.resolve());
+  const sendSticker = vi.fn(() => Promise.resolve());
+  const schedule = vi.fn(() => Promise.resolve('delay'));
+  const sendGesture = vi.fn(() => Promise.resolve());
   const toggleReaction = vi.fn(() => Promise.resolve());
   const urlPreview = vi.fn(() => Promise.resolve(null));
+  const setTyping = vi.fn((..._args: unknown[]) => Promise.resolve());
   const core = {
     session: { user_id: userId },
     media: {
@@ -63,8 +71,15 @@ function setup(
       messages: {
         sendGif,
         sendLocation,
+        createPoll,
+        votePoll,
+        endPoll,
+        sendSticker,
+        schedule,
+        sendGesture,
         react: toggleReaction,
         urlPreview,
+        setTyping,
       },
       account: {},
     },
@@ -75,6 +90,7 @@ function setup(
     disabledIn: () => false,
     select: () => Promise.resolve(),
     save: () => Promise.resolve(),
+    load: () => Promise.resolve(),
     ...store,
   };
   const personas = {
@@ -91,8 +107,15 @@ function setup(
     sendGallery,
     sendGif,
     sendLocation,
+    createPoll,
+    votePoll,
+    endPoll,
+    sendSticker,
+    schedule,
+    sendGesture,
     toggleReaction,
     urlPreview,
+    setTyping,
     timeline,
     conversation: new Conversation({
       core,
@@ -124,7 +147,7 @@ test('quick reactions resume live before choosing the latest message', async () 
     { ...item('$pending', '@kris:example.org'), event_id: null },
     withRowFields({
       ...item('$redacted', '@ana:example.org'),
-      content: { kind: 'redacted', reason: null },
+      content: { kind: 'redacted', reason: null, redacted_by: null },
     }),
   ];
   live.resolve(undefined);
@@ -137,8 +160,24 @@ test('quick reactions resume live before choosing the latest message', async () 
     shortcode: null,
     thread_root: null,
     subscription: 7,
+    persona: null,
   });
   expect(fixture.sendMessage).not.toHaveBeenCalled();
+});
+
+test.each(['', '#alias:example.org', 'room'])(
+  'typing is not announced to %j, which is not a room id',
+  async (target) => {
+    const fixture = setup([], '@kris:example.org');
+    await fixture.conversation.setTyping(target, true);
+    expect(fixture.setTyping).not.toHaveBeenCalled();
+  }
+);
+
+test('typing is announced to a room id', async () => {
+  const fixture = setup([], '@kris:example.org');
+  await fixture.conversation.setTyping(ROOM, true);
+  expect(fixture.setTyping).toHaveBeenCalledWith({ room_id: ROOM, typing: true });
 });
 
 test('quick reactions do nothing in an empty room', async () => {
@@ -164,6 +203,7 @@ test.each(['message', 'image', 'sticker', 'unable_to_decrypt'] as const)(
       shortcode: null,
       thread_root: null,
       subscription: 7,
+      persona: null,
     });
   }
 );
@@ -186,6 +226,7 @@ test('quick reactions in a thread target its latest message and preserve the sou
     shortcode: null,
     thread_root: '$root',
     subscription: 7,
+    persona: null,
   });
 });
 
@@ -206,6 +247,7 @@ test('toggling an existing custom quick reaction omits its source pack', async (
     shortcode: null,
     thread_root: null,
     subscription: 7,
+    persona: null,
   });
 });
 
@@ -266,7 +308,7 @@ test('a reply notifies the author it answers', async () => {
   expect(sendMessage).toHaveBeenCalledWith(
     ROOM,
     'sure',
-    expect.objectContaining({ inReplyTo: '$one:example.org', silentReply: false })
+    expect.objectContaining({ in_reply_to: '$one:example.org', silent_reply: false })
   );
 });
 
@@ -312,7 +354,7 @@ test('muting the reply stops the mention', async () => {
   expect(sendMessage).toHaveBeenCalledWith(
     ROOM,
     'sure',
-    expect.objectContaining({ silentReply: true })
+    expect.objectContaining({ silent_reply: true })
   );
 });
 
@@ -346,7 +388,7 @@ test.each([
     );
     const { conversation } = fixture;
     const file = new File(['picture'], 'picture.png', { type: 'image/png' });
-    const mentions = { userIds: ['@bea:example.org'], room: false };
+    const mentions = { user_ids: ['@bea:example.org'], room: false };
 
     for (const kind of ['attachment', 'gallery', 'gif', 'location'] as const) {
       conversation.reply('$one:example.org');
@@ -407,6 +449,7 @@ test.each([
           room_id: ROOM,
           body: 'here',
           geo_uri: 'geo:48,2',
+          persona: null,
           in_reply_to: '$one:example.org',
           silent_reply: silentReply,
           thread_root: threadRoot,
@@ -457,8 +500,7 @@ test('a reply keeps the target formatting for its composer preview', () => {
     kind: 'message',
     body: ':rotate:',
     html: '<img data-mx-emoticon src="mxc://example.org/rotate" alt=":rotate:">',
-    emote: false,
-    notice: false,
+    msgtype: 'text',
     edited: false,
     jumbo: null,
   };
@@ -478,8 +520,7 @@ test('a reply context uses rendered preview text', () => {
     kind: 'message',
     body: '**bold** and ``code ` tick``',
     html: '<strong>bold</strong> and <code>code ` tick</code>',
-    emote: false,
-    notice: false,
+    msgtype: 'text',
     edited: false,
     jumbo: null,
   };
@@ -515,7 +556,7 @@ test('a reply to an earlier version targets the edit and quotes its text', async
   expect(sendMessage).toHaveBeenCalledWith(
     ROOM,
     'typo',
-    expect.objectContaining({ inReplyTo: '$edit:example.org' })
+    expect.objectContaining({ in_reply_to: '$edit:example.org' })
   );
 });
 
@@ -532,7 +573,39 @@ test('editing a pending message uses its transaction ID', async () => {
     ROOM,
     null,
     'corrected',
-    expect.objectContaining({ transactionId: 'transaction-1' })
+    expect.objectContaining({ transaction_id: 'transaction-1' })
+  );
+});
+
+test('editing a file caption replaces the caption and keeps the attachment', async () => {
+  const file = withRowFields({
+    ...item('$file', '@kris:example.org'),
+    content: {
+      kind: 'file',
+      filename: 'main.rs',
+      caption: 'the code',
+      html: null,
+      source: 'mxc://example.org/code',
+      mime: 'text/plain',
+      size: 128,
+    },
+  } as unknown as TimelineItemView);
+  const { conversation, editMessage } = setup([file], '@kris:example.org');
+
+  conversation.editLast();
+  expect(conversation.context).toMatchObject({
+    kind: 'edit',
+    eventId: '$file',
+    body: 'the code',
+    mediaCaption: true,
+  });
+
+  await conversation.sendMessage(ROOM, 'the new code');
+  expect(editMessage).toHaveBeenCalledWith(
+    ROOM,
+    '$file',
+    'the new code',
+    expect.objectContaining({ media_caption: true })
   );
 });
 
@@ -627,8 +700,7 @@ test('keeps an edited message kind and persona when returning to live drops its 
       kind: 'message',
       body: 'before',
       html: 'before',
-      emote: true,
-      notice: false,
+      msgtype: 'emote',
       edited: false,
       jumbo: null,
     },
@@ -670,7 +742,7 @@ test('a pending edit follows its stable timeline ID after sync drops the transac
     ROOM,
     '$sent',
     'corrected',
-    expect.objectContaining({ transactionId: null })
+    expect.objectContaining({ transaction_id: null })
   );
 });
 
@@ -699,7 +771,7 @@ test('an empty caption edit keeps the attachment', async () => {
     ROOM,
     '$image',
     '',
-    expect.objectContaining({ mediaCaption: true })
+    expect.objectContaining({ media_caption: true })
   );
 });
 
@@ -708,15 +780,10 @@ function proxying() {
   return setup([], '@kris:example.org', {
     personas: [
       {
+        ...testPersona,
         id: 'kris',
         display_name: 'Kris',
-        avatar_url: null,
-        pronouns: [],
-        color_on_light: null,
-        color_on_dark: null,
-        triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false }],
-        pluralkit: null,
-        last_used: null,
+        triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false, alternate_avatar_id: null }],
       },
     ],
   });
@@ -762,20 +829,16 @@ test('messages containing only a persona trigger and whitespace are not sent', a
 test('personas off in a room ignore the selection and proxy triggers', async () => {
   setPreference('personaProxying', true);
   const kris = {
+    ...testPersona,
     id: 'kris',
     display_name: 'Kris',
-    avatar_url: null,
-    pronouns: [],
-    color_on_light: null,
-    color_on_dark: null,
-    triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false }],
-    pluralkit: null,
-    last_used: null,
+    triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false, alternate_avatar_id: null }],
   };
   const select = vi.fn(() => Promise.resolve());
   const { conversation, sendMessage } = setup([], '@kris:example.org', {
     personas: [kris],
-    selectionFor: (roomId) => (roomId === null ? { persona_id: 'kris', valid_until: null } : null),
+    selectionFor: (roomId) =>
+      roomId === null ? { persona_id: 'kris', valid_until: null, alternate_avatar_id: null } : null,
     disabledIn: (roomId) => roomId === ROOM,
     select,
   });
@@ -799,7 +862,12 @@ function scheduling() {
 
   return new Conversation({
     core,
-    personas: { list: [] } as unknown as PersonaStore,
+    personas: {
+      personas: [],
+      load: () => Promise.resolve(),
+      selectionFor: () => null,
+      associationFor: () => undefined,
+    } as unknown as PersonaStore,
     timeline: { items: [] } as unknown as RoomTimeline,
     roomId: () => ROOM,
     encrypted: () => true,
@@ -848,7 +916,12 @@ function rescheduling(
   } as unknown as CoreClient;
   const conversation = new Conversation({
     core,
-    personas: { list: [] } as unknown as PersonaStore,
+    personas: {
+      personas: [],
+      load: () => Promise.resolve(),
+      selectionFor: () => null,
+      associationFor: () => undefined,
+    } as unknown as PersonaStore,
     timeline: { items: [] } as unknown as RoomTimeline,
     roomId: () => ROOM,
   });
@@ -1019,26 +1092,82 @@ test('a dismissed link is not previewed and the dismissal is spent by the send',
   setPreference('encryptedUrlPreviews', true);
   const fixture = setup([], '@kris:example.org');
   fixture.conversation.dismissPreview('https://a.example/');
-  await fixture.conversation.sendMessage(ROOM, 'a b', LINKS);
+  await fixture.conversation.sendMessage(ROOM, 'https://a.example/ https://b.example/', LINKS);
 
   expect(fixture.urlPreview).toHaveBeenCalledTimes(1);
   expect(fixture.urlPreview).toHaveBeenCalledWith({ url: 'https://b.example/', service: null });
   expect(fixture.sendMessage.mock.calls[0]?.[2]).toMatchObject({
-    noLinkPreviews: false,
+    link_previews: [expect.objectContaining({ url: 'https://b.example/', title: null })],
+    no_link_previews: false,
   });
   expect(fixture.conversation.dismissedPreviews).toEqual([]);
 });
 
-test('dismissing every link sends an explicit opt-out', async () => {
+test.each([false, true])(
+  'dismissing every link sends an opt-out with generation=%s',
+  async (enabled) => {
+    setPreference('encryptedUrlPreviews', enabled);
+    const fixture = setup([], '@kris:example.org');
+    fixture.conversation.dismissPreview('https://a.example/');
+    fixture.conversation.dismissPreview('https://b.example/');
+    await fixture.conversation.sendMessage(ROOM, 'https://a.example/ https://b.example/', LINKS);
+
+    expect(fixture.urlPreview).not.toHaveBeenCalled();
+    expect(fixture.sendMessage.mock.calls[0]?.[2]).toMatchObject({
+      link_previews: [],
+      no_link_previews: true,
+    });
+  }
+);
+
+test('does not fetch previews for URLs absent from the body', async () => {
   setPreference('encryptedUrlPreviews', true);
   const fixture = setup([], '@kris:example.org');
-  fixture.conversation.dismissPreview('https://a.example/');
-  fixture.conversation.dismissPreview('https://b.example/');
   await fixture.conversation.sendMessage(ROOM, 'a b', LINKS);
-
   expect(fixture.urlPreview).not.toHaveBeenCalled();
-  expect(fixture.sendMessage.mock.calls[0]?.[2]).toMatchObject({
-    linkPreviews: [],
-    noLinkPreviews: true,
-  });
 });
+
+test.each([false, true])(
+  'message types respect the selected PMP with room disabled=%s',
+  async (disabled) => {
+    const persona = testPersona;
+    const h = setup([], '@kris:example.org', {
+      personas: [persona],
+      selectionFor: () => ({ persona_id: 'kris', valid_until: null, alternate_avatar_id: null }),
+      disabledIn: () => disabled,
+    });
+    const profile: unknown = disabled
+      ? null
+      : expect.objectContaining({ id: 'kris', display_name: 'Kris' });
+    await h.conversation.createPoll(ROOM, 'Lunch?', ['Soup', 'Pasta'], false);
+    expect(h.createPoll).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
+    h.conversation.votePoll('$poll', ['0']);
+    expect(h.votePoll).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
+    h.conversation.endPoll('$poll');
+    expect(h.endPoll).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
+    await h.conversation.sendLocation(ROOM, 'here', 'geo:48,2');
+    expect(h.sendLocation).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
+    await h.conversation.sendSticker(ROOM, 'mxc://example.org/sticker', 'wave');
+    expect(h.sendSticker).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
+    const image = new File(['image'], 'one.png', { type: 'image/png' });
+    await h.conversation.sendGallery(ROOM, [image, image]);
+    expect(h.sendGallery).toHaveBeenCalledWith(
+      ROOM,
+      [image, image],
+      expect.objectContaining({ persona: profile })
+    );
+    await h.conversation.sendBotCommand(ROOM, '@bot:example.org', '!help', {
+      command: 'help',
+      arguments: {},
+    });
+    expect(h.sendMessage).toHaveBeenCalledWith(
+      ROOM,
+      '!help',
+      expect.objectContaining({ persona: profile })
+    );
+    await h.conversation.sendMessage(ROOM, '/hug');
+    expect(h.sendGesture).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
+    await h.conversation.schedule(ROOM, 'later', null, Date.now() + 60_000);
+    expect(h.schedule).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
+  }
+);

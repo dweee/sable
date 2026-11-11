@@ -8,17 +8,22 @@ export type TroubleshootCheck =
   | 'permission'
   | 'alerts'
   | 'transport'
+  | 'background'
+  | 'alarms'
   | 'pusher'
   | 'gateway'
   | 'loopback';
 
 export type TroubleshootState = 'pass' | 'fail' | 'warn' | 'skip';
 
+export type TroubleshootAction = 'allowBackground' | 'allowAlarms';
+
 export interface TroubleshootResult {
   check: TroubleshootCheck;
   state: TroubleshootState;
   message: string;
   params?: Record<string, string>;
+  action?: TroubleshootAction;
   detail?: { message: string; params: Record<string, string> };
 }
 
@@ -33,16 +38,20 @@ export interface TroubleshootDeps {
   permissionGranted: () => Promise<boolean>;
   alertsEnabled: () => boolean;
   nativeTransport: () => Promise<PushTransportInfo | null>;
+  ignoringBatteryOptimizations: () => Promise<boolean | null>;
+  canScheduleExactAlarms: () => Promise<boolean | null>;
   ownPushkey: () => Promise<string | null>;
   pushers: () => Promise<RegisteredPusherView[]>;
   pingGateway: (url: string) => Promise<boolean | null>;
   sendDiagnostic: (pushkey: string, appId: string) => Promise<DiagnosticPushView>;
   history: () => Promise<PushHistoryEntry[]>;
   registrationFailure: () => PushFailure | null;
+  reactivate: (() => Promise<void>) | null;
   wait: (ms: number) => Promise<void>;
 }
 
 export const LOOPBACK_TIMEOUT_MS = 30_000;
+const ACTIVATION_TIMEOUT_MS = 30_000;
 const LOOPBACK_POLL_MS = 1_000;
 
 const PUSH_CHECKS: TroubleshootCheck[] = ['transport', 'pusher', 'gateway', 'loopback'];
@@ -95,6 +104,62 @@ async function transport(deps: TroubleshootDeps): Promise<TroubleshootResult> {
   };
 }
 
+async function background(deps: TroubleshootDeps, embedded: boolean): Promise<TroubleshootResult> {
+  const ignoring = await deps.ignoringBatteryOptimizations();
+  if (ignoring === null) {
+    return {
+      check: 'background',
+      state: 'skip',
+      message: 'settings.troubleshootBackgroundUnknown',
+    };
+  }
+  if (ignoring) {
+    return {
+      check: 'background',
+      state: 'pass',
+      message: 'settings.troubleshootBackgroundAllowed',
+    };
+  }
+  return {
+    check: 'background',
+    state: embedded ? 'fail' : 'warn',
+    message: embedded
+      ? 'settings.troubleshootBackgroundRequired'
+      : 'settings.troubleshootBackgroundRecommended',
+    action: 'allowBackground',
+  };
+}
+
+async function alarms(deps: TroubleshootDeps): Promise<TroubleshootResult> {
+  const allowed = await deps.canScheduleExactAlarms();
+  if (allowed === null) {
+    return { check: 'alarms', state: 'skip', message: 'settings.troubleshootAlarmsUnknown' };
+  }
+  return allowed
+    ? { check: 'alarms', state: 'pass', message: 'settings.troubleshootAlarmsAllowed' }
+    : {
+        check: 'alarms',
+        state: 'warn',
+        message: 'settings.troubleshootAlarmsDenied',
+        action: 'allowAlarms',
+      };
+}
+
+export async function* troubleshootBackground(
+  deps: TroubleshootDeps
+): AsyncGenerator<TroubleshootResult> {
+  if (deps.platform !== 'android') {
+    yield { check: 'background', state: 'skip', message: 'settings.troubleshootAndroidOnly' };
+    yield { check: 'alarms', state: 'skip', message: 'settings.troubleshootAndroidOnly' };
+    return;
+  }
+  const embedded = (await deps.nativeTransport())?.provider === 'embedded';
+  yield await background(deps, embedded);
+  yield embedded
+    ? await alarms(deps)
+    : { check: 'alarms', state: 'skip', message: 'settings.troubleshootAlarmsEmbeddedOnly' };
+}
+
 async function awaitDiagnostic(deps: TroubleshootDeps, eventId: string): Promise<boolean> {
   for (let waited = 0; waited <= LOOPBACK_TIMEOUT_MS; waited += LOOPBACK_POLL_MS) {
     const history = await deps.history();
@@ -102,6 +167,25 @@ async function awaitDiagnostic(deps: TroubleshootDeps, eventId: string): Promise
     await deps.wait(LOOPBACK_POLL_MS);
   }
   return false;
+}
+
+async function reactivated(
+  deps: TroubleshootDeps,
+  pushkey: string
+): Promise<RegisteredPusherView | null> {
+  if (deps.reactivate === null) return null;
+  try {
+    await deps.reactivate();
+    for (let waited = 0; waited <= ACTIVATION_TIMEOUT_MS; waited += LOOPBACK_POLL_MS) {
+      const pusher = (await deps.pushers()).find((candidate) => candidate.pushkey === pushkey);
+      if (pusher === undefined) return null;
+      if (pusher.activated !== false) return pusher;
+      await deps.wait(LOOPBACK_POLL_MS);
+    }
+  } catch (error) {
+    console.warn('[sable notifications] reactivating the pusher failed', error);
+  }
+  return null;
 }
 
 async function loopback(
@@ -131,8 +215,21 @@ async function loopback(
         state: 'skip',
         message: 'settings.troubleshootLoopbackHomeserver',
       };
+    case 'refused':
+      return {
+        check: 'loopback',
+        state: 'skip',
+        message: 'settings.troubleshootLoopbackRefused',
+      };
     case 'rejected':
       return { check: 'loopback', state: 'fail', message: 'settings.troubleshootLoopbackRejected' };
+    case 'unforwarded':
+      return {
+        check: 'loopback',
+        state: 'fail',
+        message: 'settings.troubleshootLoopbackUnforwarded',
+        params: { host: host(pusher.gateway ?? '') },
+      };
     case 'sent':
       return (await awaitDiagnostic(deps, push.event_id))
         ? { check: 'loopback', state: 'pass', message: 'settings.troubleshootLoopbackReceived' }
@@ -156,6 +253,7 @@ export async function* troubleshoot(deps: TroubleshootDeps): AsyncGenerator<Trou
 
   const carried = await transport(deps);
   yield carried;
+  yield* troubleshootBackground(deps);
   if (carried.state === 'fail') {
     yield* skipped('pusher', 'settings.troubleshootNotApplicable');
     return;
@@ -180,7 +278,7 @@ export async function* troubleshoot(deps: TroubleshootDeps): AsyncGenerator<Trou
     yield* skipped('gateway', 'settings.troubleshootNotApplicable');
     return;
   }
-  const pusher = pushers.find((candidate) => candidate.pushkey === pushkey);
+  let pusher = pushers.find((candidate) => candidate.pushkey === pushkey);
   if (pusher === undefined) {
     yield withFailure(deps, {
       check: 'pusher',
@@ -191,9 +289,17 @@ export async function* troubleshoot(deps: TroubleshootDeps): AsyncGenerator<Trou
     return;
   }
   if (pusher.activated === false) {
-    yield { check: 'pusher', state: 'fail', message: 'settings.troubleshootPusherInactive' };
-    yield* skipped('gateway', 'settings.troubleshootNotApplicable');
-    return;
+    const activated = await reactivated(deps, pushkey);
+    if (activated === null) {
+      yield withFailure(deps, {
+        check: 'pusher',
+        state: 'fail',
+        message: 'settings.troubleshootPusherInactive',
+      });
+      yield* skipped('gateway', 'settings.troubleshootNotApplicable');
+      return;
+    }
+    pusher = activated;
   }
   const gateway = pusher.gateway;
   yield {
@@ -207,7 +313,14 @@ export async function* troubleshoot(deps: TroubleshootDeps): AsyncGenerator<Trou
   };
 
   if (gateway === null) {
-    yield { check: 'gateway', state: 'skip', message: 'settings.troubleshootGatewayHomeserver' };
+    yield pusher.activated === true && pusher.endpoint !== null
+      ? {
+          check: 'gateway',
+          state: 'pass',
+          message: 'settings.troubleshootGatewayActivated',
+          params: { host: host(pusher.endpoint) },
+        }
+      : { check: 'gateway', state: 'skip', message: 'settings.troubleshootGatewayHomeserver' };
   } else {
     const reached = await deps.pingGateway(gateway);
     const params = { host: host(gateway) };

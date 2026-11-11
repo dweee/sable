@@ -12,17 +12,18 @@ vi.mock('#lib/platform/push.js', () => ({
 }));
 vi.mock('#lib/platform/notifications.js', () => ({
   deliversWebPush: () => false,
-  deliversNativePush: () => Promise.resolve(true),
+  deliversNativePush: () => true,
 }));
 vi.mock('./native-push.js', () => ({
   selectedPushDistributor: () => 'ntfy',
-  selectedPushProvider: () => 'unifiedpush',
+  selectedPushProvider: vi.fn(() => 'unifiedpush'),
   switchPushDistributor: vi.fn(),
   switchPushProvider: vi.fn(),
 }));
 
 import { core } from '#lib/core/__mocks__/context.js';
-import { switchPushDistributor } from './native-push.js';
+import { preferences } from '#lib/settings/preferences.svelte.js';
+import { selectedPushProvider, switchPushDistributor } from './native-push.js';
 import PushGateway from './PushGateway.svelte';
 
 test('the distributor snaps back when switching fails', async () => {
@@ -31,8 +32,8 @@ test('the distributor snaps back when switching fails', async () => {
   const user = userEvent.setup();
   render(PushGateway);
 
-  const trigger = () => screen.getByRole('button', { name: 'Notification distributor' });
-  await screen.findByRole('button', { name: 'Notification distributor' });
+  const trigger = () => screen.getByRole('combobox', { name: 'Notification distributor' });
+  await screen.findByRole('combobox', { name: 'Notification distributor' });
   expect(trigger()).toHaveTextContent('ntfy');
 
   await user.click(trigger());
@@ -41,4 +42,28 @@ test('the distributor snaps back when switching fails', async () => {
   expect(await screen.findByText(/Could not update the notification distributor/)).toBeVisible();
   expect(switchPushDistributor).toHaveBeenCalledWith('gotify', expect.anything(), null, []);
   expect(trigger()).toHaveTextContent('ntfy');
+});
+
+test('the built-in connection saves its ntfy server only once it is a valid address', async () => {
+  Object.assign(core, { status: 'ready' });
+  vi.mocked(selectedPushProvider).mockReturnValue('embedded');
+  const user = userEvent.setup();
+  render(PushGateway);
+
+  const field = await screen.findByRole('textbox', { name: 'ntfy server' });
+  const [apply] = screen.getAllByRole('button', { name: 'Apply' });
+  expect(await screen.findByText(/Leave this blank to use https:\/\/ntfy\.sh/)).toBeVisible();
+
+  await user.type(field, 'http://ntfy.example.org');
+  expect(screen.getByText(/An ntfy server is an https address/)).toBeVisible();
+  expect(apply).toBeDisabled();
+
+  await user.clear(field);
+  await user.type(field, 'https://ntfy.example.org');
+  await user.click(apply);
+  expect(preferences.pushEmbeddedServerUrl).toBe('https://ntfy.example.org');
+
+  await user.click(screen.getAllByRole('button', { name: 'Use the default' })[0]);
+  expect(preferences.pushEmbeddedServerUrl).toBe('');
+  expect(field).toHaveValue('');
 });

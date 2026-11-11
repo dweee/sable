@@ -102,6 +102,7 @@ pub enum LobbyAction {
 /// What the sections depend on besides the rooms. `loaded: None` treats every
 /// level as described; `keep_empty` names subspaces shown even without rooms.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
 #[serde(default)]
 pub struct SectionInputs {
     pub loaded: Option<HashSet<String>>,
@@ -216,13 +217,33 @@ pub fn merge_hierarchy_rooms(
                 .or_else(|| chunk.canonical_alias.take()),
             num_joined_members: chunk.num_joined_members,
             guest_can_join: chunk.guest_can_join,
-            children: if room.children.is_empty() {
-                std::mem::take(&mut chunk.children)
-            } else {
-                room.children.clone()
+            children: {
+                let mut children = std::mem::take(&mut chunk.children);
+                for edge in &room.children {
+                    match children
+                        .iter_mut()
+                        .find(|held| held.room_id == edge.room_id)
+                    {
+                        Some(held) => *held = edge.clone(),
+                        None => children.push(edge.clone()),
+                    }
+                }
+                children.retain(|edge| !edge.via.is_empty());
+                children
             },
             ..room.clone()
         };
+    }
+    for room in &mut merged {
+        room.children.sort_by(|left, right| {
+            match (&left.order, &right.order) {
+                (Some(left), Some(right)) => left.cmp(right),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| left.origin_server_ts.cmp(&right.origin_server_ts))
+        });
     }
     merged
 }
@@ -285,7 +306,8 @@ impl Walk<'_> {
         let described = self.described(space_id);
         let failed = self.inputs.failed.contains(space_id);
         let kept = space.is_some() && self.inputs.keep_empty.contains(space_id);
-        if !own_rooms.is_empty() || !described || failed || kept {
+        let unjoined = space.is_some() && !self.inputs.joined.contains(space_id);
+        if !own_rooms.is_empty() || !described || failed || kept || unjoined {
             let owner_id = ancestry
                 .len()
                 .checked_sub(2)
@@ -325,7 +347,7 @@ impl Walk<'_> {
     }
 }
 
-/// The root's rooms, then each subspace depth first; empty sections are left out unless loading, failed or in `keep_empty`.
+/// The root's rooms, then each subspace depth first; empty sections are left out unless loading, failed, unjoined or in `keep_empty`.
 #[must_use]
 pub fn build_hierarchy_sections(
     rooms: &[HierarchyRoomView],
@@ -470,6 +492,7 @@ mod tests {
 
         let loaded = SectionInputs {
             loaded: Some(["!root".to_owned(), "!space1".to_owned()].into()),
+            joined: ["!space1".to_owned()].into(),
             ..SectionInputs::default()
         };
         assert_eq!(
@@ -481,6 +504,24 @@ mod tests {
             ..loaded
         };
         assert_eq!(build_hierarchy_sections(&rooms, "!root", &kept).len(), 1);
+    }
+
+    #[test]
+    fn an_unjoined_subspace_without_visible_rooms_stays_joinable() {
+        let mut restricted = room("!space1", &[]);
+        restricted.join_rule = RoomJoinRuleView::Restricted;
+        let rooms = [room("!root", &["!space1"]), restricted];
+        let inputs = SectionInputs {
+            loaded: Some(["!root".to_owned(), "!space1".to_owned()].into()),
+            joined: ["!root".to_owned()].into(),
+            ..SectionInputs::default()
+        };
+        let sections = build_hierarchy_sections(&rooms, "!root", &inputs);
+        assert_eq!(
+            keys(&sections),
+            [("!root/!space1".to_owned(), Vec::new(), 0)]
+        );
+        assert_eq!(sections[0].space_action, Some(LobbyAction::Join));
     }
 
     #[test]
@@ -496,6 +537,94 @@ mod tests {
         assert_eq!(merged[0].name.as_deref(), Some("Local"));
         assert_eq!(merged[0].topic.as_deref(), Some("t"));
         assert_eq!(merged[0].num_joined_members, Some(4));
+    }
+
+    #[test]
+    fn empty_local_children_preserve_fetched_rooms_and_subspaces() {
+        let fetched = [
+            room("!root", &["!a", "!space1"]),
+            room("!a", &[]),
+            room("!space1", &["!b"]),
+            room("!b", &[]),
+        ];
+        let merged = merge_hierarchy_rooms(&[room("!root", &[])], &fetched);
+        assert_eq!(
+            merged[0].children,
+            [edge("!a", false), edge("!space1", false)]
+        );
+        let sections = build_hierarchy_sections(&merged, "!root", &SectionInputs::default());
+        assert_eq!(
+            keys(&sections),
+            [
+                ("!root".to_owned(), vec!["!root/!a".to_owned()], 0),
+                (
+                    "!root/!space1".to_owned(),
+                    vec!["!root/!space1/!b".to_owned()],
+                    0
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_local_children_update_metadata_and_preserve_fetched_edges() {
+        let fetched = [room("!root", &["!a", "!space1"])];
+        let mut local = room("!root", &["!a"]);
+        local.children[0].suggested = true;
+        local.children[0].via = vec!["local.example".to_owned()];
+
+        let merged = merge_hierarchy_rooms(&[local], &fetched);
+
+        assert_eq!(
+            merged[0].children,
+            [
+                SpaceChildEdge {
+                    via: vec!["local.example".to_owned()],
+                    ..edge("!a", true)
+                },
+                edge("!space1", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_child_order_sorts_the_fetched_hierarchy() {
+        let mut fetched = room("!root", &["!a", "!b"]);
+        fetched.children[0].order = Some("a".to_owned());
+        fetched.children[1].order = Some("b".to_owned());
+        let mut local = fetched.clone();
+        local.children[1].order = Some(" ".to_owned());
+
+        let merged = merge_hierarchy_rooms(&[local], &[fetched]);
+        assert_eq!(merged[0].children[0].room_id, "!b");
+        let sections = build_hierarchy_sections(
+            &[merged[0].clone(), room("!a", &[]), room("!b", &[])],
+            "!root",
+            &SectionInputs::default(),
+        );
+        assert_eq!(sections[0].rooms[0].room.room_id, "!b");
+    }
+
+    #[test]
+    fn new_local_children_are_added_alongside_fetched_edges() {
+        let fetched = [room("!root", &["!a", "!space1"])];
+        let local = room("!root", &["!a", "!c"]);
+
+        let merged = merge_hierarchy_rooms(&[local], &fetched);
+
+        assert_eq!(
+            merged[0].children,
+            [edge("!a", false), edge("!space1", false), edge("!c", false)]
+        );
+    }
+
+    #[test]
+    fn an_explicitly_removed_child_does_not_return_from_the_hierarchy() {
+        let fetched = [room("!root", &["!a", "!b"])];
+        let mut local = room("!root", &["!a"]);
+        local.children[0].via.clear();
+        let merged = merge_hierarchy_rooms(&[local], &fetched);
+        assert_eq!(merged[0].children, [edge("!b", false)]);
     }
 
     #[test]

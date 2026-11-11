@@ -12,7 +12,8 @@ vi.mock('#lib/core/context.js');
 vi.mock('#lib/rooms/presence.svelte.js', () => ({
   usePresenceStore: () => ({ get: () => null }),
 }));
-vi.mock('#lib/config/runtime-config.js', () => ({
+vi.mock('#lib/config/runtime-config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('#lib/config/runtime-config.js')>()),
   runtimeConfig: () => Promise.resolve({ disableAccountSwitcher: false, push: null }),
 }));
 vi.mock('#lib/settings/preferences.svelte.js', async (importOriginal) => ({
@@ -26,8 +27,7 @@ vi.mock('#lib/platform/overlay-back.svelte.js', () => ({
 }));
 
 import { core } from '#lib/core/__mocks__/context.js';
-import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
-import AccountSwitcher from './AccountSwitcher.svelte';
+import AccountSwitcherHarness from './AccountSwitcherHarness.test.svelte';
 
 const current = {
   account_id: 'current',
@@ -72,7 +72,7 @@ beforeEach(() => {
 
 async function requestLogout(userId: string) {
   const user = userEvent.setup();
-  render(AccountSwitcher, { mode: 'desktop' }, { wrapper: TooltipProvider });
+  render(AccountSwitcherHarness);
 
   await user.click(screen.getByRole('button', { name: 'nav.switchAccount' }));
   await user.click(screen.getByRole('menuitem', { name: 'nav.switchAccount' }));
@@ -175,4 +175,26 @@ test('uses session logout for the active account even if it requires reauthentic
   await vi.waitFor(() => {
     expect(logout).toHaveBeenCalledOnce();
   });
+});
+
+test.each([
+  ['common.viewAvatar:Current', 'mxc://example.org/avatar'],
+  ['common.viewBanner:Current', 'mxc://example.org/banner'],
+])('opens own profile image %s', async (label, source) => {
+  Object.assign(core, {
+    cachedUserProfile: () => ({
+      user_id: current.user_id,
+      display_name: 'Current',
+      avatar_url: 'mxc://example.org/avatar',
+      banner_url: 'mxc://example.org/banner',
+    }),
+  });
+  render(AccountSwitcherHarness);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: 'nav.switchAccount' }));
+  await user.click(await screen.findByRole('button', { name: label }));
+  expect(await screen.findByRole('dialog', { name: 'viewer.title' })).toBeInTheDocument();
+  expect(core.fetchMedia).toHaveBeenCalledWith(source, 0, 0);
+  await user.click(screen.getByRole('button', { name: 'common.close' }));
+  expect(screen.queryByRole('dialog', { name: 'viewer.title' })).not.toBeInTheDocument();
 });

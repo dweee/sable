@@ -1,10 +1,12 @@
 <script lang="ts">
   import { Popover } from 'bits-ui';
+  import { convertHsvToRgb, convertRgbToHsv, parseHex, serializeHex } from 'culori/fn';
 
   import Button from '#lib/ui/primitives/Button.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import { i18n } from '#lib/i18n.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
   import { isHexColor } from '#lib/ui/hex-color.js';
 
   interface Props {
@@ -30,52 +32,18 @@
 
   function hexToHsv(hex: string): [number, number, number] {
     const normalized = hex.replace('#', '');
-    const expanded = normalized.length === 3 ? normalized.replace(/(.)/g, '$1$1') : normalized;
-    if (!/^[0-9a-f]{6}$/i.test(expanded)) return [0, 100, 100];
-    const rgb = [0, 2, 4].map(
-      (offset) => Number.parseInt(expanded.slice(offset, offset + 2), 16) / 255
-    );
-    const max = Math.max(...rgb);
-    const min = Math.min(...rgb);
-    const delta = max - min;
-    const hue =
-      delta === 0
-        ? 0
-        : ((rgb.indexOf(max) * 2 +
-            (rgb[(rgb.indexOf(max) + 1) % 3] - rgb[(rgb.indexOf(max) + 2) % 3]) / delta) *
-            60 +
-            360) %
-          360;
-    return [
-      Math.round(hue),
-      max === 0 ? 0 : Math.round((delta / max) * 100),
-      Math.round(max * 100),
-    ];
+    const rgb = /^(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(normalized)
+      ? parseHex(`#${normalized}`)
+      : undefined;
+    if (!rgb) return [0, 100, 100];
+    const color = convertRgbToHsv(rgb);
+    return [Math.round(color.h ?? 0), Math.round(color.s * 100), Math.round(color.v * 100)];
   }
 
   function hsvToHex(nextHue: number, nextSaturation: number, nextBrightness: number): string {
-    const chroma = (nextBrightness / 100) * (nextSaturation / 100);
-    const x = chroma * (1 - Math.abs(((nextHue / 60) % 2) - 1));
-    const match = nextBrightness / 100 - chroma;
-    const [red, green, blue] =
-      nextHue < 60
-        ? [chroma, x, 0]
-        : nextHue < 120
-          ? [x, chroma, 0]
-          : nextHue < 180
-            ? [0, chroma, x]
-            : nextHue < 240
-              ? [0, x, chroma]
-              : nextHue < 300
-                ? [x, 0, chroma]
-                : [chroma, 0, x];
-    return `#${[red, green, blue]
-      .map((channel) =>
-        Math.round((channel + match) * 255)
-          .toString(16)
-          .padStart(2, '0')
-      )
-      .join('')}`.toUpperCase();
+    return serializeHex(
+      convertHsvToRgb({ h: nextHue, s: nextSaturation / 100, v: nextBrightness / 100 })
+    ).toUpperCase();
   }
 
   function update(nextHue = hue, nextSaturation = saturation, nextBrightness = brightness): void {
@@ -123,6 +91,7 @@
           side="bottom"
           align="start"
           sideOffset={8}
+          collisionPadding={collisionPadding()}
         >
           <button
             type="button"
@@ -227,7 +196,7 @@
     border: calc(var(--border-width) * 2) solid var(--bg-container);
     border-radius: 50%;
     box-shadow: 0 0 0 var(--border-width) var(--bg-on-container);
-    height: var(--hue-track);
+    height: 0.75rem;
     position: absolute;
     transform: translate(-50%, -50%);
     width: 0.75rem;

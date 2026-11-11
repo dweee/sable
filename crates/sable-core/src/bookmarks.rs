@@ -12,7 +12,6 @@ use crate::room_settings::EmptyContent;
 
 const INDEX_EVENT: &str = "pl.chrome.bookmarks.index";
 const ITEM_PREFIX: &str = "pl.chrome.bookmark.";
-const PREVIEW_LIMIT: usize = 120;
 
 pub(crate) fn bookmark_id(room_id: &str, event_id: &str) -> String {
     let mut hash: i32 = 0;
@@ -240,13 +239,7 @@ impl Core {
 
         let body = content
             .and_then(|content| content.body.as_deref())
-            .map(|body| {
-                if body.chars().count() <= PREVIEW_LIMIT {
-                    body.to_owned()
-                } else {
-                    format!("{}…", body.chars().take(PREVIEW_LIMIT).collect::<String>())
-                }
-            });
+            .map(|body| crate::inbox::preview(body.to_owned()));
 
         let item = ItemOut {
             version: 1,
@@ -259,7 +252,9 @@ impl Core {
             sender: raw.sender,
             room_name: room.cached_display_name().map(|name| name.to_string()),
             body_preview: (!encrypted).then_some(body).flatten(),
-            msgtype: raw.content.and_then(|content| content.msgtype),
+            msgtype: (!encrypted)
+                .then(|| raw.content.and_then(|content| content.msgtype))
+                .flatten(),
         };
         self.put_global_account_data(item_event(id), &item, "bookmarks")
             .await

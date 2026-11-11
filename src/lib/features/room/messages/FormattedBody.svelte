@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
+  import { matrixLinkPath } from '#lib/rooms/permalink.js';
   import { copyText } from '#lib/platform/clipboard.js';
   import { mount, unmount, untrack, type Component } from 'svelte';
   import { on } from 'svelte/events';
@@ -214,7 +216,7 @@
   }
 
   function emoteShortcode(image: HTMLImageElement): string | null {
-    const label = image.alt.replace(/^:|:$/g, '');
+    const label = (image.dataset.shortcode || image.alt).replace(/^:|:$/g, '');
     return label ? `:${label}:` : null;
   }
 
@@ -287,6 +289,7 @@
         }
         for (const image of node.querySelectorAll<HTMLImageElement>('img[data-mx-emoticon]')) {
           image.alt ||= image.title;
+          if (image.title) image.dataset.shortcode = image.title;
           image.removeAttribute('title');
         }
         for (const element of node.querySelectorAll<HTMLTimeElement>('time[datetime]')) {
@@ -611,10 +614,15 @@
     if (!anchor || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
     if (anchor.href.toLowerCase().startsWith('matrix:')) event.preventDefault();
     const link = parseMatrixLink(anchor.href);
-    if (!link || !onMatrixLink) return;
+    if (!link) return;
     event.preventDefault();
     event.stopPropagation();
-    onMatrixLink(link, anchor);
+    if (onMatrixLink) onMatrixLink(link, anchor);
+    else {
+      const path = matrixLinkPath(anchor.href);
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- matrixLinkPath resolves the permalink route
+      if (path !== null) void goto(path);
+    }
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -751,6 +759,14 @@
     white-space: pre-wrap;
   }
 
+  .formatted-body :global([data-emoji]) {
+    --emoji-size: 1.375em;
+
+    font-size: var(--emoji-size);
+    line-height: 0;
+    vertical-align: -0.2em;
+  }
+
   .formatted-body :global(h1),
   .formatted-body :global(h2),
   .formatted-body :global(h3),
@@ -818,6 +834,10 @@
 
   .formatted-body :global(a:hover) {
     text-decoration: underline;
+  }
+
+  .formatted-body :global([data-mx-color] a) {
+    color: inherit;
   }
 
   .formatted-body :global(a[data-matrix-link]),

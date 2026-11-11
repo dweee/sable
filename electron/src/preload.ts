@@ -1,5 +1,15 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import type {
+  PickedFile,
+  PickFilesRequest,
+  SaveFileRequest,
+  ThemeFileSnapshot,
+} from '../../src/lib/platform/file-dialog-types';
 import type { ScreenAudioListing } from '../../src/lib/platform/screen-audio-types';
+import type {
+  DesktopCallShortcut,
+  DesktopCallShortcutEvent,
+} from '../../src/lib/platform/call-shortcut-types';
 
 interface ScreenShareCandidate {
   id: string;
@@ -11,6 +21,11 @@ type ScreenSharePick = (sources: ScreenShareCandidate[]) => Promise<string | nul
 
 let screenSharePick: ScreenSharePick | null = null;
 
+contextBridge.exposeInMainWorld(
+  '__SABLE_AUTO_UPDATE__',
+  !process.argv.includes('--sable-disable-auto-update')
+);
+
 ipcRenderer.on('sable-pick-screen', (_event, request: number, sources: ScreenShareCandidate[]) => {
   const pick = screenSharePick ?? (() => Promise.resolve(null));
   void pick(sources)
@@ -21,15 +36,81 @@ ipcRenderer.on('sable-pick-screen', (_event, request: number, sources: ScreenSha
 });
 
 contextBridge.exposeInMainWorld('sableElectron', {
+  setCallShortcuts: (bindings: DesktopCallShortcut[]) =>
+    ipcRenderer.invoke('sable-call-shortcuts', bindings) as Promise<void>,
+  onCallShortcut: (callback: (event: DesktopCallShortcutEvent) => void) => {
+    const listener = (_event: IpcRendererEvent, value: DesktopCallShortcutEvent) => {
+      callback(value);
+    };
+    ipcRenderer.on('sable-call-shortcut', listener);
+    return () => {
+      ipcRenderer.removeListener('sable-call-shortcut', listener);
+    };
+  },
   platform: process.platform,
+  screenAudioAvailable: process.argv.includes('--sable-screen-audio'),
+  autostartAvailable: process.argv.includes('--sable-autostart'),
+  setBadge: (count: number, overlay: string | null) =>
+    ipcRenderer.invoke('sable-badge', count, overlay) as Promise<void>,
+  requestAttention: () => {
+    ipcRenderer.send('sable-request-attention');
+  },
+  clearWebCaches: () => ipcRenderer.invoke('sable-clear-web-caches') as Promise<void>,
+  dataDir: () => ipcRenderer.invoke('sable-data-dir') as Promise<string | null>,
+  gpuVideoStatus: () =>
+    ipcRenderer.invoke('sable-gpu-video-status') as Promise<{
+      encode: string;
+      decode: string;
+    } | null>,
   applyWindowSettings: (settings: unknown) =>
     ipcRenderer.invoke('sable-apply-window-settings', settings) as Promise<{
       trayAvailable: boolean;
     } | null>,
+  minimizeWindow: () => {
+    ipcRenderer.send('sable-window-minimize');
+  },
+  showWindow: () => {
+    ipcRenderer.send('sable-window-show');
+  },
+  toggleMaximizeWindow: () => {
+    ipcRenderer.send('sable-window-toggle-maximize');
+  },
+  closeWindow: () => {
+    ipcRenderer.send('sable-window-close');
+  },
+  isWindowMaximized: () => ipcRenderer.invoke('sable-window-is-maximized') as Promise<boolean>,
+  onWindowHiddenToTray: (callback: () => void) => {
+    const listener = () => {
+      callback();
+    };
+    ipcRenderer.on('sable-window-hidden-to-tray', listener);
+    return () => {
+      ipcRenderer.removeListener('sable-window-hidden-to-tray', listener);
+    };
+  },
+  onWindowMaximized: (callback: (maximized: boolean) => void) => {
+    const listener = (_event: IpcRendererEvent, maximized: boolean) => {
+      callback(maximized);
+    };
+    ipcRenderer.on('sable-window-maximized', listener);
+    return () => {
+      ipcRenderer.removeListener('sable-window-maximized', listener);
+    };
+  },
   applySettings: (settings: unknown) => {
     ipcRenderer.send('sable-apply-settings', settings);
   },
+  setTelemetryConsent: (enabled: boolean) => {
+    ipcRenderer.send('sable-telemetry-consent', enabled);
+  },
   takeDeepLinks: () => ipcRenderer.invoke('sable-take-deep-links') as Promise<string[]>,
+  openAuthWindow: (id: string, url: string) =>
+    ipcRenderer.invoke('sable-auth-open', id, url) as Promise<void>,
+  closeAuthWindow: (id: string) => ipcRenderer.invoke('sable-auth-close', id) as Promise<void>,
+  openAuthInSystemBrowser: (url: string) =>
+    ipcRenderer.invoke('sable-auth-external', url) as Promise<void>,
+  startAuthLoopback: () => ipcRenderer.invoke('sable-auth-loopback-start') as Promise<string>,
+  closeAuthLoopback: () => ipcRenderer.invoke('sable-auth-loopback-close') as Promise<void>,
   onDeepLinks: (callback: (urls: string[]) => void) => {
     const listener = (_event: IpcRendererEvent, urls: string[]) => {
       callback(urls);
@@ -44,13 +125,35 @@ contextBridge.exposeInMainWorld('sableElectron', {
     ipcRenderer.invoke('sable-screen-audio-apps') as Promise<ScreenAudioListing>,
   startScreenAudio: (selection: unknown) =>
     ipcRenderer.invoke('sable-screen-audio-start', selection) as Promise<string>,
+  startScreenAudioStream: (selection: unknown) =>
+    ipcRenderer.invoke('sable-screen-audio-stream-start', selection) as Promise<void>,
+  onScreenAudioFrames: (callback: (data: ArrayBuffer) => void) => {
+    const listener = (_event: IpcRendererEvent, data: Uint8Array) => {
+      callback(new Uint8Array(data).buffer);
+    };
+    ipcRenderer.on('sable-screen-audio-frames', listener);
+    return () => {
+      ipcRenderer.removeListener('sable-screen-audio-frames', listener);
+    };
+  },
   stopScreenAudio: () => ipcRenderer.invoke('sable-screen-audio-stop') as Promise<void>,
   unmuteScreenAudio: () => ipcRenderer.invoke('sable-screen-audio-unmute') as Promise<void>,
+  pickFiles: (request: PickFilesRequest) =>
+    ipcRenderer.invoke('sable-pick-files', request) as Promise<PickedFile[] | null>,
+  pickThemeFiles: () =>
+    ipcRenderer.invoke('sable-pick-theme-files') as Promise<ThemeFileSnapshot[]>,
+  readThemeFile: (path: string, since: number | null) =>
+    ipcRenderer.invoke('sable-read-theme-file', path, since) as Promise<ThemeFileSnapshot | null>,
+  saveFile: (request: SaveFileRequest) =>
+    ipcRenderer.invoke('sable-save-file', request) as Promise<{ path: string } | null>,
+  shareFile: (request: PickedFile) =>
+    ipcRenderer.invoke('sable-share-file', request) as Promise<void>,
   checkForUpdate: () =>
     ipcRenderer.invoke('sable-update-check') as Promise<{
       version: string;
       notes: string | undefined;
     } | null>,
+  latestVersion: () => ipcRenderer.invoke('sable-update-latest-version') as Promise<string | null>,
   downloadUpdate: async (onProgress: (percent: number) => void) => {
     const listener = (_event: IpcRendererEvent, percent: number) => {
       onProgress(percent);

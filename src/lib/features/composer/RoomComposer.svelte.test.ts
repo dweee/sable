@@ -23,7 +23,7 @@ import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { flushed } from '#lib/ui/flushed.js';
 
-import { parseBotCommands, type BotCommandInvocation } from './bot-commands';
+import { parseBotCommand, type BotCommandInvocation } from './bot-commands';
 import type { ComposerContext } from '#lib/composer/composer-context.js';
 import { invalidatePacks } from '#lib/emoji/load-packs.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
@@ -38,6 +38,7 @@ import {
 import { ComposerEditor } from './editor/composer-editor';
 import { composerSchema } from './editor/schema';
 import { textDoc } from './editor/serialize';
+import { testPersona } from '#lib/personas/persona.js';
 import Harness from './RoomComposerHarness.test.svelte';
 
 afterEach(() => {
@@ -58,6 +59,8 @@ const members: MemberView[] = [
   {
     user_id: '@one:example.org',
     display_name: 'Member One',
+    real_name: 'Member One',
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership: 'join' as const,
@@ -97,7 +100,7 @@ const mediaConfig = vi.fn(() => Promise.resolve({ upload_size: 100 * 1024 * 1024
 
 const scheduleAttachment = vi.fn(() => Promise.resolve('delayed'));
 
-const botCommands: BotCommand[] = parseBotCommands([
+const botCommands: BotCommand[] = [
   {
     sender: '@bot:example.org',
     sender_name: 'Bot',
@@ -116,7 +119,9 @@ const botCommands: BotCommand[] = parseBotCommands([
     sender_avatar: null,
     content: { command: 'register' },
   },
-]);
+]
+  .map((view) => parseBotCommand(view))
+  .filter((command): command is BotCommand => command !== null);
 
 function core(): CoreClient {
   return {
@@ -127,9 +132,22 @@ function core(): CoreClient {
     },
     rpc: {
       members: { list: () => Promise.resolve(members) },
-      messages: { mediaConfig },
+      messages: {
+        mediaConfig,
+        frequentReactions: () => Promise.resolve([]),
+        rememberEmoji: () => Promise.resolve(null),
+      },
       room_state: { botCommands: () => Promise.resolve(botCommands) },
-      personas: { list: () => Promise.resolve({ personas: [], selections: [] }) },
+      personas: {
+        list: () =>
+          Promise.resolve({
+            personas: [],
+            account: null,
+            rooms: {},
+            account_rooms: [],
+            disabled_rooms: [],
+          }),
+      },
       packs: { list: () => Promise.resolve({ packs, complete: true }) },
     },
   } as unknown as CoreClient;
@@ -142,7 +160,7 @@ interface ComposerProps {
     roomId: string,
     body: string,
     formatted: string | null,
-    mentions: { userIds: string[]; room: boolean }
+    mentions: { user_ids: string[]; room: boolean }
   ) => Promise<void>;
   onSendBotCommand?: (
     roomId: string,
@@ -248,6 +266,58 @@ test('the editor mounts as a labelled combobox surface', async () => {
   expect(editable?.getAttribute('contenteditable')).toBe('true');
 });
 
+test.each([
+  { prefix: 'k: ', suffix: null, before: 'hello', after: 'k: hello' },
+  { prefix: null, suffix: '-k', before: 'hello-', after: 'hello-k' },
+])('completing a shorthand previews its profile without another edit: $after', async (trigger) => {
+  vi.useFakeTimers();
+  setPreference('personaProxying', true);
+  const mount = vi.spyOn(ComposerEditor.prototype, 'mount');
+  const client = Object.assign(core(), { onProfileChanged: () => () => {} });
+  vi.spyOn(client.rpc.personas, 'list').mockResolvedValue({
+    personas: [
+      {
+        ...testPersona,
+        triggers: [
+          {
+            prefix: trigger.prefix,
+            suffix: trigger.suffix,
+            keep_trigger: false,
+            alternate_avatar_id: null,
+          },
+        ],
+      },
+    ],
+    account: null,
+    rooms: {},
+    account_rooms: [],
+    disabled_rooms: [],
+  });
+  try {
+    setup({ roomId: '!room:example.org' }, client);
+    await flushed();
+    const editor = mount.mock.contexts[0] as ComposerEditor;
+    mount.mockRestore();
+    await vi.advanceTimersByTimeAsync(300);
+
+    editor.setText(trigger.before);
+    await flushed();
+    expect(screen.getByRole('button', { name: 'Send as' })).toBeInTheDocument();
+    editor.setText(trigger.after);
+    await flushed();
+    expect(screen.getByRole('button', { name: 'Sending as Kris' })).toBeInTheDocument();
+
+    editor.setText(trigger.before);
+    await flushed();
+    expect(screen.getByRole('button', { name: 'Send as' })).toBeInTheDocument();
+  } finally {
+    mount.mockRestore();
+    setPreference('personaProxying', false);
+    cleanup();
+    vi.useRealTimers();
+  }
+});
+
 test('the emoji board shortcut works while the composer is not focused', async () => {
   setup({ roomId: '!room:example.org' });
   await flushed();
@@ -336,7 +406,7 @@ test.each([
 
   await vi.waitFor(() => {
     expect(send).toHaveBeenCalledWith('!room:example.org', source, formatted, {
-      userIds: [],
+      user_ids: [],
       room: false,
     });
   });
@@ -344,12 +414,15 @@ test.each([
 
 test('an unmount stops the typing notice for the room it was mounted with', async () => {
   const typing = vi.fn(async () => {});
-  const instance = setup({ roomId: '!first:example.org', onTyping: typing });
-  await flushed();
+  draftText('hello');
+  const instance = setup({ roomId: '!room:example.org', onTyping: typing });
+  await vi.waitFor(() => {
+    expect(typing).toHaveBeenLastCalledWith('!room:example.org', true);
+  });
 
   instance.unmount();
 
-  expect(typing).toHaveBeenLastCalledWith('!first:example.org', false);
+  expect(typing).toHaveBeenLastCalledWith('!room:example.org', false);
 });
 
 test('stages any selected attachment, not only images, and sends it on submit', async () => {
@@ -390,7 +463,34 @@ test('sends multiple staged files as one gallery', async () => {
   expect(gallery).toHaveBeenCalledWith('!room:example.org', [first, second], {
     caption: null,
     formattedCaption: null,
-    mentions: { userIds: [], room: false },
+    mentions: { user_ids: [], room: false },
+    spoilers: [false, false],
+  });
+  expect(attachment).not.toHaveBeenCalled();
+});
+
+test('keeps spoilered files in the gallery', async () => {
+  const gallery = vi.fn(async () => {});
+  const attachment = vi.fn(async () => {});
+  setup({
+    roomId: '!room:example.org',
+    onSendAttachment: attachment,
+    onSendGallery: gallery,
+  });
+  const first = new File(['one'], 'one.png', { type: 'image/png' });
+  const second = new File(['two'], 'two.png', { type: 'image/png' });
+
+  await pick(first, second);
+  await user.click(screen.getByRole('button', { name: 'Mark two.png as a spoiler' }));
+  submit();
+  await flushed();
+
+  await vi.waitFor(() => {
+    expect(gallery).toHaveBeenCalledWith(
+      '!room:example.org',
+      [first, second],
+      expect.objectContaining({ spoilers: [false, true] })
+    );
   });
   expect(attachment).not.toHaveBeenCalled();
 });
@@ -527,7 +627,9 @@ test('a file dropped outside the composer is staged', async () => {
   setup({ roomId: '!room:example.org' });
   const file = new File(['one'], 'one.png', { type: 'image/png' });
   const drop = new Event('drop', { bubbles: true, cancelable: true });
-  Object.defineProperty(drop, 'dataTransfer', { value: { files: [file], types: ['Files'] } });
+  Object.defineProperty(drop, 'dataTransfer', {
+    value: { files: [file], types: ['Files'], getData: () => '' },
+  });
 
   window.dispatchEvent(drop);
   await flushed();
@@ -573,7 +675,7 @@ test.each([true, false])(
     const message = vi.fn(async () => {});
     const body = 'hey @_one:example.org :wave:';
     const html =
-      'hey <a href="https://matrix.to/#/@one:example.org">@_one:example.org</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt=":wave:" title=":wave:" height="32">';
+      'hey <a href="https://matrix.to/#/@one:example.org">@_one:example.org</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">';
     setup({
       roomId: '!room:example.org',
       onSend: message,
@@ -585,7 +687,7 @@ test.each([true, false])(
 
     await vi.waitFor(() => {
       expect(message).toHaveBeenCalledWith('!room:example.org', body, html, {
-        userIds: ['@one:example.org'],
+        user_ids: ['@one:example.org'],
         room: false,
       });
     });
@@ -606,7 +708,7 @@ test('submitting an untouched rich edit hands back the original body and html', 
 
   await vi.waitFor(() => {
     expect(message).toHaveBeenCalledWith('!room:example.org', 'some **bold** text', html, {
-      userIds: [],
+      user_ids: [],
       room: false,
     });
   });
@@ -698,8 +800,8 @@ test.each([true, false])(
     expect(attachment).toHaveBeenCalledWith('!room:example.org', file, {
       caption: 'hey Member One :wave:',
       formattedCaption:
-        'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt=":wave:" title=":wave:" height="32">',
-      mentions: { userIds: ['@one:example.org'], room: false },
+        'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">',
+      mentions: { user_ids: ['@one:example.org'], room: false },
       spoiler: false,
     });
   }
@@ -732,7 +834,7 @@ test('the caption toggle sends text beside a lone attachment', async () => {
 
   expect(attachment).toHaveBeenCalledWith('!room:example.org', file, { spoiler: false });
   expect(message).toHaveBeenCalledWith('!room:example.org', 'look at this', null, {
-    userIds: [],
+    user_ids: [],
     room: false,
   });
 });
@@ -776,7 +878,7 @@ test('text follows two attachments as its own message', async () => {
     spoiler: false,
   });
   expect(message).toHaveBeenCalledWith('!room:example.org', 'both of these', null, {
-    userIds: [],
+    user_ids: [],
     room: false,
   });
 });
@@ -908,6 +1010,38 @@ test('finishing an edit keeps focus in the editor', async () => {
   expect(document.activeElement).toBe(editor);
 });
 
+test('on a phone, sending a reply keeps the keyboard up', async () => {
+  vi.stubGlobal('matchMedia', () => ({
+    matches: false,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  let setContext: ((next: ComposerContext | null) => void) | undefined;
+  draftText('thanks');
+  setup({
+    roomId: '!room:example.org',
+    context: { kind: 'reply', eventId: '$one:example.org', sender: 'Alice', body: 'Hello' },
+    registerContext: (set) => {
+      setContext = set;
+    },
+    onSend: () => {
+      setContext?.(null);
+      return Promise.resolve();
+    },
+  });
+  await flushed();
+  const editor = document.querySelector('[role="combobox"]');
+  if (!(editor instanceof HTMLElement)) throw new Error('editor not found');
+  editor.focus();
+
+  submit();
+  await flushed();
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+
+  expect(document.activeElement).toBe(editor);
+  vi.unstubAllGlobals();
+});
+
 test('staging files returns focus to the editor', async () => {
   setup({ roomId: '!room:example.org' });
   await flushed();
@@ -998,14 +1132,31 @@ test.each([
   }
 );
 
-test('recording a voice message keeps the typed draft', async () => {
+async function withDeniedMicrophone(run: () => Promise<void>): Promise<void> {
   vi.stubGlobal('AudioContext', vi.fn());
   vi.stubGlobal('Worker', vi.fn());
+  vi.stubGlobal('MediaRecorder', { isTypeSupported: () => true });
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,
     value: { getUserMedia: () => Promise.reject(new DOMException('', 'NotAllowedError')) },
   });
   try {
+    await run();
+  } finally {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(navigator, 'mediaDevices');
+  }
+}
+
+async function startRecording(): Promise<void> {
+  await press(screen.getByRole('button', { name: 'Record a voice message' }));
+  await vi.waitFor(() => {
+    expect(document.querySelector('.voice-close')).not.toBeNull();
+  });
+}
+
+test('recording a voice message keeps the typed draft', () =>
+  withDeniedMicrophone(async () => {
     writeDraft('!room:example.org', {
       doc: textDoc('hold on').toJSON(),
       staged: [],
@@ -1014,21 +1165,42 @@ test('recording a voice message keeps the typed draft', async () => {
     setup({ roomId: '!room:example.org' });
     await flushed();
 
-    await press(screen.getByRole('button', { name: 'Record a voice message' }));
-    await vi.waitFor(() => {
-      expect(document.querySelector('.voice-close')).not.toBeNull();
-    });
+    await startRecording();
     await press(document.querySelector('.voice-close'));
 
     await vi.waitFor(() => {
       expect(editorText()).toBe('hold on');
     });
     expect(screen.getByRole('button', { name: 'Record a voice message' })).toBeInTheDocument();
-  } finally {
-    vi.unstubAllGlobals();
-    Reflect.deleteProperty(navigator, 'mediaDevices');
-  }
-});
+  }));
+
+test('switching rooms drops the voice recording and keeps its draft in the old room', () =>
+  withDeniedMicrophone(async () => {
+    writeDraft('!first:example.org', {
+      doc: textDoc('hold on').toJSON(),
+      staged: [],
+      nextStagedId: 0,
+    });
+    let switchRoom: ((roomId: string) => void) | undefined;
+    setup({
+      roomId: '!first:example.org',
+      registerRoom: (set) => {
+        switchRoom = set;
+      },
+    });
+    await flushed();
+
+    await startRecording();
+    switchRoom?.('!second:example.org');
+    await flushed();
+
+    expect(document.querySelector('.voice-close')).toBeNull();
+    expect(editorText()).toBe('');
+
+    switchRoom?.('!first:example.org');
+    await flushed();
+    expect(editorText()).toBe('hold on');
+  }));
 
 test('a failed send puts the message back in the editor', async () => {
   setup({
@@ -1069,13 +1241,16 @@ test('a failed send offers a retry that sends the restored message', async () =>
   });
   expect(send).toHaveBeenLastCalledWith('!room:example.org', 'hold on', null, {
     room: false,
-    userIds: [],
+    user_ids: [],
   });
   expect(screen.queryByRole('alert')).toBeNull();
 });
 
-test('a refused send can be dismissed but not retried', async () => {
-  const refused = Object.assign(new Error('denied'), { detail: { code: 'denied' } });
+test.each([
+  ['denied', 'You do not have permission to send that here'],
+  ['message_too_large', 'This message is too large to send. Shorten it and try again.'],
+])('a %s send keeps the draft and can be dismissed but not retried', async (code, message) => {
+  const refused = Object.assign(new Error(code), { detail: { code } });
   writeDraft('!room:example.org', {
     doc: textDoc('hold on').toJSON(),
     staged: [],
@@ -1086,7 +1261,8 @@ test('a refused send can be dismissed but not retried', async () => {
 
   submit();
   const alert = await screen.findByRole('alert');
-  expect(alert).toHaveTextContent('You do not have permission to send that here');
+  expect(alert).toHaveTextContent(message);
+  expect(editorText()).toBe('hold on');
   expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
 
   await press(screen.getByRole('button', { name: 'Dismiss' }));
@@ -1562,7 +1738,7 @@ test('a staged picture offers a metadata choice per file', async () => {
   await press(document.querySelector('.staged-options'));
 
   await press(await screen.findByRole('menuitem', { name: 'Metadata' }));
-  const rows = await screen.findAllByRole('menuitem', { name: /location|metadata|Keep/ });
+  const rows = await screen.findAllByRole('menuitemradio', { name: /location|metadata|Keep/ });
   expect(rows.map((row) => row.textContent.trim())).toEqual([
     '✓ Remove location',
     'Remove all metadata',
@@ -1601,7 +1777,7 @@ test('the staged viewer offers the same metadata choice', async () => {
   const viewer = await screen.findByRole('dialog');
   await press(within(viewer).getByRole('button', { name: /Options for cat.png/ }));
   await press(await screen.findByRole('menuitem', { name: 'Metadata' }));
-  await press(await screen.findByRole('menuitem', { name: 'Remove all metadata' }));
+  await press(await screen.findByRole('menuitemradio', { name: 'Remove all metadata' }));
 
   await vi.waitFor(() => {
     expect(document.querySelector('.staged-options')?.className).toContain('staged-spoiler-on');
@@ -1650,7 +1826,7 @@ test('a send tap sends immediately', async () => {
       '!room:example.org',
       'now',
       null,
-      { userIds: [], room: false },
+      { user_ids: [], room: false },
     ]);
     await vi.advanceTimersByTimeAsync(SCHEDULE_PRESS_MS);
     expect(document.body.textContent).not.toContain('Schedule this message');
@@ -2120,7 +2296,7 @@ test('clearing an attachment caption sends an edit without asking to delete', as
   submit();
   await vi.waitFor(() => {
     expect(onSend).toHaveBeenCalledWith('!room:example.org', '', null, {
-      userIds: [],
+      user_ids: [],
       room: false,
     });
   });
@@ -2278,6 +2454,29 @@ test('choosing a bot command suggestion opens its argument form', async () => {
   expect(screen.getByLabelText('days')).toBeTruthy();
 });
 
+test('an open bot command form and its values survive switching rooms', async () => {
+  draftText('/wa');
+  let switchRoom: ((roomId: string) => void) | undefined;
+  setup({
+    roomId: '!room:example.org',
+    onSendBotCommand: async () => {},
+    registerRoom: (set) => {
+      switchRoom = set;
+    },
+  });
+  await press(await screen.findByRole('option', { name: /\/warn/ }));
+  await fireEvent.input(screen.getByLabelText('days'), { target: { value: '7' } });
+
+  switchRoom?.('!other:example.org');
+  await flushed();
+  expect(screen.queryByRole('form', { name: 'Arguments for /warn' })).toBeNull();
+  switchRoom?.('!room:example.org');
+  await flushed();
+
+  expect(screen.getByRole('form', { name: 'Arguments for /warn' })).toBeTruthy();
+  expect(screen.getByLabelText('days')).toHaveProperty('value', '7');
+});
+
 test.each(['command', 'argument'])('formatting a bot %s keeps its invocation', async (part) => {
   const onSendBotCommand = vi.fn(async () => {});
   const draft = composerSchema.node('doc', null, [
@@ -2384,11 +2583,14 @@ test('a failed bot command does not restore into another room', async () => {
   setRoom?.('!other:example.org');
   await flushed();
   rejectSend?.(new Error('offline'));
+  await flushed();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-  await vi.waitFor(() => {
-    expect(screen.getByRole('alert')).toBeInTheDocument();
-  });
+  expect(screen.queryByRole('alert')).toBeNull();
   expect(editorText()).toBe('');
+  setRoom?.('!room:example.org');
+  await flushed();
+  expect(editorText()).toBe('/register payload');
 });
 
 test('a bot command lookup does not clear a newer draft', async () => {
@@ -2694,8 +2896,55 @@ test('without bot command support an unknown command still goes to the slash han
 
   await vi.waitFor(() => {
     expect(onSend).toHaveBeenCalledWith('!room:example.org', '/warn @spam:example.org 7', null, {
-      userIds: [],
+      user_ids: [],
       room: false,
     });
   });
+});
+
+test('a send that fails after leaving the room returns its text to that room, not the open one', async () => {
+  let failSend: ((error: Error) => void) | undefined;
+  const send = vi.fn(
+    () =>
+      new Promise<void>((_, reject) => {
+        failSend = reject;
+      })
+  );
+  let switchRoom: ((roomId: string) => void) | undefined;
+  const doc = composerSchema.node('doc', null, [
+    composerSchema.nodes.paragraph.create(null, [composerSchema.text('meant for the first room')]),
+  ]);
+  writeDraft('!first:example.org', { doc: doc.toJSON(), staged: [], nextStagedId: 0 });
+  setup({
+    roomId: '!first:example.org',
+    onSend: send,
+    registerRoom: (set) => {
+      switchRoom = set;
+    },
+  });
+  await flushed();
+
+  submit();
+  await vi.waitFor(() => {
+    expect(send).toHaveBeenCalled();
+  });
+  switchRoom?.('!second:example.org');
+  await flushed();
+  expect(editorText()).toBe('');
+  failSend?.(new Error('network'));
+  await flushed();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await flushed();
+
+  expect(send).toHaveBeenCalledWith(
+    '!first:example.org',
+    'meant for the first room',
+    null,
+    expect.anything()
+  );
+  expect(editorText()).toBe('');
+  expect(screen.queryByRole('alert')).toBeNull();
+  switchRoom?.('!first:example.org');
+  await flushed();
+  expect(editorText()).toBe('meant for the first room');
 });

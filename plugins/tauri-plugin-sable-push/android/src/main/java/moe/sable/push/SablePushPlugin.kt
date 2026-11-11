@@ -4,9 +4,11 @@ import android.app.Activity
 import android.app.NotificationManager
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import androidx.core.app.ActivityCompat
 import androidx.work.WorkManager
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
@@ -45,6 +47,18 @@ class AccountsArgs {
 }
 
 @InvokeArg
+class OpenConversationArgs {
+    var userId: String? = null
+    var roomId: String? = null
+}
+
+@InvokeArg
+class ConversationsArgs {
+    var userId: String = ""
+    var roomIds: List<String> = emptyList()
+}
+
+@InvokeArg
 class PolicyArgs {
     var enabled: Boolean = false
     var content: Boolean = false
@@ -52,6 +66,8 @@ class PolicyArgs {
     var sounds: Boolean = true
     var notifyOnce: Boolean = true
     var clearOnRead: Boolean = true
+    var privateReceipts: Boolean = false
+    var quietWhenActiveElsewhere: Boolean = false
 }
 
 @InvokeArg
@@ -61,7 +77,11 @@ class ChimeArgs {
 
 private const val CHIME_ASSET = "msg.webm"
 
-@TauriPlugin
+@TauriPlugin(
+    permissions = [
+        Permission(strings = ["android.permission.ACCESS_LOCAL_NETWORK"], alias = "localNetwork"),
+    ],
+)
 class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
     private val manager = activity.getSystemService(NotificationManager::class.java)
 
@@ -112,9 +132,28 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun setAccounts(invoke: Invoke) {
-        PushPolicy(activity).accounts = invoke.parseArgs(AccountsArgs::class.java).accounts
+        val accounts = invoke.parseArgs(AccountsArgs::class.java).accounts
             .filter { it.userId.isNotEmpty() && it.deviceId.isNotEmpty() }
             .associate { it.userId to it.deviceId }
+        PushPolicy(activity).accounts = accounts
+        ConversationShortcuts.retainAccounts(activity, accounts.keys)
+        invoke.resolve()
+    }
+
+    @Command
+    fun setOpenConversation(invoke: Invoke) {
+        val args = invoke.parseArgs(OpenConversationArgs::class.java)
+        val userId = args.userId?.takeIf { it.isNotEmpty() }
+        val roomId = args.roomId?.takeIf { it.isNotEmpty() }
+        val locus = if (userId != null && roomId != null) ConversationShortcuts.locus(userId, roomId) else null
+        activity.runOnUiThread { ActivityCompat.setLocusContext(activity, locus, null) }
+        invoke.resolve()
+    }
+
+    @Command
+    fun forgetConversations(invoke: Invoke) {
+        val args = invoke.parseArgs(ConversationsArgs::class.java)
+        ConversationShortcuts.forgetRooms(activity, args.userId, args.roomIds.toSet())
         invoke.resolve()
     }
 
@@ -128,6 +167,8 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
         policy.notificationSounds = args.sounds
         policy.notifyOnce = args.notifyOnce
         policy.clearOnRead = args.clearOnRead
+        policy.privateReceipts = args.privateReceipts
+        policy.quietWhenActiveElsewhere = args.quietWhenActiveElsewhere
         if (!args.enabled || !args.content) dismissAll()
         invoke.resolve()
     }
@@ -189,6 +230,7 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
             WorkManager.getInstance(activity).cancelAllWorkByTag("push-room:$id")
             PushNotificationGate.dismiss(activity, id) { manager.cancel(id) }
         }
+        PushNotifier.cancelOrphanedSummary(activity)
     }
 
     private fun dismissAll() {

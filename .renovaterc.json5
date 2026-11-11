@@ -15,6 +15,15 @@
   lockFileMaintenance: {
     enabled: true,
   },
+  customManagers: [
+    {
+      customType: 'regex',
+      managerFilePatterns: ['/\\.nix$/'],
+      matchStrings: [
+        'datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*\\S+\\s*=\\s*"(?<currentValue>[^"]+)";',
+      ],
+    },
+  ],
   packageRules: [
     {
       matchManagers: ['github-actions'],
@@ -26,6 +35,11 @@
     },
     {
       matchManagers: ['cargo', 'rust-toolchain'],
+      groupName: 'cargo',
+    },
+    {
+      description: 'wasm-bindgen-cli must match the wasm-bindgen version in Cargo.lock',
+      matchPackageNames: ['wasm-bindgen-cli'],
       groupName: 'cargo',
     },
     {
@@ -54,8 +68,14 @@
       groupName: 'matrix-rust-sdk',
     },
     {
+      description: 'Git revisions are updated manually',
       matchDatasources: ['git-refs'],
-      matchPackageNames: ['https://github.com/SableClient/**'],
+      matchPackageNames: [
+        'https://github.com/SableClient/**',
+        'https://git.sable.moe/SableClient/matrix-rust-sdk{,.git}',
+        'https://github.com/ruma/ruma{,.git}',
+        'https://github.com/yanqianglu/tauri-plugin-auth-session{,.git}',
+      ],
       enabled: false,
     },
     {
@@ -69,22 +89,22 @@
       allowedVersions: '<7',
     },
     {
-      description: 'CEF and winit must match the pinned tauri-runtime-cef revision',
+      description: 'Match ruma-html until the Ruma pin is updated',
       matchManagers: ['cargo'],
-      matchPackageNames: ['cef', 'winit'],
-      enabled: false,
+      matchPackageNames: ['html5ever'],
+      allowedVersions: '<0.40',
     },
     {
-      description: 'GTK must match the version used by WebKitGTK and Tauri',
+      description: 'Share libsqlite3-sys with the pinned Matrix SDK',
       matchManagers: ['cargo'],
-      matchPackageNames: ['gtk'],
-      allowedVersions: '<0.19',
+      matchPackageNames: ['rusqlite'],
+      allowedVersions: '<0.41',
     },
     {
-      description: 'The release runner has PipeWire headers for the 0.9 bindings',
+      description: 'Keep PipeWire compatible with the Audiofox bindings',
       matchManagers: ['cargo'],
       matchPackageNames: ['pipewire'],
-      allowedVersions: '<0.10',
+      allowedVersions: '<0.11',
     },
     {
       description: 'Keep compatibility pins until backtrace on iOS and deep-link on Linux support newer dependencies',

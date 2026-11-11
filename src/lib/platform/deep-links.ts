@@ -21,21 +21,28 @@ export async function subscribeDeepLinks(onUrls: (urls: string[]) => void): Prom
   }
 }
 
-async function invokedLinks(command: string): Promise<string[]> {
+async function launchDeepLinks(): Promise<string[]> {
+  const electron = electronBridge();
+  if (electron) return electron.takeDeepLinks();
+  if (!isTauri()) return [];
+
   try {
-    return (await invoke<string[] | null>(command)) ?? [];
+    return (await invoke<string[] | null>('plugin:deep-link|get_current')) ?? [];
   } catch {
     return [];
   }
 }
 
-export async function currentDeepLinks(): Promise<string[]> {
-  const electron = electronBridge();
-  if (electron) return electron.takeDeepLinks();
-  if (!isTauri()) return [];
+let launchLinks: Promise<string[]> | undefined;
 
-  return [
-    ...(await invokedLinks('plugin:deep-link|get_current')),
-    ...(await invokedLinks('pending_deep_links')),
-  ];
+// Login and permalink handlers share the launch queue without consuming each other's links.
+export async function currentDeepLinks(
+  accepts: (url: string) => boolean = () => true
+): Promise<string[]> {
+  launchLinks ??= launchDeepLinks();
+  const pending = await launchLinks;
+  const accepted = pending.filter(accepts);
+  const remaining = pending.filter((url) => !accepts(url));
+  pending.splice(0, pending.length, ...remaining);
+  return accepted;
 }

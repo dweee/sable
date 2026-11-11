@@ -1,27 +1,50 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "entry": [
-    "scripts/**/*.mjs",
-    "tests/fixtures/generate-v1-crypto.mjs",
-    "tests/e2e/global.setup.ts",
-    "tests/e2e/global.teardown.ts"
-  ],
-  "playwright": {
-    "config": [
-      "playwright.config.ts",
-      "tests/e2e/playwright.preload.config.ts",
-      "tests/e2e/playwright.migration.config.ts"
-    ]
+  "workspaces": {
+    ".": {
+      "entry": [
+        "i18next.config.ts",
+        "scripts/**/*.mjs",
+        "tests/e2e/global.setup.ts",
+        "tests/e2e/global.teardown.ts",
+        "tests/e2e/search-peer-live.mjs",
+        "crates/sable-node/tests/native-lifecycle.mjs",
+        "src/transport/create.native.ts"
+      ],
+      "playwright": {
+        "config": [
+          "playwright.config.ts",
+          "tests/e2e/playwright.preload.config.ts",
+          "tests/e2e/playwright.migration.config.ts",
+          "tests/e2e/playwright.auth.config.ts",
+          "tests/e2e/playwright.drag-list.config.ts"
+        ]
+      },
+      "ignoreDependencies": [
+        "@fontsource-variable/cascadia-code",
+        "@sableclient/twemoji-font",
+        "wrangler",
+        "@sentry/browser",
+        "electron-builder"
+      ]
+    },
+    "electron": {
+      "entry": ["after-pack.mjs", "src/main.ts", "src/preload.ts", "src/core-host.ts"],
+      "ignoreUnresolved": ["./sable_node.node"]
+    }
   },
-  "ignoreDependencies": [
-    "@fontsource-variable/cascadia-code",
-    "@fontsource-variable/nunito",
-    "@sableclient/twemoji-font",
-    "wrangler",
-    "@sentry/browser"
+  "ignoreBinaries": [
+    "mise",
+    "ditto",
+    "wasm-bindgen",
+    "watchexec",
+    "dsymutil",
+    "cc",
+    "strip",
+    "package"
   ],
-  "ignoreBinaries": ["mise", "ditto", "wasm-bindgen", "watchexec", "dsymutil", "cc", "strip"],
-  "ignoreUnresolved": ["/index.mjs"],
+  "ignore": ["scripts/build/csp.d.mts"],
+  "ignoreUnresolved": ["/src/lib/model/model.ts", "/src/lib/search/search-peer.ts"],
   "rules": {
     "exports": "off",
     "types": "off",

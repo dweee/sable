@@ -21,7 +21,7 @@ for (const viewport of [
 
     const card = auth.setupCard;
     await expect(page).toHaveURL(/\/setup\/device$/, { timeout: 20_000 });
-    await expect(card.getByRole('heading', { name: "Confirm it's you" })).toBeVisible();
+    await expect(card.getByRole('heading', { name: 'Confirm it’s you' })).toBeVisible();
     await card.getByRole('button', { name: 'Reset my digital identity' }).click();
     await card.getByRole('checkbox', { name: 'I understand this cannot be undone' }).check();
     await card.getByRole('button', { name: 'Reset my digital identity' }).click();
@@ -32,7 +32,7 @@ for (const viewport of [
     );
     const keep = card.getByRole('button', { name: 'Continue' });
     await expect(keep).toBeDisabled();
-    await card.getByRole('checkbox', { name: "I've written it down" }).check();
+    await card.getByRole('checkbox', { name: 'I’ve written it down' }).check();
     await keep.click();
 
     await expect(page).toHaveURL(/\/setup\/notifications$/);
@@ -92,7 +92,7 @@ test('mobile hides neighboring cards and card navigation preserves page scroll',
   await expect(adjacent).toBeVisible();
   const appearance = page.locator('.rail > .auth-card.after').first();
   await expect(appearance).toBeVisible();
-  await expect(appearance.locator('.stage-activation')).toBeDisabled();
+  await expect(appearance.locator('.stage-activation')).toHaveCount(0);
   await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '2');
   for (const card of [adjacent, appearance]) {
     const { opacity, visibleWidth } = await card.evaluate((element) => {
@@ -110,14 +110,15 @@ test('mobile hides neighboring cards and card navigation preserves page scroll',
     expect(visibleWidth).toBe(0);
   }
 
-  const before = await page.evaluate(() => {
-    window.scrollTo(0, 120);
-    return window.scrollY;
+  const scroller = page.locator('.auth-page');
+  const before = await scroller.evaluate((element) => {
+    element.scrollTop = 120;
+    return element.scrollTop;
   });
   expect(before).toBeGreaterThan(0);
   await auth.previousStageButton.click();
   await expect(page).toHaveURL(/\/setup\/profile$/);
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await auth.nextStageButton.click();
   await expect(page).toHaveURL(/\/setup\/notifications$/);
   await expect(auth.nextStageButton).toHaveCount(0);

@@ -3,14 +3,16 @@
 import { render, screen, within } from '@testing-library/svelte';
 import { userEvent } from '@testing-library/user-event';
 import { createRawSnippet } from 'svelte';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { Window as HappyDOMWindow } from 'happy-dom';
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import { flushed } from '#lib/ui/flushed.js';
 
 import type { TimelineItemView } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
+import { timelineItem as item } from '#lib/features/room/timeline/test-items.js';
 import { RoomTimeline } from '#lib/rooms/timeline.svelte.js';
 
-import { TimelineWindow } from '#lib/timeline/timeline-window.js';
+import { TimelineWindow, rememberTimelineView } from '#lib/timeline/timeline-window.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
 import { TIMELINE_LAYOUT } from './timeline-layout';
 import { MAX_EMPTY_REFILLS } from './timeline-pagination.svelte.js';
@@ -37,8 +39,9 @@ import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
 let animationFrames: FrameRequestCallback[];
 
 beforeEach(() => {
+  rememberTimelineView('!room:example.org:', null);
   resetPage();
-  // happy-dom ships no Web Animations API, and the skeleton fades out through it.
+  // happy-dom has no Web Animations API.
   Element.prototype.animate = () =>
     ({
       cancel: () => {},
@@ -94,41 +97,6 @@ async function finishWheelGesture(element?: HTMLElement): Promise<void> {
   await flushed();
 }
 
-function item(id: string): TimelineItemView {
-  return withRowFields({
-    id,
-    event_id: `$${id}`,
-    transaction_id: null,
-    send_state: null,
-    sender: '@alice:example.org',
-    sender_name: 'Alice',
-    sender_avatar: null,
-    timestamp: 0,
-    content: {
-      kind: 'message',
-      body: id,
-      html: id,
-      emote: false,
-      notice: false,
-      edited: false,
-      jumbo: null,
-    },
-    in_reply_to: null,
-    thread_root: null,
-    thread_summary: null,
-    reactions: [],
-    is_own: false,
-    read_by: [],
-    read_timestamps: {},
-    per_message_profile: null,
-    bundled_link_previews: [],
-    link_previews_removed: null,
-    mention: 'none',
-    forwarded: null,
-    forum_title: null,
-  });
-}
-
 function readMarker(id: string): TimelineItemView {
   return withRowFields({ ...item(id), event_id: null, content: { kind: 'read_marker' } });
 }
@@ -157,8 +125,8 @@ function viewport(): HTMLDivElement {
   const element = document.querySelector('.viewport');
   if (!(element instanceof HTMLDivElement)) throw new Error('timeline viewport not found');
   Object.defineProperties(element, {
-    clientHeight: { configurable: true, value: 100 },
-    scrollHeight: { configurable: true, value: 100 },
+    clientHeight: { configurable: true, value: 150 },
+    scrollHeight: { configurable: true, value: 150 },
   });
   return element;
 }
@@ -180,7 +148,9 @@ function timelineViewport(): HTMLElement {
 test('expanding a member group exposes the original event source', async () => {
   const roomTimeline = timeline();
   const source = JSON.stringify({ event_id: '$first' });
-  const eventSource = vi.fn(() => Promise.resolve({ source, encrypted: false, original: null }));
+  const eventSource = vi.fn(() =>
+    Promise.resolve({ source, encrypted: false, original: null, encryption: null })
+  );
   Object.assign(core.rpc.timeline, { eventSource });
   roomTimeline.items = ['first', 'last'].map((id): TimelineItemView =>
     withRowFields({
@@ -272,7 +242,7 @@ test('announces new arrivals separately from virtualized history', async () => {
   });
   viewport();
   await runAnimationFrames();
-  expect(document.querySelector('[role="log"]')?.getAttribute('aria-live')).toBe('off');
+  expect(document.querySelector('[role="feed"]')?.getAttribute('aria-busy')).toBe('false');
   const announcement = () =>
     document.querySelector('[data-timeline-announcements]')?.textContent.trim();
   expect(announcement()).toBe('');
@@ -281,10 +251,10 @@ test('announces new arrivals separately from virtualized history', async () => {
   expect(announcement()).toBe('');
   roomTimeline.items = [...roomTimeline.items, item('new')];
   await runAnimationFrames();
-  expect(announcement()).toBe('1 new message');
+  expect(announcement()).toBe('Alice: new');
   roomTimeline.items = [...roomTimeline.items, { ...item('own'), is_own: true }];
   await runAnimationFrames();
-  expect(announcement()).toBe('1 new message');
+  expect(announcement()).toBe('Alice: new');
 });
 
 test('a permalink whose context does not fill the viewport paginates on its own', async () => {
@@ -555,7 +525,7 @@ test('a reset that leaves one message refills the viewport on its own', async ()
 
   const element = viewport();
   Object.defineProperties(element, {
-    clientHeight: { configurable: true, value: 100 },
+    clientHeight: { configurable: true, value: 150 },
     scrollHeight: { configurable: true, value: 900 },
   });
   await flushed();
@@ -737,8 +707,10 @@ test('a live timeline that fails to load does not read as an empty room', async 
   expect(document.querySelector('.timeline-error')).toBeNull();
 });
 
-test('reveals a short timeline at once and pads it out behind the reader', async () => {
+test.each(['loaded', 'cached'])('shows %s messages before loading more', async (source) => {
+  const cached = source === 'cached';
   const roomTimeline = timeline();
+  roomTimeline.loading = cached;
   roomTimeline.items = [item('latest')];
   let releaseHistory = (): void => {};
   const history = vi.fn(
@@ -749,13 +721,14 @@ test('reveals a short timeline at once and pads it out behind the reader', async
         };
       })
   );
+  const read = vi.fn();
   render(TimelineListHarness, {
     props: {
       list: {
         timeline: roomTimeline,
         onRequestHistory: history,
         onRequestFuture: async () => {},
-        onRead: async () => {},
+        onRead: read,
       },
     },
   });
@@ -764,8 +737,18 @@ test('reveals a short timeline at once and pads it out behind the reader', async
   await flushed();
   await runAnimationFrames();
 
-  // Nothing to land on, so the reader sees the latest message while the fill runs.
   expect(timelineViewport().classList.contains('initial')).toBe(false);
+  if (cached) {
+    expect(read).not.toHaveBeenCalled();
+    expect(history).not.toHaveBeenCalled();
+    roomTimeline.error = 'load_failed';
+    roomTimeline.loading = false;
+    await runAnimationFrames();
+    expect(read).not.toHaveBeenCalled();
+    expect(history).not.toHaveBeenCalled();
+    roomTimeline.error = null;
+    await runAnimationFrames();
+  }
   expect(history).toHaveBeenCalledTimes(1);
 
   releaseHistory();
@@ -783,6 +766,7 @@ test('a timeline with an unread marker reveals on it without waiting for history
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         onRequestHistory: history,
         onRequestFuture: async () => {},
         onRead: async () => {},
@@ -796,6 +780,33 @@ test('a timeline with an unread marker reveals on it without waiting for history
 
   expect(timelineViewport().classList.contains('initial')).toBe(false);
   expect(jumps.mock.calls.some(([key]) => key?.includes('marker'))).toBe(true);
+});
+
+test('a read room with a lagging read marker opens at the latest message and moves the marker', async () => {
+  const jumps = vi.spyOn(TimelineWindow.prototype, 'jumpTo');
+  const roomTimeline = timeline();
+  roomTimeline.items = [item('yesterday'), readMarker('marker'), item('today'), item('latest')];
+  const read = vi.fn().mockResolvedValue(undefined);
+  render(TimelineListHarness, {
+    props: {
+      list: {
+        timeline: roomTimeline,
+        onRequestHistory: () => Promise.resolve(true),
+        onRequestFuture: async () => {},
+        onRead: read,
+      },
+    },
+  });
+
+  viewport();
+  await flushed();
+  await runAnimationFrames();
+
+  expect(jumps).not.toHaveBeenCalledWith(expect.stringContaining('marker'), 'start');
+  expect(screen.queryByRole('button', { name: 'Jump to unread' })).not.toBeInTheDocument();
+  await vi.waitFor(() => {
+    expect(read).toHaveBeenCalledWith('$latest', true);
+  });
 });
 
 test('a notification lands on its event in the live timeline, not on the unread marker', async () => {
@@ -838,6 +849,7 @@ test('a notification lands on its event once it arrives after the room opened', 
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         landingEventId: '$late',
         onLanded: landed,
         onRequestHistory: () => Promise.resolve(true),
@@ -910,6 +922,7 @@ test('a notification whose event is not loaded falls back to the unread marker',
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         landingEventId: '$elsewhere',
         onRequestHistory: () => Promise.resolve(true),
         onRequestFuture: () => Promise.resolve(),
@@ -923,6 +936,40 @@ test('a notification whose event is not loaded falls back to the unread marker',
   await runAnimationFrames();
 
   expect(jumps).toHaveBeenCalledWith(expect.stringContaining('marker'), 'start');
+});
+
+test('does not retry an unavailable notification', async () => {
+  const roomTimeline = timeline();
+  roomTimeline.items = [readMarker('marker'), item('latest')];
+  roomTimeline.readMarkerEventId = '$missing';
+  const requestUnread = vi.fn();
+  const jumps = vi.spyOn(TimelineWindow.prototype, 'jumpTo');
+  render(TimelineListHarness, {
+    props: {
+      list: {
+        timeline: roomTimeline,
+        hasUnread: true,
+        landingEventId: '$missing',
+        onRequestUnread: requestUnread,
+        onRequestHistory: () => Promise.resolve(true),
+        onRequestFuture: async () => {},
+        onRead: async () => {},
+      },
+    },
+  });
+
+  viewport();
+  await flushed();
+  await runAnimationFrames();
+
+  expect(requestUnread).not.toHaveBeenCalled();
+  expect(jumps).toHaveBeenCalledWith(
+    expect.stringContaining('latest'),
+    'start',
+    false,
+    expect.any(AbortSignal)
+  );
+  expect(document.querySelector('.timeline-empty')).toBeNull();
 });
 
 test('a notification whose event is not loaded opens its context and lands on it', async () => {
@@ -940,6 +987,7 @@ test('a notification whose event is not loaded opens its context and lands on it
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         landingEventId: '$elsewhere',
         onLanded: landed,
         onRequestUnread: requestUnread,
@@ -1001,6 +1049,37 @@ test('a notification context stays put at its forward end until the reader jumps
   expect(resume).toHaveBeenCalledTimes(1);
 });
 
+test('a notification context loaded up to the newest message marks the room read', async () => {
+  const read = vi.fn().mockResolvedValue(undefined);
+  const roomTimeline = timeline();
+  roomTimeline.items = [readMarker('marker'), item('latest')];
+  render(TimelineListHarness, {
+    props: {
+      list: {
+        timeline: roomTimeline,
+        hasUnread: true,
+        landingEventId: '$elsewhere',
+        onRequestUnread: (eventId: string) => {
+          roomTimeline.mode = { kind: 'unread', eventId };
+          roomTimeline.forwardPagination = 'end';
+          roomTimeline.items = [item('before'), item('elsewhere'), item('after')];
+          return Promise.resolve();
+        },
+        onRequestHistory: () => Promise.resolve(true),
+        onRequestFuture: () => Promise.resolve(),
+        onRead: read,
+      },
+    },
+  });
+
+  viewport();
+  await flushed();
+  await runAnimationFrames();
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  expect(read).toHaveBeenCalledWith('$after', true);
+});
+
 test('a notification for an unloaded thread reply lands on its root', async () => {
   const jumps = vi.spyOn(TimelineWindow.prototype, 'jumpTo');
   const roomTimeline = timeline();
@@ -1048,7 +1127,7 @@ test('does not eagerly paginate a scrollable initial timeline', async () => {
   });
 
   const element = viewport();
-  expect(element.getAttribute('tabindex')).toBe('0');
+  expect(element.getAttribute('tabindex')).toBe('-1');
   Object.defineProperties(element, {
     scrollHeight: { configurable: true, value: 1_000 },
     scrollTop: { configurable: true, writable: true, value: 0 },
@@ -1392,12 +1471,13 @@ interface LiveTimeline {
 let currentLiveList: { followingLive: boolean };
 
 /** Every row lays out at `ROW`, so the virtualiser and the stubbed box agree. */
-async function mountLive(roomTimeline: RoomTimeline): Promise<LiveTimeline> {
+async function mountLive(roomTimeline: RoomTimeline, roomId?: string): Promise<LiveTimeline> {
   layOutRows();
   roomTimeline.mode = { kind: 'live' };
   roomTimeline.backwardPagination = 'end';
   const list = {
     timeline: roomTimeline,
+    roomId,
     onRequestHistory: () => Promise.resolve(false),
     onRequestFuture: async () => {},
     onRead: async () => {},
@@ -1601,7 +1681,7 @@ test('follows an own echo appended while the reader is still near latest', async
   await flushed();
   await runAnimationFrames();
 
-  expect(document.querySelectorAll('.item')).toHaveLength(21);
+  expect(document.querySelectorAll('.item')).toHaveLength(22);
   expect(element.scrollHeight - element.clientHeight - element.scrollTop).toBe(0);
   expect(followingLive()).toBe(true);
 });
@@ -1646,6 +1726,57 @@ test('follows an own message that arrives already sent while the reader is near 
   expect(element.scrollHeight - element.clientHeight - element.scrollTop).toBe(0);
   expect(followingLive()).toBe(true);
   expect(document.querySelector('.jump-to-latest')).toBeNull();
+});
+
+test('with jump on send turned on, a message sent from this device jumps to it', async () => {
+  setPreference('jumpToLatestOnSend', true);
+  onTestFinished(() => {
+    setPreference('jumpToLatestOnSend', false);
+  });
+  const roomTimeline = timeline();
+  roomTimeline.items = liveItems(20);
+  const { element, end, setScrollHeight } = await mountLive(roomTimeline);
+
+  await dragTo(element, end, end - 900);
+  touch(element, 'touchend', 170);
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  await flushed();
+  expect(followingLive()).toBe(false);
+
+  roomTimeline.items = [
+    ...roomTimeline.items,
+    { ...item('own-sent'), event_id: '$own-sent', transaction_id: 'txn-own-sent', is_own: true },
+  ];
+  setScrollHeight(2_100);
+  await flushed();
+  await runAnimationFrames();
+
+  expect(followingLive()).toBe(true);
+});
+
+test('with jump on send turned on, a message sent from another device keeps the reader in place', async () => {
+  setPreference('jumpToLatestOnSend', true);
+  onTestFinished(() => {
+    setPreference('jumpToLatestOnSend', false);
+  });
+  const roomTimeline = timeline();
+  roomTimeline.items = liveItems(20);
+  const { element, end, setScrollHeight } = await mountLive(roomTimeline);
+
+  await dragTo(element, end, end - 900);
+  touch(element, 'touchend', 170);
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  await flushed();
+
+  roomTimeline.items = [
+    ...roomTimeline.items,
+    { ...item('own-elsewhere'), event_id: '$own-elsewhere', is_own: true },
+  ];
+  setScrollHeight(2_100);
+  await flushed();
+  await runAnimationFrames();
+
+  expect(followingLive()).toBe(false);
 });
 
 function focusComposer(): void {
@@ -1718,6 +1849,40 @@ test('leaves a reader deep in history where they are when they send', async () =
   await runAnimationFrames();
 
   expect(followingLive()).toBe(false);
+});
+
+test('returning to a room restores how far up the reader was', async () => {
+  const roomTimeline = timeline();
+  roomTimeline.items = liveItems(20);
+  onTestFinished(() => {
+    rememberTimelineView('!returning:example.org:', null);
+  });
+  const { element, end, instance } = await mountLive(roomTimeline, '!returning:example.org');
+  await dragTo(element, end, end - 900);
+  await finishWheelGesture(element);
+  const left = element.scrollTop;
+  (instance as { unmount: () => void }).unmount();
+
+  const reopened = timeline();
+  reopened.items = liveItems(20);
+  const again = await mountLive(reopened, '!returning:example.org');
+
+  expect(followingLive()).toBe(false);
+  expect(again.element.scrollTop).toBeLessThan(end - 500);
+  expect(Math.abs(again.element.scrollTop - left)).toBeLessThanOrEqual(ROW);
+});
+
+test('a room that was left at the latest message reopens following it', async () => {
+  const roomTimeline = timeline();
+  roomTimeline.items = liveItems(20);
+  const { instance } = await mountLive(roomTimeline, '!latest:example.org');
+  (instance as { unmount: () => void }).unmount();
+
+  const reopened = timeline();
+  reopened.items = liveItems(20);
+  await mountLive(reopened, '!latest:example.org');
+
+  expect(followingLive()).toBe(true);
 });
 
 test('scrolling back to the end restores follow mode', async () => {
@@ -2239,38 +2404,74 @@ test('the read marker waits for the latest message or for the reader to leave', 
   expect(fullyRead).toHaveBeenCalledExactlyOnceWith('!room:example.org', eventId);
 });
 
-test('with open-at-unread off the room opens at the latest message and keeps receipts back', async () => {
-  setPreference('openRoomsAtUnread', false);
-  const roomTimeline = timeline();
-  roomTimeline.items = [item('read'), ...Array.from({ length: 12 }, (_, i) => item(`new-${i}`))];
-  const read = vi.fn((_eventId: string, _fullyRead: boolean) => Promise.resolve());
-  render(TimelineListHarness, {
-    props: {
-      list: {
-        timeline: roomTimeline,
-        roomId: '!room:example.org',
-        hasUnread: true,
-        onLoadReadMarker: () => Promise.resolve('$read'),
-        onRequestHistory: () => Promise.resolve(true),
-        onRequestFuture: async () => {},
-        onRead: read,
-      },
-    },
-  });
-  unreadViewport();
-  const jumps = vi.spyOn(TimelineWindow.prototype, 'jumpTo');
-  await flushed();
-  await runAnimationFrames();
-  await new Promise((resolve) => setTimeout(resolve, 550));
+test.each(['focused', 'unfocused', 'hidden'] as const)(
+  'with open-at-unread off the %s room sends a receipt for the latest message and keeps the read marker',
+  async (activity) => {
+    setPreference('openRoomsAtUnread', false);
+    const focused = vi.spyOn(document, 'hasFocus').mockReturnValue(activity !== 'unfocused');
+    const visible = vi
+      .spyOn(document, 'visibilityState', 'get')
+      .mockReturnValue(activity === 'hidden' ? 'hidden' : 'visible');
+    const roomTimeline = timeline();
+    const unread = Array.from({ length: 12 }, (_, i) => item(`new-${i}`));
+    roomTimeline.items = [item('read'), ...unread];
+    const read = vi.fn((_eventId: string, _fullyRead: boolean) => Promise.resolve());
+    const list = {
+      timeline: roomTimeline,
+      roomId: '!room:example.org',
+      hasUnread: true,
+      onLoadReadMarker: () => Promise.resolve('$read'),
+      onRequestHistory: () => Promise.resolve(true),
+      onRequestFuture: async () => {},
+      onRead: read,
+    };
+    const { rerender } = render(TimelineListHarness, { props: { list } });
+    const element = unreadViewport();
+    const jumps = vi.spyOn(TimelineWindow.prototype, 'jumpTo');
+    await flushed();
+    await runAnimationFrames();
 
-  expect(read.mock.calls.every(([eventId]) => eventId === '$read')).toBe(true);
-  expect(jumps).not.toHaveBeenCalledWith(
-    expect.stringContaining('new-0'),
-    'start',
-    expect.anything(),
-    expect.anything()
-  );
-});
+    if (activity !== 'focused') {
+      await new Promise((resolve) => setTimeout(resolve, 550));
+      expect(read).not.toHaveBeenCalled();
+      focused.mockReturnValue(true);
+      visible.mockReturnValue('visible');
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+      await runAnimationFrames();
+    }
+
+    await vi.waitFor(() => {
+      expect(read).toHaveBeenCalledWith('$new-11', false);
+    });
+    expect(element.scrollTop).toBe(element.scrollHeight - element.clientHeight);
+    expect(jumps.mock.calls.some(([key]) => key?.includes('new-0'))).toBe(false);
+    expect(screen.getByRole('button', { name: 'Jump to unread' })).toHaveTextContent(
+      '12 new messages'
+    );
+
+    roomTimeline.items = [item('read'), ...unread, readMarker('moved')];
+    await rerender({ list: { ...list, hasUnread: false } });
+    await runAnimationFrames();
+    await userEvent.click(screen.getByRole('button', { name: 'Jump to unread' }));
+    await runAnimationFrames();
+
+    expect(jumps).toHaveBeenCalledWith(
+      expect.stringContaining('new-0'),
+      'start',
+      false,
+      expect.any(AbortSignal)
+    );
+    expect(screen.queryByRole('button', { name: 'Jump to unread' })).not.toBeInTheDocument();
+    expect(document.querySelectorAll('.unread')).toHaveLength(1);
+    expect(
+      document
+        .querySelector('.unread')
+        ?.closest('[data-item-id]')
+        ?.nextElementSibling?.getAttribute('data-item-id')
+    ).toBe('new-0');
+  }
+);
 
 function unreadViewport(): HTMLDivElement {
   const element = viewport();
@@ -2463,6 +2664,7 @@ test('a notification below unread keeps the bar and blocks receipts until jumpin
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         landingEventId: '$new-10',
         onRequestHistory: () => Promise.resolve(true),
         onRequestFuture: async () => {},
@@ -2504,6 +2706,7 @@ test('a notification below unread sends the receipt once the reader reaches the 
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         landingEventId: '$new-10',
         onRequestHistory: () => Promise.resolve(true),
         onRequestFuture: async () => {},
@@ -2615,6 +2818,7 @@ test('marking the unread bar as read keeps it on failure and clears it on succes
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         landingEventId: '$new-10',
         onRequestHistory: () => Promise.resolve(true),
         onRequestFuture: async () => {},
@@ -2646,6 +2850,7 @@ test('Escape jumps to the latest message and marks the room read', async () => {
     props: {
       list: {
         timeline: roomTimeline,
+        hasUnread: true,
         landingEventId: '$new-10',
         onRequestHistory: () => Promise.resolve(true),
         onRequestFuture: async () => {},
@@ -2905,8 +3110,8 @@ test.each(['scrolling', 'settled'])(
   }
 );
 
-async function readsWhileSettings(open: boolean): Promise<ReturnType<typeof vi.fn>> {
-  if (open) page.state.settings = { section: 'account' };
+async function readsUnder(state: App.PageState): Promise<ReturnType<typeof vi.fn>> {
+  Object.assign(page.state, state);
   const roomTimeline = timeline();
   roomTimeline.items = [item('latest')];
   const read = vi.fn((_eventId: string, _fullyRead: boolean) => Promise.resolve());
@@ -2928,9 +3133,145 @@ async function readsWhileSettings(open: boolean): Promise<ReturnType<typeof vi.f
 }
 
 test('a room with no settings over it is read', async () => {
-  expect(await readsWhileSettings(false)).toHaveBeenCalled();
+  expect(await readsUnder({})).toHaveBeenCalled();
 });
 
 test('a room covered by the settings dialog is not read', async () => {
-  expect(await readsWhileSettings(true)).not.toHaveBeenCalled();
+  expect(await readsUnder({ settings: { section: 'account' } })).not.toHaveBeenCalled();
+});
+
+test.each([
+  [390, 'open', false],
+  [390, 'closed', true],
+  [1280, 'open', true],
+] as const)('a %ipx wide room with the drawer %s is read: %s', async (width, drawer, read) => {
+  const happyDOM = (window as unknown as HappyDOMWindow).happyDOM;
+  const size = { width: window.innerWidth, height: window.innerHeight };
+  happyDOM.setViewport({ width, height: 844 });
+  onTestFinished(() => {
+    happyDOM.setViewport(size);
+  });
+
+  expect((await readsUnder({ mobileDrawer: drawer })).mock.calls.length > 0).toBe(read);
+});
+
+test('a timeline that falls back from an unread context to live opens at the latest message', async () => {
+  const roomTimeline = timeline();
+  roomTimeline.hasSnapshot = false;
+  roomTimeline.mode = { kind: 'unread', eventId: '$read' };
+  const jumps = vi.spyOn(TimelineWindow.prototype, 'jumpTo');
+  render(TimelineListHarness, {
+    props: {
+      list: {
+        timeline: roomTimeline,
+        roomId: '!room:example.org',
+        hasUnread: true,
+        onLoadReadMarker: () => Promise.resolve(null),
+        onRequestHistory: () => Promise.resolve(false),
+        onRequestFuture: async () => {},
+        onRead: () => Promise.resolve(),
+      },
+    },
+  });
+  unreadViewport();
+  await flushed();
+
+  roomTimeline.mode = { kind: 'live' };
+  roomTimeline.items = [item('read'), ...Array.from({ length: 12 }, (_, i) => item(`new-${i}`))];
+  roomTimeline.hasSnapshot = true;
+  await flushed();
+  await runAnimationFrames();
+
+  await vi.waitFor(() => {
+    expect(jumps).toHaveBeenCalledWith(null, 'start');
+  });
+});
+
+test('the feed is one tab stop and arrows, Home and End move between messages', async () => {
+  const roomTimeline = timeline();
+  roomTimeline.items = Array.from({ length: 5 }, (_, index) => item(String(index)));
+  render(TimelineListHarness, {
+    props: {
+      list: {
+        timeline: roomTimeline,
+        onRequestHistory: () => Promise.resolve(true),
+        onRequestFuture: async () => {},
+        onRead: async () => {},
+      },
+    },
+  });
+  const element = viewport();
+  await runAnimationFrames();
+
+  const feed = document.querySelector('[role="feed"]');
+  expect(feed).toBe(element);
+  const articles = [...element.querySelectorAll<HTMLElement>('article.message')];
+  expect(articles.length).toBe(5);
+  expect(articles.filter((article) => article.tabIndex === 0)).toHaveLength(1);
+  const rowIndex = Number(articles[0].closest<HTMLElement>('[data-index]')?.dataset.index);
+  expect(articles[0].getAttribute('aria-posinset')).toBe(String(rowIndex + 1));
+  expect(articles[0].getAttribute('aria-setsize')).toBe('-1');
+  expect(articles[0].getAttribute('aria-labelledby')).not.toBeNull();
+
+  articles[1].focus();
+  await userEvent.keyboard('{ArrowDown}');
+  expect(document.activeElement).toBe(articles[2]);
+  await userEvent.keyboard('{Home}');
+  expect(document.activeElement).toBe(articles[0]);
+  await userEvent.keyboard('{End}');
+  expect(document.activeElement).toBe(articles[4]);
+});
+
+test('Enter moves into a message and Escape returns to it', async () => {
+  const roomTimeline = timeline();
+  roomTimeline.items = [item('a'), item('b')];
+  render(TimelineListHarness, {
+    props: {
+      list: {
+        timeline: roomTimeline,
+        onRequestHistory: () => Promise.resolve(true),
+        onRequestFuture: async () => {},
+        onRead: async () => {},
+        onReply: () => {},
+      },
+    },
+  });
+  const element = viewport();
+  await runAnimationFrames();
+  const article = element.querySelector<HTMLElement>('article.message');
+  if (!article) throw new Error('message not rendered');
+  article.focus();
+  const link = document.createElement('a');
+  link.href = 'https://example.org';
+  article.querySelector('.message-main')?.append(link);
+  await Promise.resolve();
+  await userEvent.keyboard('{Enter}');
+  expect(article.contains(document.activeElement) && document.activeElement !== article).toBe(true);
+  await userEvent.keyboard('{Escape}');
+  expect(document.activeElement).toBe(article);
+});
+
+test('Shift+F10 and the ContextMenu key raise the message context menu', async () => {
+  const roomTimeline = timeline();
+  roomTimeline.items = [item('a')];
+  render(TimelineListHarness, {
+    props: {
+      list: {
+        timeline: roomTimeline,
+        onRequestHistory: () => Promise.resolve(true),
+        onRequestFuture: async () => {},
+        onRead: async () => {},
+      },
+    },
+  });
+  const element = viewport();
+  await runAnimationFrames();
+  const article = element.querySelector<HTMLElement>('article.message');
+  if (!article) throw new Error('message not rendered');
+  const raised = vi.fn();
+  article.addEventListener('contextmenu', raised);
+  article.focus();
+  await userEvent.keyboard('{Shift>}{F10}{/Shift}');
+  await userEvent.keyboard('{ContextMenu}');
+  expect(raised).toHaveBeenCalledTimes(2);
 });

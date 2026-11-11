@@ -1,5 +1,5 @@
 appId: moe.sable.next.electron
-productName: Sable v2 Electron
+productName: Sable
 copyright: Copyright © SableClient contributors
 
 directories:
@@ -21,6 +21,8 @@ extraResources:
       - '!**/sable_wasm_bg-*.wasm'
   - from: ../src-tauri/icons/icon.png
     to: sable-tray.png
+  - from: ../src-tauri/icons/icon.ico
+    to: sable-tray.ico
 
 npmRebuild: false
 afterPack: ./after-pack.mjs
@@ -29,31 +31,8 @@ publish:
   provider: generic
   url: https://git.sable.moe/SableClient/sable-next/releases/download/${channel}
 
-electronLanguages:
-  - bg
-  - cs
-  - de
-  - en
-  - en_GB
-  - es
-  - es_419
-  - fr
-  - it
-  - nl
-  - pl
-  - pt_BR
-  - pt_PT
-  - ro
-  - th
-  - tr
-  - uk
-
-protocols:
-  - name: Sable
-    schemes:
-      - moe.sable.next
-
 mac:
+  artifactName: sable-${version}-${arch}.${ext}
   category: public.app-category.social-networking
   icon: ../src-tauri/icons/icon.icns
   minimumSystemVersion: '12.0'
@@ -63,6 +42,8 @@ mac:
   # Not '-': 26.15.3 signs with any keychain certificate whose name has a dash.
   identity: null
   hardenedRuntime: false
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.plist
   extendInfo:
     NSCameraUsageDescription: Sable needs camera access for video calls, photos and videos.
     NSMicrophoneUsageDescription: Sable needs microphone access for calls and videos.
@@ -72,6 +53,7 @@ dmg:
   background: ../src-tauri/icons/installer/dmg-background.png
 
 win:
+  artifactName: sable-${version}-${arch}.${ext}
   icon: ../src-tauri/icons/icon.ico
   target:
     - nsis
@@ -85,8 +67,8 @@ nsis:
 
 linux:
   maintainer: SableClient
-  artifactName: sable-electron-${version}-${arch}.${ext}
-  executableName: sable-electron
+  artifactName: sable-${version}-${arch}.${ext}
+  executableName: sable
   syncDesktopName: true
   icon: ../src-tauri/icons/icon.png
   category: Network;InstantMessaging
@@ -94,8 +76,9 @@ linux:
     - deb
     - rpm
     - AppImage
+    - tar.gz
 
 deb:
-  packageName: sable-electron
+  packageName: sable
 rpm:
-  packageName: sable-electron
+  packageName: sable

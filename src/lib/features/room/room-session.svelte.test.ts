@@ -1,9 +1,5 @@
 import { expect, test, vi } from 'vitest';
-import type {
-  RoomOpenView,
-  RoomPowerLevelsView,
-  RoomStateEventView,
-} from '#src/generated/protocol';
+import type { RoomOpenView, RoomStateEventView } from '#src/generated/protocol';
 import { RoomSession } from './room-session.svelte.js';
 import { FOUNDER_POWER_LEVEL } from './settings/power-level-tags';
 
@@ -28,6 +24,18 @@ function opened(eventId: string): RoomOpenView {
       can_change_power_levels: false,
       can_manage_children: false,
     },
+    power_levels: {
+      ban: 50,
+      kick: 50,
+      redact: 50,
+      invite: 0,
+      events_default: 0,
+      state_default: 50,
+      users_default: 0,
+      events: {},
+      users: {},
+      notifications_room: 50,
+    },
     power_level_tags: {},
     widgets: [],
     pinned_event_ids: [eventId],
@@ -37,22 +45,6 @@ function opened(eventId: string): RoomOpenView {
 
 function fixture() {
   const rooms = { open: vi.fn(() => Promise.resolve(opened('$new'))) };
-  const members = {
-    powerLevels: vi.fn((): Promise<RoomPowerLevelsView> =>
-      Promise.resolve({
-        ban: 50,
-        kick: 50,
-        redact: 50,
-        invite: 0,
-        events_default: 0,
-        state_default: 50,
-        users_default: 0,
-        events: {},
-        users: {},
-        notifications_room: 50,
-      })
-    ),
-  };
   const roomState = {
     event: vi.fn((..._args: unknown[]): Promise<unknown> => Promise.resolve(null)),
     memberListThreshold: vi.fn((..._args: unknown[]): Promise<number | null> =>
@@ -67,7 +59,7 @@ function fixture() {
     roomState,
     rooms,
     pins,
-    session: new RoomSession({ room_state: roomState, rooms, members }, pins),
+    session: new RoomSession({ room_state: roomState, rooms }, pins),
   };
 }
 
@@ -143,6 +135,22 @@ test('widget removal cannot populate the next room with the previous room widget
     widget_id: 'widget',
   });
   expect(session.widgets).toEqual([]);
+});
+
+test('a tombstoned room resolves its archive message without a replacement room', async () => {
+  const { roomState, session } = fixture();
+  roomState.event.mockResolvedValueOnce({ body: 'This room has been archived.' });
+  session.sync('!archived', true, 0);
+  await settle();
+
+  expect(roomState.event).toHaveBeenCalledWith({
+    room_id: '!archived',
+    event_type: 'm.room.tombstone',
+    state_key: '',
+  });
+  expect(session.tombstoneChecked).toBe(true);
+  expect(session.tombstoneReplacementId).toBeNull();
+  expect(session.tombstoneBody).toBe('This room has been archived.');
 });
 
 test('tombstone completion and member settings are cancelled on room change', async () => {

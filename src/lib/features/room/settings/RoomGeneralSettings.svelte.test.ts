@@ -40,6 +40,7 @@ const room: RoomListItemView = withCounts({
   canonical_alias: null,
   name: 'Example room',
   topic: null,
+  topic_html: null,
   avatar_url: null,
   is_direct: false,
   direct_targets: [],
@@ -55,6 +56,7 @@ const room: RoomListItemView = withCounts({
   supports_restricted: false,
   supports_knock_restricted: false,
   space_children: [],
+  bridge: null,
   unread: 0,
   notifying: 0,
   highlight: 0,
@@ -125,14 +127,14 @@ test('an unsaved change raises the save bar, and reset discards it', async () =>
   const user = userEvent.setup();
   render(RoomGeneralSettings, { room, permissions, levels, onClose: () => {} });
 
-  expect(screen.queryByText('common.youHaveUnsavedChanges')).not.toBeInTheDocument();
+  expect(screen.queryByText('common.unsavedChangesNotice')).not.toBeInTheDocument();
   await user.click(await screen.findByRole('radio', { name: /room\.settingsJoinRulePublic/ }));
-  expect(screen.getByText('common.youHaveUnsavedChanges').closest('.save-bar')).toHaveClass(
+  expect(screen.getByText('common.unsavedChangesNotice').closest('.save-bar')).toHaveClass(
     'pending'
   );
 
   await user.click(screen.getByRole('button', { name: 'common.reset' }));
-  expect(screen.queryByText('common.youHaveUnsavedChanges')).not.toBeInTheDocument();
+  expect(screen.queryByText('common.unsavedChangesNotice')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'common.save' })).toBeDisabled();
   expect(core.rpc.room_state.setJoinRule).not.toHaveBeenCalled();
 });

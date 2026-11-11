@@ -3,6 +3,11 @@ import { page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import type { ProfileView } from '#src/generated/protocol';
+import type { PresenceEntry } from '#lib/rooms/presence.svelte.js';
+
+const { getPresence } = vi.hoisted(() => ({
+  getPresence: vi.fn<(userId: string) => PresenceEntry | null>(() => null),
+}));
 
 vi.mock('#lib/core/context.js', async () => {
   const mock = await import('#lib/core/__mocks__/context.js');
@@ -14,14 +19,20 @@ vi.mock('#lib/platform/overlay-back.svelte.js', async (importOriginal) => ({
 }));
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
+vi.mock('#lib/rooms/presence.svelte.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('#lib/rooms/presence.svelte.js')>()),
+  usePresenceStore: () => ({ get: getPresence }),
+}));
 
 import { core } from '#lib/core/__mocks__/context.js';
 import { goto } from '#lib/test-support/app-navigation.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
 
-import AccountManager from './AccountManager.svelte';
+import AccountManagerHarness from './AccountManagerHarness.test.svelte';
+import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.ts';
 
 afterEach(async () => {
+  getPresence.mockReset();
   setPreference('presence', 'online');
   setPreference('presenceStatusMessage', '');
   setPreference('sendPresence', true);
@@ -33,6 +44,8 @@ function profileWith(patch: Partial<ProfileView>): ProfileView {
     user_id: '@alice:example.test',
     display_name: 'Alice',
     avatar_url: null,
+    real_name: 'Alice',
+    real_avatar_url: null,
     bio: null,
     hero_color: null,
     hero_brightness: null,
@@ -85,7 +98,7 @@ async function mount(initial: ProfileView, options: { saveFails?: () => boolean 
     cachedUserProfile: vi.fn(() => null),
   });
   core.commands = core;
-  const screen = await render(AccountManager);
+  const screen = await render(AccountManagerHarness);
   const bubble = () => {
     const node = document.querySelector<HTMLElement>('.status-bubble');
     if (!node) throw new Error('the status bubble is not rendered');
@@ -173,6 +186,53 @@ for (const [name, width, height] of [
 }
 
 for (const sendPresence of [false, true]) {
+  test(`an account without a status ignores another account's saved message with presence sharing ${String(sendPresence)}`, async () => {
+    await page.viewport(1280, 800);
+    setPreference('sendPresence', sendPresence);
+    setPreference('presenceStatusMessage', 'Another account status');
+    const { screen, bubble } = await mount(profileWith({}));
+
+    await expect
+      .element(screen.getByRole('button', { pressed: true }))
+      .toHaveAccessibleName('Active account: Alice, @alice:example.test');
+    expect(document.querySelector('.profile-card')?.textContent).not.toContain(
+      'Another account status'
+    );
+    if (!sendPresence) {
+      expect(screen.getByRole('region', { name: 'Status', exact: true }).elements()).toHaveLength(
+        0
+      );
+      return;
+    }
+    expect(bubble().textContent).toContain('What are you up to?');
+    await userEvent.click(bubble());
+    await expect.element(screen.getByRole('textbox', { name: 'Status message' })).toHaveValue('');
+  });
+
+  test(`the account page falls back to its own presence status with presence sharing ${String(sendPresence)}`, async () => {
+    await page.viewport(1280, 800);
+    setPreference('sendPresence', sendPresence);
+    setPreference('presenceStatusMessage', 'Another account status');
+    getPresence.mockImplementation((userId) =>
+      userId === '@alice:example.test'
+        ? {
+            presence: 'online',
+            statusMessage: 'My presence status',
+            lastActiveAgo: null,
+            receivedAt: Date.now(),
+          }
+        : null
+    );
+    const { screen, bubble } = await mount(profileWith({}));
+    const status = () =>
+      sendPresence
+        ? bubble()
+        : screen.getByRole('region', { name: 'Status', exact: true }).element();
+
+    await expect.poll(() => status().textContent).toContain('My presence status');
+    expect(status().textContent).not.toContain('Another account status');
+  });
+
   test(`the account page shows the saved profile status with presence sharing ${String(sendPresence)}`, async () => {
     await page.viewport(1280, 800);
     setPreference('sendPresence', sendPresence);
@@ -302,4 +362,44 @@ test('mobile: switching shows progress and a failed switch can be retried', asyn
   await userEvent.click(account);
   await expect.poll(() => switchAccount.mock.calls.length).toBe(2);
   await expect.poll(() => goto.mock.calls.length).toBeGreaterThan(0);
+});
+
+test.each([
+  ['avatar_url', 'View avatar of Alice'],
+  ['banner_url', 'View banner of Alice'],
+])('opens own profile image %s', async (field, label) => {
+  const source = `mxc://example.test/${field}`;
+  const { screen } = await mount(profileWith({ [field]: source }));
+  await userEvent.click(screen.getByRole('button', { name: label, exact: true }));
+  await expect
+    .element(screen.getByRole('dialog', { name: 'Media viewer', exact: true }))
+    .toBeVisible();
+  await expect.poll(() => core.fetchMedia).toHaveBeenCalledWith(source, 0, 0);
+
+  mediaViewerState.close();
+});
+
+test('status emoji can be picked and cleared without changing the text', async () => {
+  await page.viewport(1280, 800);
+  const { screen, bubble, setProfileField } = await mount(
+    profileWith({ status: { text: 'Working', emoji: '🚀' } })
+  );
+  await expect.poll(() => bubble().textContent).toContain('🚀');
+  await userEvent.click(bubble());
+  await userEvent.click(page.getByRole('button', { name: 'Choose status emoji' }));
+  await userEvent.fill(page.getByRole('searchbox', { name: 'Search emoji and emotes' }), 'fire');
+  await userEvent.click(page.getByRole('gridcell', { name: 'fire', exact: true }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await expect
+    .poll(() => setProfileField.mock.calls)
+    .toEqual([['org.matrix.msc4426.status', { text: 'Working', emoji: '🔥' }]]);
+  await expect.poll(() => bubble().textContent).toContain('🔥');
+
+  await userEvent.click(bubble());
+  await userEvent.click(page.getByRole('button', { name: 'Choose status emoji' }));
+  await userEvent.click(page.getByRole('button', { name: 'Remove status emoji' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await expect
+    .poll(() => setProfileField.mock.calls.at(-1))
+    .toEqual(['org.matrix.msc4426.status', { text: 'Working', emoji: '' }]);
 });

@@ -12,18 +12,15 @@
   import { rememberGif } from '#lib/gif/favorites.svelte.js';
   import { gifSearchAvailable, type GifResult, type GifsConfig } from '#lib/gif/providers.js';
   import { i18n } from '#lib/i18n.js';
-  import {
-    isComposerSeparator,
-    preferences,
-    setPreference,
-    type ComposerButton,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { isComposerSeparator, type ComposerButton } from '#lib/settings/definitions.js';
   import { createDragList, type DropInstruction, type DropState } from '#lib/ui/drag-list.js';
   import BottomSheet from '#lib/ui/primitives/BottomSheet.svelte';
   import EmoteBoard from '#lib/ui/primitives/EmoteBoard.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import type { BoardTab } from '#lib/ui/primitives/emote-board.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
   interface Props {
     roomId: string;
@@ -38,6 +35,7 @@
     onPickUnicode: (emoji: string) => void;
     onPickGif?: (gif: GifResult) => void;
     onBeforeOpen?: () => void;
+    onPicked?: () => void;
     extras?: Partial<Record<'persona' | 'format', Snippet<[onReorder: () => void]>>>;
   }
 
@@ -54,6 +52,7 @@
     onPickUnicode,
     onPickGif,
     onBeforeOpen,
+    onPicked,
     extras = {},
   }: Props = $props();
   const reorderList = createDragList<ComposerButton>((left, right) => left === right);
@@ -237,12 +236,18 @@
   }
 
   function pick(image: PackImageView, usage: ImageUsageView, keepOpen: boolean): void {
-    if (!keepOpen) open = false;
+    if (!keepOpen) {
+      open = false;
+      onPicked?.();
+    }
     onPick(image, usage);
   }
 
   function pickUnicode(emoji: string, keepOpen: boolean): void {
-    if (!keepOpen) open = false;
+    if (!keepOpen) {
+      open = false;
+      onPicked?.();
+    }
     onPickUnicode(emoji);
   }
 
@@ -340,6 +345,7 @@
         side="top"
         align="end"
         sideOffset={10}
+        collisionPadding={collisionPadding()}
         customAnchor={anchor}
       >
         <EmoteBoard

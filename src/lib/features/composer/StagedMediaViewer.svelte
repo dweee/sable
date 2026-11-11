@@ -11,8 +11,10 @@
 
   import { i18n } from '#lib/i18n.js';
   import { holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
-  import { preferences, type ImageMetadata } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { type ImageMetadata } from '#lib/settings/definitions.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
+  import { mediaEvents } from '#lib/ui/media-events.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
@@ -49,6 +51,11 @@
   let failedId = $state<number | null>(null);
   let swipeX = $state(0);
   let swipeY = $state(0);
+
+  function markFailed(): void {
+    if (item) failedId = item.id;
+  }
+
   let swipe: {
     pointerId: number;
     startX: number;
@@ -210,9 +217,7 @@
                 preload="metadata"
                 aria-label={item.file.name}
                 {@attach objectSource(item.file)}
-                onerror={() => {
-                  if (item) failedId = item.id;
-                }}
+                {@attach mediaEvents({ error: markFailed })}
               ></video>
             {:else}
               <img
@@ -221,9 +226,7 @@
                 alt={item.file.name}
                 draggable="false"
                 {@attach objectSource(item.file)}
-                onerror={() => {
-                  if (item) failedId = item.id;
-                }}
+                {@attach mediaEvents({ error: markFailed })}
               />
             {/if}
           {/key}

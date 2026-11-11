@@ -28,18 +28,6 @@ settingGroups:
         DEPLOYMENT_POSTPROCESSING: YES
         STRIP_INSTALLED_PRODUCT: YES
         STRIP_STYLE: all
-targetTemplates:
-  app:
-    type: application
-    sources:
-      - path: Sources
-      - path: ../../ios/Sentry
-    scheme:
-      environmentVariables:
-        RUST_BACKTRACE: full
-        RUST_LOG: info
-    settings:
-      groups: [app]
 targets:
   SableNotificationService:
     type: app-extension
@@ -52,6 +40,7 @@ targets:
       path: SableNotificationService/Info.plist
       properties:
         SableAppGroup: group.{{app.identifier}}
+        SableKeychainGroup: $(DEVELOPMENT_TEAM).{{app.identifier}}.shared
         CFBundleDisplayName: Sable
         CFBundleShortVersionString: {{apple.bundle-version-short}}
         CFBundleVersion: "{{apple.bundle-version}}"
@@ -63,9 +52,10 @@ targets:
       path: SableNotificationService/SableNotificationService.entitlements
       properties:
         com.apple.security.application-groups: [group.{{app.identifier}}]
+        keychain-access-groups: [$(AppIdentifierPrefix){{app.identifier}}.shared]
         com.apple.developer.default-data-protection: NSFileProtectionCompleteUntilFirstUserAuthentication
-        com.apple.developer.usernotifications.filtering: true
         com.apple.developer.usernotifications.communication: true
+        com.apple.developer.usernotifications.time-sensitive: true
     settings:
       groups: [app]
       base:
@@ -77,6 +67,7 @@ targets:
         OTHER_LDFLAGS: ["$(inherited)", "$(DERIVED_FILE_DIR)/libsable_push.a", "-lc++", "-lz", "-liconv"]
     dependencies:
       - sdk: CallKit.framework
+      - sdk: StoreKit.framework
       - sdk: Intents.framework
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
@@ -85,15 +76,59 @@ targets:
         script: bash ../../ios/build-notification-extension.sh
         basedOnDependencyAnalysis: false
         outputFiles: ["$(DERIVED_FILE_DIR)/libsable_push.a"]
+  SableShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ../../ios/ShareExtension
+      - path: ../../ios/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    info:
+      path: SableShareExtension/Info.plist
+      properties:
+        SableAppGroup: group.{{app.identifier}}
+        CFBundleDisplayName: Sable
+        CFBundleShortVersionString: {{apple.bundle-version-short}}
+        CFBundleVersion: "{{apple.bundle-version}}"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            # Lists the conversations donated by SableNotificationService in the share sheet.
+            IntentsSupported: [INSendMessageIntent]
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsFileWithMaxCount: 20
+              NSExtensionActivationSupportsImageWithMaxCount: 20
+              NSExtensionActivationSupportsMovieWithMaxCount: 20
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+    entitlements:
+      path: SableShareExtension/SableShareExtension.entitlements
+      properties:
+        com.apple.security.application-groups: [group.{{app.identifier}}]
+        com.apple.developer.default-data-protection: NSFileProtectionCompleteUntilFirstUserAuthentication
+    settings:
+      groups: [app]
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: {{app.identifier}}.share
+        PRODUCT_NAME: SableShareExtension
+        SWIFT_VERSION: "5.0"
+    dependencies:
+      - sdk: Intents.framework
   {{app.name}}_iOS:
     type: application
     platform: iOS
     sources:
       - path: Sources
+      - path: ../../ios/Sentry
       - path: ../../ios/Network
+      - path: ../../ios/Auth
+      - path: ../../ios/Conversations
+      - path: ../../ios/Localization
       - path: Assets.xcassets
       - path: ../../icons/ios/AppIcons.xcassets
       - path: Externals
+        excludes: ["**/*.a"]
       - path: {{app.name}}_iOS
       - path: {{app.asset-dir}}
         buildPhase: resources
@@ -108,6 +143,7 @@ targets:
     info:
       path: {{app.name}}_iOS/Info.plist
       properties:
+        # APP-ICON ALIASES START
         TauriAppIconAliases:
           propeller: AppIconPropeller
           agender: AppIconAgender
@@ -118,7 +154,14 @@ targets:
           lesbian: AppIconLesbian
           mlm: AppIconMlm
           pride: AppIconPride
+          ukraine: AppIconUkraine
+          palestine: AppIconPalestine
+          cuba: AppIconCuba
+        # APP-ICON ALIASES END
         LSRequiresIPhoneOS: true
+        # Native animations only; WKWebView has a separate frame-rate cap.
+        CADisableMinimumFrameDurationOnPhone: true
+        SableKeychainGroup: $(DEVELOPMENT_TEAM).{{app.identifier}}.shared
         UILaunchStoryboardName: LaunchScreen
         UIBackgroundModes: [audio, voip, remote-notification]
         NSUserActivityTypes: [INSendMessageIntent]
@@ -139,7 +182,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: {{apple.bundle-version-short}}
         CFBundleVersion: "{{apple.bundle-version}}"
-        NSPhotoLibraryAddUsageDescription: Sable saves images to your photo library.
+        NSPhotoLibraryAddUsageDescription: Sable saves images and videos to your photo library.
         # Mirrors plugins.deep-link in tauri.conf.json: the plugin only patches
         # these in when cargo reruns its build script, so a fresh `tauri ios
         # init` silently loses them unless they live here.
@@ -147,6 +190,7 @@ targets:
           - CFBundleURLName: sable
             CFBundleURLSchemes:
               - moe.sable.next
+              - matrix
         {{~#each apple.plist-pairs}}
         {{this.key}}: {{this.value}}{{/each}}
     entitlements:
@@ -154,7 +198,9 @@ targets:
       properties:
         aps-environment: development
         com.apple.developer.usernotifications.communication: true
+        com.apple.developer.usernotifications.time-sensitive: true
         com.apple.security.application-groups: [group.{{app.identifier}}]
+        keychain-access-groups: [$(AppIdentifierPrefix){{app.identifier}}.shared]
         com.apple.developer.default-data-protection: NSFileProtectionCompleteUntilFirstUserAuthentication
     scheme:
       environmentVariables:
@@ -190,10 +236,12 @@ targets:
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
         EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES: AppIconPropeller AppIconAgender AppIconBisexual AppIconTrans AppIconTransgradient AppIconIntersex AppIconLesbian AppIconMlm AppIconPride
+        ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES: AppIconPropeller AppIconAgender AppIconBisexual AppIconTrans AppIconTransgradient AppIconIntersex AppIconLesbian AppIconMlm AppIconPride AppIconUkraine AppIconPalestine AppIconCuba
       groups: [app]
     dependencies:
       - target: SableNotificationService
+        embed: true
+      - target: SableShareExtension
         embed: true
       - package: Sentry
         product: Sentry-Dynamic
@@ -210,7 +258,9 @@ targets:
       - sdk: QuartzCore.framework
       - sdk: Security.framework
       - sdk: UIKit.framework
+      - sdk: SafariServices.framework
       - sdk: CallKit.framework
+      - sdk: Intents.framework
       - sdk: AVFoundation.framework{{#if this.ios-frameworks}}{{~#each ios-frameworks}}
       - sdk: {{this}}.framework{{/each}}{{/if}}
       - sdk: WebKit.framework
@@ -241,7 +291,7 @@ targets:
         outputFiles:
           - $(SRCROOT)/Externals/x86_64/${CONFIGURATION}/{{ lib-output-file-name }}
           - $(SRCROOT)/Externals/arm64/${CONFIGURATION}/{{ lib-output-file-name }}
-    {{~#if ios-post-compile-scripts}}
+    {{#if ios-post-compile-scripts}}
     postCompileScripts:
       {{~#each ios-post-compile-scripts}}{{#if this.path}}
       - path {{this.path}}{{/if}}{{#if this.script}}
@@ -261,9 +311,20 @@ targets:
         basedOnDependencyAnalysis: {{this.based-on-dependency-analysis}}{{/if}}{{#if this.discovered-dependency-file}}
         discoveredDependencyFile: {{this.discovered-dependency-file}}{{/if}}
       {{~/each~}}
-    {{~/if~}}
-    {{~#if ios-post-build-scripts}}
+    {{~/if}}
+    # Unsigned API-key archives keep only the app's entitlements through export (tauri-apps/tauri#15663).
+    # Signed here: the extension's own target strips its binary after its script phases.
     postBuildScripts:
+      - name: Keep the extensions' entitlements
+        script: |
+          if [ "${CODE_SIGNING_ALLOWED:-YES}" = "NO" ]; then
+            for extension in SableNotificationService SableShareExtension; do
+              /usr/bin/codesign --force --sign - \
+                --entitlements "${SRCROOT:?}/${extension}/${extension}.entitlements" \
+                "${TARGET_BUILD_DIR:?}/${PLUGINS_FOLDER_PATH:?}/${extension}.appex"
+            done
+          fi
+        basedOnDependencyAnalysis: false
       {{~#each ios-post-build-scripts}}{{#if this.path}}
       - path {{this.path}}{{/if}}{{#if this.script}}
       - script: {{this.script}}{{/if}}{{#if this.name}}
@@ -281,5 +342,4 @@ targets:
         runOnlyWhenInstalling: {{this.run-only-when-installing}}{{/if}}{{#if this.based-on-dependency-analysis}}
         basedOnDependencyAnalysis: {{this.based-on-dependency-analysis}}{{/if}}{{#if this.discovered-dependency-file}}
         discoveredDependencyFile: {{this.discovered-dependency-file}}{{/if}}
-      {{~/each~}}
-    {{~/if}}
+      {{~/each}}

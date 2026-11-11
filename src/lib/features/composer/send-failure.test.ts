@@ -13,11 +13,13 @@ test.each([
   ['denied', 'composer.sendDenied', false],
   ['rate_limited', 'composer.sendRateLimited', true],
   ['invalid_media', 'composer.sendInvalidMedia', false],
+  ['message_too_large', 'composer.sendTooLarge', false],
   ['unavailable', 'composer.sendUnavailable', true],
   ['media_server_unavailable', 'composer.sendMediaServerUnavailable', true],
   ['account_locked', 'composer.sendAccountLocked', false],
   ['account_suspended', 'composer.sendAccountSuspended', false],
   ['failed', 'composer.sendFailed', true],
+  ['not_found', 'composer.sendFailed', true],
 ])('a %s failure reads as %s', (code, key, retryable) => {
   expect(sendFailure(new CoreErrorLike({ code }))).toEqual({ key, retryable });
 });

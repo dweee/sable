@@ -1,26 +1,18 @@
 //! How large to draw a message made of nothing but emoji or inline emotes.
 
+use icu_properties::{
+    CodePointSetData,
+    props::{EmojiComponent, EmojiPresentation, ExtendedPictographic},
+};
+use ruma_html::{Html, NodeData, NodeRef};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::emoji_properties::{EMOJI_COMPONENT, EXTENDED_PICTOGRAPHIC};
-use crate::text::{is_space, tail, trim};
+use crate::html::nests_too_deeply;
+use crate::text::{is_space, trim};
 
 const JUMBO_MAX: usize = 8;
-
-fn has_property(table: &[(u32, u32)], c: char) -> bool {
-    let code = u32::from(c);
-    table
-        .binary_search_by(|&(from, to)| {
-            if to < code {
-                std::cmp::Ordering::Less
-            } else if from > code {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
-}
+const KEYCAP: char = '\u{20E3}';
+const REGIONAL_INDICATORS: std::ops::RangeInclusive<char> = '\u{1F1E6}'..='\u{1F1FF}';
 
 const fn level(count: usize) -> Option<u8> {
     match count {
@@ -32,112 +24,95 @@ const fn level(count: usize) -> Option<u8> {
     }
 }
 
-/// A body of only emoji and whitespace, with at least one pictographic character.
+/// A body of only emoji and whitespace. Every grapheme must be a pictograph,
+/// a keycap or a flag, so a bare digit next to an emoji keeps the normal size.
 #[must_use]
 pub fn emoji_level(body: &str) -> Option<u8> {
-    let body = trim(body);
-    let mut pictographic = false;
-    for c in body.chars() {
-        if has_property(EXTENDED_PICTOGRAPHIC, c) {
-            pictographic = true;
-        } else if !is_space(c) && !has_property(EMOJI_COMPONENT, c) {
+    let extended_pictographic = CodePointSetData::new::<ExtendedPictographic>();
+    let emoji_component = CodePointSetData::new::<EmojiComponent>();
+    let mut count = 0;
+    for grapheme in trim(body).graphemes(true) {
+        if grapheme.chars().all(is_space) {
+            continue;
+        }
+        let emoji = grapheme
+            .chars()
+            .all(|c| extended_pictographic.contains(c) || emoji_component.contains(c))
+            && grapheme.chars().any(|c| {
+                extended_pictographic.contains(c) || c == KEYCAP || REGIONAL_INDICATORS.contains(&c)
+            });
+        if !emoji {
             return None;
         }
+        count += 1;
     }
-    if !pictographic {
-        return None;
-    }
-    level(
-        body.graphemes(true)
-            .filter(|grapheme| !trim(grapheme).is_empty())
-            .count(),
-    )
+    level(count)
 }
 
-fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
-    text.get(..prefix.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-}
-
-const fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-/// The length of the tag `<name …>` opening `text`, quoted values included.
-fn tag_length(text: &str, name: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let open = name.len() + 1;
-    if bytes.first() != Some(&b'<') || !starts_with_ignore_case(tail(text, 1), name) {
-        return None;
-    }
-    if bytes.get(open).copied().is_some_and(is_word_byte) {
-        return None;
-    }
-    let mut at = open;
-    while let Some(&byte) = bytes.get(at) {
-        match byte {
-            b'>' => return Some(at + 1),
-            b'"' | b'\'' => {
-                let close = tail(text, at + 1).find(char::from(byte))?;
-                at += close + 2;
-            }
-            _ => at += 1,
+/// Byte ranges of the runs of emoji graphemes in `text`. Symbols that default
+/// to text presentation, like `©`, only count with a variation selector.
+#[must_use]
+pub fn emoji_runs(text: &str) -> Vec<(usize, usize)> {
+    const VARIATION_SELECTOR_16: char = '\u{FE0F}';
+    let presentation = CodePointSetData::new::<EmojiPresentation>();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (start, grapheme) in text.grapheme_indices(true) {
+        let emoji = grapheme
+            .chars()
+            .any(|c| presentation.contains(c) || c == VARIATION_SELECTOR_16 || c == KEYCAP);
+        if !emoji {
+            continue;
+        }
+        let end = start + grapheme.len();
+        match runs.last_mut() {
+            Some(run) if run.1 == start => run.1 = end,
+            _ => runs.push((start, end)),
         }
     }
-    None
+    runs
 }
 
-fn is_emote_source(tag: &str) -> bool {
-    let bytes = tag.as_bytes();
-    tag.char_indices().any(|(at, _)| {
-        let bounded = at == 0 || bytes.get(at - 1).is_none_or(|&byte| !is_word_byte(byte));
-        let rest = tail(tag, at);
-        bounded
-            && starts_with_ignore_case(rest, "src=")
-            && matches!(rest.as_bytes().get(4), Some(b'"' | b'\''))
-            && starts_with_ignore_case(tail(rest, 5), "mxc:")
-    })
-}
-
-fn without_paragraph(html: &str) -> &str {
-    let html = trim(html);
-    let html = if starts_with_ignore_case(html, "<p") {
-        html.find('>').map_or(html, |end| tail(html, end + 1))
-    } else {
-        html
-    };
-    html.len()
-        .checked_sub(4)
-        .and_then(|end| html.get(end..).zip(html.get(..end)))
-        .filter(|(close, _)| close.eq_ignore_ascii_case("</p>"))
-        .map_or(html, |(_, body)| body)
+fn blank(node: &NodeRef) -> bool {
+    node.as_text()
+        .is_some_and(|text| text.borrow().chars().all(is_space))
 }
 
 /// A formatted body of inline `mxc:` emotes only, separated by nothing but
 /// whitespace and line breaks, sized by how many emotes it holds.
 #[must_use]
 pub fn emoticon_level(html: &str) -> Option<u8> {
-    let html = without_paragraph(html);
+    if nests_too_deeply(html) {
+        return None;
+    }
+    let html = Html::parse(html);
+    let mut nodes: Vec<_> = html.children().filter(|node| !blank(node)).collect();
+    if let [paragraph] = nodes.as_slice()
+        && paragraph
+            .as_element()
+            .is_some_and(|element| element.name.local.as_ref() == "p")
+    {
+        nodes = paragraph.children().filter(|node| !blank(node)).collect();
+    }
     let mut images = 0;
-    let mut at = 0;
-    while let Some(rest) = html.get(at..).filter(|rest| !rest.is_empty()) {
-        if let Some(length) = tag_length(rest, "img") {
-            if !rest.get(..length).is_some_and(is_emote_source) {
-                return None;
+    for node in nodes {
+        match node.data() {
+            NodeData::Element(element) if element.name.local.as_ref() == "br" => {}
+            NodeData::Element(element)
+                if element.name.local.as_ref() == "img"
+                    && element.attrs.borrow().iter().any(|attribute| {
+                        attribute.name.local.as_ref() == "src"
+                            && attribute
+                                .value
+                                .get(..4)
+                                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("mxc:"))
+                    }) =>
+            {
+                images += 1;
+                if images > JUMBO_MAX {
+                    return None;
+                }
             }
-            images += 1;
-            if images > JUMBO_MAX {
-                return None;
-            }
-            at += length;
-        } else if let Some(length) = tag_length(rest, "br") {
-            at += length;
-        } else if starts_with_ignore_case(rest, "&nbsp;") || starts_with_ignore_case(rest, "&#160;")
-        {
-            at += 6;
-        } else {
-            let c = rest.chars().next().filter(|c| is_space(*c))?;
-            at += c.len_utf8();
+            _ => return None,
         }
     }
     level(images)
@@ -145,7 +120,26 @@ pub fn emoticon_level(html: &str) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{emoji_level, emoticon_level};
+    use super::{emoji_level, emoji_runs, emoticon_level};
+
+    fn runs(text: &str) -> Vec<&str> {
+        emoji_runs(text)
+            .into_iter()
+            .filter_map(|(start, end)| text.get(start..end))
+            .collect()
+    }
+
+    #[test]
+    fn emoji_runs_group_adjacent_emoji_graphemes() {
+        assert_eq!(runs("hi 👍🎉 there 🔥"), ["👍🎉", "🔥"]);
+        assert_eq!(runs("a 👍🏽 b"), ["👍🏽"]);
+        assert_eq!(runs("a 👨‍👩‍👧 b 🇫🇷 c 1️⃣ d ❤️"), ["👨‍👩‍👧", "🇫🇷", "1️⃣", "❤️"]);
+    }
+
+    #[test]
+    fn emoji_runs_skip_text_symbols_and_digits() {
+        assert_eq!(runs("© ™ 1 # * 2024"), Vec::<&str>::new());
+    }
 
     fn emote(name: &str) -> String {
         format!(r#"<img alt="{name}" height="32" src="mxc://example.org/{name}" title="{name}">"#)
@@ -158,6 +152,7 @@ mod tests {
         assert_eq!(emoji_level("👍🎉🔥"), Some(3));
         assert_eq!(emoji_level("👍🎉🔥😀😀"), Some(4));
         assert_eq!(emoji_level(" 👨‍👩‍👧 👍🏽 "), Some(2));
+        assert_eq!(emoji_level("🇫🇷 1️⃣"), Some(2));
     }
 
     #[test]
@@ -166,6 +161,9 @@ mod tests {
         assert_eq!(emoji_level(""), None);
         assert_eq!(emoji_level("123"), None);
         assert_eq!(emoji_level("👍👍👍👍👍👍👍👍👍"), None);
+        assert_eq!(emoji_level("1👍"), None);
+        assert_eq!(emoji_level("2 🎉"), None);
+        assert_eq!(emoji_level("#👍"), None);
     }
 
     #[test]
@@ -226,5 +224,23 @@ mod tests {
             None
         );
         assert_eq!(emoticon_level(&vec![emote("rotate"); 9].join(" ")), None);
+    }
+
+    #[test]
+    fn html_parsing_distinguishes_image_sources_from_other_attributes() {
+        assert_eq!(emoticon_level("<P><IMG SRC = mxc://a/rotate></P>"), Some(1));
+        for html in [
+            "<img data-src=\"mxc://a/rotate\">",
+            "<img alt=\"src='mxc://a/rotate'\" src=\"https://example.org/photo\">",
+            "<p><img src=\"mxc://a/rotate\"></p><p><img src=\"mxc://a/spin\"></p>",
+        ] {
+            assert_eq!(emoticon_level(html), None, "{html}");
+        }
+    }
+
+    #[test]
+    fn deeply_nested_markup_is_rejected_before_building_a_tree() {
+        let html = format!("{}{}", "<div>".repeat(20_000), emote("rotate"));
+        assert_eq!(emoticon_level(&html), None);
     }
 }

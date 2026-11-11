@@ -1,13 +1,15 @@
 <script lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { copyText } from '#lib/platform/clipboard.js';
   import * as Sentry from '@sentry/sveltekit';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import {
-    forgeIssueUrl,
     issueEnvironment,
+    issueTrackerAvailable,
     openForgeIssueUrl,
+    reportIssueUrl,
   } from '#lib/features/bug-report/forge.js';
   import { i18n } from '#lib/i18n.js';
   import { describePlatform, issuePlatform } from '#lib/platform/diagnostics.js';
@@ -42,7 +44,7 @@
     const error = page.error;
     if (!error) return;
     const [platforms, os] = await Promise.all([issuePlatform(), describePlatform()]);
-    const url = forgeIssueUrl('bug', `Crash: ${error.message}`, {
+    const url = reportIssueUrl('bug', `Crash: ${error.message}`, {
       description: error.message,
       platforms,
       info: issueEnvironment(os),
@@ -64,9 +66,7 @@
   }
 </script>
 
-<svelte:head>
-  <title>{page.status} - Sable</title>
-</svelte:head>
+<PageTitle title={String(page.status)} />
 
 <main class="error-page" aria-labelledby="error-title">
   <div class="error-content">
@@ -94,7 +94,9 @@
         {/if}
       {/if}
 
-      <Button size="medium" onclick={reportOnForge}>{i18n.t('errors.reportIssue')}</Button>
+      {#if issueTrackerAvailable()}
+        <Button size="medium" onclick={reportOnForge}>{i18n.t('errors.reportIssue')}</Button>
+      {/if}
       <Button size="medium" onclick={copyError}>
         {copied ? i18n.t('common.copied') : i18n.t('common.copy')}
       </Button>

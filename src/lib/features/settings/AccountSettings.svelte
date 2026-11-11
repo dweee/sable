@@ -9,9 +9,11 @@
   import '#lib/ui/primitives/settings-row.css';
   import { findCategory, SETTINGS_ACCOUNT_SECTION } from '#lib/settings/registry.js';
   import ExtendedProfileSettings from './ExtendedProfileSettings.svelte';
-  import LinkDeviceSetting from './LinkDeviceSetting.svelte';
+  import DeleteAccountSetting from './DeleteAccountSetting.svelte';
   import ProfileEditor from './ProfileEditor.svelte';
   import SettingsCategorySections from './SettingsCategorySections.svelte';
+  import { supporter } from '#lib/supporter/supporter.svelte.js';
+  import SupporterSettings from './SupporterSettings.svelte';
 
   const category = findCategory(SETTINGS_ACCOUNT_SECTION);
 
@@ -19,6 +21,7 @@
   let profile = $state.raw<ProfileView | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let badge = $derived(supporter.badge);
 
   let userId = $derived(core.session?.user_id ?? '');
 
@@ -68,15 +71,18 @@
     {:else}
       {#if profile}<ProfileEditor {profile} {userId} onSaved={refreshProfile} />{/if}
       {#if profile}<ExtendedProfileSettings {profile} />{/if}
-      <LinkDeviceSetting />
       {#if category}<SettingsCategorySections {category} />{/if}
+
+      {#if supporter.enabled && badge}
+        <SupporterSettings />
+      {/if}
+      <DeleteAccountSetting />
     {/if}
   </div>
 </AppPageShell>
 
 <style>
   :global(main.app-page-shell.account-settings) {
-    max-width: 40rem;
     overflow: clip;
   }
 

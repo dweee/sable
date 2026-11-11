@@ -13,7 +13,7 @@ import YoutubeLogoIcon from 'phosphor-svelte/lib/YoutubeLogoIcon';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 import { mediaPreviewSettings } from '../media-previews.svelte.js';
 import { preferences } from '../preferences.svelte';
-import type { MediaAutoLoad } from '../preferences.svelte';
+import type { MediaAutoLoad } from '../definitions';
 import type { SettingsCategory } from '../registry';
 
 export const mediaCategory: SettingsCategory = {
@@ -165,14 +165,6 @@ export const mediaCategory: SettingsCategory = {
       section: 'embeds',
       icon: InstagramLogoIcon,
       name: 'settings.instagramEmbeds',
-      type: 'boolean',
-      gatedBy: 'clientEmbeds',
-    },
-    {
-      key: 'blueskyEmbeds',
-      section: 'embeds',
-      icon: InstagramLogoIcon,
-      name: 'settings.blueskyEmbeds',
       type: 'boolean',
       gatedBy: 'clientEmbeds',
     },

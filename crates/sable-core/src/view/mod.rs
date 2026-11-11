@@ -18,11 +18,16 @@ pub use diff::map_diff;
 pub use directory::{
     public_room, room_preview_from_stripped_state, room_preview_view, via_servers,
 };
-pub use item::{Highlights, LocalContent, aggregation_item, standalone_item, timeline_item};
-pub use member::{member_view, room_permissions, room_power_levels};
+#[cfg(test)]
+pub(crate) use item::forged_state;
+pub use item::{
+    Highlights, LocalContent, aggregation_item, latest_edit_id, standalone_item, timeline_item,
+};
+pub use member::{member_event_view, member_view, room_permissions, room_power_levels};
 pub use room::{
     RoomInfo, enrich_room_batch, listless_room_list_item, predecessor, room_counts, room_list_item,
 };
+pub(crate) use room::{apply_avatar_override, direct_peer_name};
 pub use search::prime_display_names;
 pub use space::{hierarchy_child_edges, listing_spaces, restricted_parents, space_hierarchy_room};
 
@@ -36,6 +41,7 @@ pub(crate) use media::{
 pub(crate) use member::clamp_power_level;
 pub(crate) use profile::per_message_profile;
 pub(crate) use raw::ObjectOnly;
+pub(crate) use room::enrich_rooms;
 pub(crate) use search::search_hit_view;
 pub(crate) use state::{
     CALL_MEMBER_TYPE, CALL_SLOT_ID, CALL_TYPE, FORUM_ROOM_TYPE, FORUM_TITLE, RTC_SLOT_TYPE,

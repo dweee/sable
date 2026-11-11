@@ -2,7 +2,7 @@ import type { ImagePackView, MemberView, RoomListItemView } from '#src/generated
 import { expect, test } from 'vitest';
 
 import type { AutocompleteQuery } from './autocomplete';
-import { parseBotCommands } from './bot-commands';
+import { parseBotCommand } from './bot-commands';
 import { rememberSuggestion } from './suggestion-usage';
 import { suggestionsFor, type PackEmote } from './suggestions';
 
@@ -10,6 +10,8 @@ function member(userId: string, displayName: string | null): MemberView {
   return {
     user_id: userId,
     display_name: displayName,
+    real_name: displayName,
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership: 'join' as const,
@@ -52,7 +54,13 @@ function room(
   name: string,
   canonical_alias: string | null = null
 ): RoomListItemView {
-  return { room_id, name, canonical_alias, avatar_url: null } as RoomListItemView;
+  return {
+    room_id,
+    name,
+    canonical_alias,
+    avatar_url: null,
+    display_name: name,
+  } as RoomListItemView;
 }
 
 test('a member matches on display name or localpart, never on the homeserver', () => {
@@ -69,20 +77,12 @@ test('a member matches on display name or localpart, never on the homeserver', (
 });
 
 test('a nickname is matched and listed, and the real name is what gets inserted', () => {
-  const members = [member('@rob:example.org', 'Rob'), member('@ann:example.org', 'Ann')];
-  const nicknames = new Map([['@rob:example.org', 'Bobby']]);
+  const members = [
+    { ...member('@rob:example.org', 'Bobby'), real_name: 'Rob' },
+    member('@ann:example.org', 'Ann'),
+  ];
 
-  const [match] = suggestionsFor(
-    mentionQuery('bob'),
-    members,
-    [],
-    [],
-    undefined,
-    null,
-    null,
-    [],
-    (userId, fallback) => nicknames.get(userId) ?? fallback
-  );
+  const [match] = suggestionsFor(mentionQuery('bob'), members, [], []);
 
   expect(match).toMatchObject({ id: '@rob:example.org', label: '@Bobby', insert: '@Rob' });
 });
@@ -190,6 +190,27 @@ test('rooms match their name or alias and insert a # label', () => {
   ]);
 });
 
+test('rooms with the same name show the space they are in', () => {
+  const space = {
+    ...room('!space:example.org', 'Community'),
+    room_kind: 'space',
+    state: 'joined',
+    is_tombstoned: false,
+    space_children: [
+      { room_id: '!one:example.org', via: [], order: null, origin_server_ts: 1, suggested: false },
+    ],
+  } as RoomListItemView;
+
+  const suggestions = suggestionsFor(
+    roomQuery('gen'),
+    [],
+    [],
+    [space, room('!one:example.org', 'General'), room('!two:example.org', 'General')]
+  );
+
+  expect(suggestions.map((item) => item.detail)).toEqual(['Community', null]);
+});
+
 test('a room name that already starts with # keeps a single #', () => {
   const [suggestion] = suggestionsFor(
     roomQuery('gen'),
@@ -276,7 +297,7 @@ test('two rooms claiming one alias are suggested once', () => {
 });
 
 test('a bot command is offered under its bot, and never over a built-in of the same name', () => {
-  const bots = parseBotCommands([
+  const bots = [
     {
       sender: '@bot:example.org',
       sender_name: 'Moderation',
@@ -293,7 +314,9 @@ test('a bot command is offered under its bot, and never over a built-in of the s
       sender_avatar: null,
       content: { command: 'me' },
     },
-  ]);
+  ]
+    .map((view) => parseBotCommand(view))
+    .filter((command) => command !== null);
 
   expect(suggestionsFor(commandQuery('cau'), [], [], [], undefined, null, null, bots)).toEqual([
     {
@@ -321,4 +344,11 @@ test('a frequently accepted suggestion comes first, and unicode precedes custom 
   expect(ids.indexOf('pack:pleading mxc://example.org/pleading')).toBeGreaterThan(
     ids.indexOf('emoji:🥺')
   );
+});
+
+test('a fully typed shortcode outranks a more used emoji', () => {
+  rememberSuggestion('emoji:😃');
+  rememberSuggestion('emoji:😃');
+  const ids = suggestionsFor(emoteQuery('smile'), [], [], []).map((item) => item.id);
+  expect(ids[0]).toBe('emoji:😄');
 });

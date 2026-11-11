@@ -109,7 +109,9 @@ test.describe('on mobile', () => {
   }) => {
     test.skip(browserName !== 'chromium', 'touch is driven over CDP');
     await installRoomCore('ready');
-    await app.openRoom('!room:example.test');
+    await app.openRooms();
+    await page.locator('a.room-row[href="/rooms/!room%3Aexample.test"]').click();
+    await expect(page).toHaveURL(/\/rooms\/!room%3Aexample\.test$/);
     const subscription = await core.subscription();
     await core.emitTimelineDiff(subscription, [
       {
@@ -148,6 +150,8 @@ test.describe('on mobile', () => {
     await touch('touchEnd', 300);
 
     await expect(panel).toBeHidden();
+    await expect(page.locator('#drawer-toggle')).toHaveAttribute('aria-pressed', 'false');
+    await expect(page).toHaveURL(/\/rooms\/!room%3Aexample\.test$/);
   });
 });
 
@@ -204,7 +208,7 @@ for (const context of ['desktop', 'mobile'] as const) {
       const editor = parent.locator('[contenteditable="true"]').first();
       await expect(editor).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
-      if (surface === 'room') await parent.locator('.members-button').click();
+      if (surface === 'room') await page.locator('.room-view .members-button').click();
       await editor.fill('Unsent parent draft');
       const subscription = await core.subscription();
       await core.emitTimelineDiff(subscription, [
@@ -306,7 +310,7 @@ for (const context of ['desktop', 'mobile'] as const) {
       if (surface === 'forum') await page.goto('/rooms/!room%3Aexample.test');
       else await app.openRoom('!room:example.test');
       const parent = page.locator(surface === 'forum' ? '.forum-main' : '.room-view > .timeline');
-      if (surface === 'room') await parent.locator('.members-button').click();
+      if (surface === 'room') await page.locator('.room-view .members-button').click();
       await expect(parent.locator('[contenteditable="true"]').first()).toBeVisible();
       await core.emitTimelineDiff(await core.subscription(), [
         {

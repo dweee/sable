@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
   import {
@@ -49,15 +50,19 @@
   let hasAlerts = $derived(alertProviders.some((provider) => provider.priority !== null));
 
   const mobileTools = [
-    { href: '/rooms', icon: ChatsIcon, label: 'nav.messages' },
-    { href: '/navigate', icon: ListMagnifyingGlassIcon, label: 'shortcuts.paletteTitle' },
-    { href: '/inbox', icon: BellIcon, label: 'nav.inbox' },
+    { href: resolve('/(app)/rooms'), icon: ChatsIcon, label: 'nav.messages' },
+    {
+      href: resolve('/(app)/navigate'),
+      icon: ListMagnifyingGlassIcon,
+      label: 'shortcuts.paletteTitle',
+    },
+    { href: resolve('/(app)/inbox'), icon: BellIcon, label: 'nav.inbox' },
   ] as const;
   const mobileSlotCount = $derived(mobileTools.length + 1 + (hasAlerts ? 1 : 0));
   const ROOM_LIST_PATHS = ['/rooms', '/direct', '/space/'];
   const desktopTools = [
-    { href: '/inbox', icon: BellIcon, label: 'nav.inbox' },
-    { href: '/settings', icon: GearIcon, label: 'nav.settings' },
+    { href: resolve('/(app)/inbox'), icon: BellIcon, label: 'nav.inbox' },
+    { href: resolve('/(app)/settings'), icon: GearIcon, label: 'nav.settings' },
   ] as const;
 
   function activateTool(event: MouseEvent, href: string): void {
@@ -108,6 +113,7 @@
       aria-label={i18n.t('shortcuts.paletteTitle')}
       onclick={() => (paletteState.open = true)}
     >
+      <span class="nav-tab-hit-area" aria-hidden="true"></span>
       <span class="tool-icon" aria-hidden="true"><ListMagnifyingGlassIcon /></span>
     </button>
   {/snippet}
@@ -126,6 +132,7 @@
         {@const toolActive = isToolActive(item.href)}
         {@const href = item.href}
         <div class="mobile-tool-slot">
+          <!-- eslint-disable svelte/no-navigation-without-resolve -- quick tool hrefs are built with resolve() -->
           <a
             class="quick-tool mobile-tool"
             {href}
@@ -143,6 +150,7 @@
               <UnreadBadge counts={inboxCounts} aria-hidden="true" />
             {/if}
           </a>
+          <!-- eslint-enable svelte/no-navigation-without-resolve -->
         </div>
       {/each}
       <div class="mobile-tool-slot">
@@ -160,6 +168,7 @@
     {#each desktopTools as item (item.href)}
       {@const toolActive = isToolActive(item.href)}
       {#snippet trigger({ props }: { props: Record<string, unknown> })}
+        <!-- eslint-disable svelte/no-navigation-without-resolve -- quick tool hrefs are built with resolve() -->
         <a
           {...props}
           class="quick-tool compact-tool nav-tab nav-tab-side nav-tab-outlined
@@ -172,6 +181,7 @@
           aria-current={toolActive ? 'page' : undefined}
           draggable="false"
         >
+          <span class="nav-tab-hit-area" aria-hidden="true"></span>
           <span class="tool-icon" aria-hidden="true"
             ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
           >
@@ -179,8 +189,9 @@
             <UnreadBadge counts={inboxCounts} aria-hidden="true" />
           {/if}
         </a>
+        <!-- eslint-enable svelte/no-navigation-without-resolve -->
       {/snippet}
-      <Tooltip label={i18n.t(item.label)} side="right" {trigger} />
+      <Tooltip label={toolLabel(item)} side="right" {trigger} />
     {/each}
     <AccountSwitcher mode="compact" />
   </nav>
@@ -193,6 +204,7 @@
       {#each desktopTools as item (item.href)}
         {@const toolActive = isToolActive(item.href)}
         {#snippet trigger({ props }: { props: Record<string, unknown> })}
+          <!-- eslint-disable svelte/no-navigation-without-resolve -- quick tool hrefs are built with resolve() -->
           <a
             {...props}
             class="quick-tool desktop-tool nav-tab nav-tab-bottom
@@ -205,6 +217,7 @@
             aria-current={toolActive ? 'page' : undefined}
             draggable="false"
           >
+            <span class="nav-tab-hit-area" aria-hidden="true"></span>
             <span class="tool-icon" aria-hidden="true"
               ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
             >
@@ -212,8 +225,9 @@
               <UnreadBadge counts={inboxCounts} aria-hidden="true" />
             {/if}
           </a>
+          <!-- eslint-enable svelte/no-navigation-without-resolve -->
         {/snippet}
-        <Tooltip label={i18n.t(item.label)} {trigger} />
+        <Tooltip label={toolLabel(item)} {trigger} />
       {/each}
     </div>
   </nav>
@@ -267,6 +281,13 @@
     min-height: calc(4.25rem + var(--edge-inset-bottom));
     padding: var(--space-100) 0 calc(var(--space-100) + var(--edge-inset-bottom));
     width: 100%;
+  }
+
+  @media (--compact-height) {
+    .mobile-tools {
+      min-height: calc(var(--control-height-large) + var(--edge-inset-bottom));
+      padding-block: 0 var(--edge-inset-bottom);
+    }
   }
 
   .mobile-tools-row {

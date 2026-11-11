@@ -2,10 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
         <intent>
             <action android:name="android.media.action.IMAGE_CAPTURE" />
         </intent>
@@ -18,6 +22,9 @@
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -85,7 +92,21 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="moe.sable.next" />
+                <data android:scheme="matrix" />
                 
+                
+                
+                
+                
+            </intent-filter>
+            <intent-filter >
+                <action android:name="android.intent.action.VIEW" />
+                <!-- ChromeOS ARC++ uses a different action for deep links -->
+                <action android:name="org.chromium.arc.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="matrix.to" />
                 
                 
                 
@@ -93,6 +114,10 @@
             </intent-filter>
             <!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
         </activity>
+
+        <service
+            android:name=".AuthBrowserKeepAliveService"
+            android:exported="true" />
 
         <provider
           android:name="androidx.core.content.FileProvider"
@@ -117,6 +142,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-default"
                 android:value="true" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -134,6 +162,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="propeller" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -151,6 +182,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="agender" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -168,6 +202,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="bisexual" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -185,6 +222,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="trans" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -202,6 +242,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="transgradient" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -219,6 +262,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="intersex" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -236,6 +282,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="lesbian" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -253,6 +302,9 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="mlm" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -270,6 +322,69 @@
             <meta-data
                 android:name="tauri-plugin-app-icon-id"
                 android:value="pride" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".AppIconUkraine"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_ukraine"
+            android:roundIcon="@mipmap/ic_launcher_ukraine"
+            android:enabled="false"
+            android:exported="true">
+            <meta-data
+                android:name="tauri-plugin-app-icon-id"
+                android:value="ukraine" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".AppIconPalestine"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_palestine"
+            android:roundIcon="@mipmap/ic_launcher_palestine"
+            android:enabled="false"
+            android:exported="true">
+            <meta-data
+                android:name="tauri-plugin-app-icon-id"
+                android:value="palestine" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".AppIconCuba"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_cuba"
+            android:roundIcon="@mipmap/ic_launcher_cuba"
+            android:enabled="false"
+            android:exported="true">
+            <meta-data
+                android:name="tauri-plugin-app-icon-id"
+                android:value="cuba" />
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -277,6 +392,9 @@
             </intent-filter>
         </activity-alias>
         <!-- APP-ICON ALIASES END -->
+        <!-- PROVIDERS FOR ANDROID FS PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
+        
+        <!-- PROVIDERS FOR ANDROID FS PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
     </application>
     <!-- ANDROID FS PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
     

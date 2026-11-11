@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::Handler;
 use crate::protocol::{
-    HomeserverSoftwareView, OpenIdTokenView, RpcError, SessionInfo, SyncStatus, TermsPolicyView,
+    HomeserverSoftwareView, OAuthMetadataView, OpenIdTokenView, RpcError, SessionInfo, SyncStatus,
+    TermsPolicyView,
 };
 use crate::{Core, ResultExt};
 
@@ -19,6 +20,7 @@ domain! {
     logout,
     reset_local_cache,
     homeserver_info,
+    oauth_metadata,
     request_open_id_token,
     access_token,
     open_id_token,
@@ -26,6 +28,8 @@ domain! {
     server_features,
     delayed_events_supported,
     set_search_options,
+    set_network_conditions,
+    set_app_in_foreground,
     set_read_room,
     integration_manager_url,
     integration_manager_terms,
@@ -122,7 +126,7 @@ impl Handler for ResetLocalCacheParams {
 
     #[cfg(target_family = "wasm")]
     fn run(self, _core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
-        std::future::ready(Err(RpcError::Unsupported))
+        std::future::ready(Err(crate::protocol::RpcCode::Unsupported.into()))
     }
 }
 
@@ -143,13 +147,10 @@ impl Handler for HomeserverInfoParams {
     async fn run(self, core: &Arc<Core>) -> Result<HomeserverInfoOk, RpcError> {
         let client = core.client().await?;
         let server = match client.send(get_server_version::v1::Request::new()).await {
-            Ok(response) => response.server.map(|server| HomeserverSoftwareView {
-                name: server.name,
-                version: server.version,
-            }),
+            Ok(response) => response.server.map(software_view),
             Err(error) => {
                 tracing::debug!(%error, "the homeserver did not report its version");
-                None
+                delegated_server_software(&client).await
             }
         };
 
@@ -157,6 +158,70 @@ impl Handler for HomeserverInfoParams {
             homeserver: client.homeserver().to_string(),
             server,
         })
+    }
+}
+
+fn software_view(server: get_server_version::v1::Server) -> HomeserverSoftwareView {
+    HomeserverSoftwareView {
+        name: server.name,
+        version: server.version,
+    }
+}
+
+async fn delegated_server_software(client: &matrix_sdk::Client) -> Option<HomeserverSoftwareView> {
+    #[derive(Deserialize)]
+    struct WellKnown {
+        #[serde(rename = "m.server")]
+        server: String,
+    }
+    #[derive(Deserialize)]
+    struct Version {
+        server: Option<get_server_version::v1::Server>,
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        client: &matrix_sdk::Client,
+        url: &str,
+    ) -> Option<T> {
+        let response = client
+            .http_client()
+            .get(url)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        serde_json::from_slice(&response.bytes().await.ok()?).ok()
+    }
+
+    let server_name = client.user_id()?.server_name();
+    let well_known = get_json::<WellKnown>(
+        client,
+        &format!("https://{server_name}/.well-known/matrix/server"),
+    )
+    .await;
+    let host = federation_host(
+        server_name.as_str(),
+        well_known.as_ref().map(|known| known.server.as_str()),
+    );
+    let version = get_json::<Version>(
+        client,
+        &format!("https://{host}/_matrix/federation/v1/version"),
+    )
+    .await;
+    version?.server.map(software_view)
+}
+
+fn federation_host(server_name: &str, delegated: Option<&str>) -> String {
+    let host = delegated.unwrap_or(server_name);
+    let has_port = host
+        .rsplit(']')
+        .next()
+        .is_some_and(|tail| tail.contains(':'));
+    if has_port {
+        host.to_owned()
+    } else {
+        format!("{host}:8448")
     }
 }
 
@@ -232,6 +297,23 @@ impl Handler for SyncStatusParams {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct OauthMetadataParams {}
+
+impl Handler for OauthMetadataParams {
+    type Ok = Option<OAuthMetadataView>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Option<OAuthMetadataView>, RpcError> {
+        let client = core.client().await?;
+        Ok(core
+            .oauth_metadata(&client, "oauth_metadata")
+            .await?
+            .as_ref()
+            .map(crate::oauth_metadata::view))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct ServerFeaturesParams {}
 
 impl Handler for ServerFeaturesParams {
@@ -261,22 +343,31 @@ impl Handler for DelayedEventsSupportedParams {
     reason = "wire type mirroring the protocol"
 )]
 pub struct SetSearchOptionsParams {
+    pub sharing: bool,
     pub disk_budget_mb: u32,
     pub crawler: bool,
     pub unmetered_only: bool,
     pub server_search: bool,
     pub tuning: SearchTuning,
-    pub foreground: bool,
 }
 
 impl Handler for SetSearchOptionsParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.search_foreground
-            .store(self.foreground, Ordering::Relaxed);
-        core.search_network
-            .set_unmetered_only(self.unmetered_only);
+        let was_sharing = core
+            .search_sharing
+            .enabled
+            .swap(self.sharing, Ordering::Relaxed);
+        if !self.sharing {
+            if was_sharing && let Ok(client) = core.client().await {
+                core.forget_search_sharing(&client).await;
+            }
+            core.cancel_search_peers();
+            core.search_sharing.reset_session();
+        }
+        core.search_network.set_unmetered_only(self.unmetered_only);
+        core.refresh_search_peers();
         core.search_crawl.lock().await.tuning = self.tuning.clamped();
         core.search_crawler_enabled
             .store(self.crawler, Ordering::Relaxed);
@@ -285,8 +376,40 @@ impl Handler for SetSearchOptionsParams {
         core.search_index
             .lock()
             .await
-            .set_disk_budget(usize::try_from(self.disk_budget_mb).unwrap_or(usize::MAX) << 20);
+            .set_disk_budget_mb(self.disk_budget_mb);
         Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetNetworkConditionsParams {
+    pub available: bool,
+    pub unmetered: bool,
+}
+
+impl Handler for SetNetworkConditionsParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.update_network_conditions(self.available, self.unmetered)
+            .await;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetAppInForegroundParams {
+    pub foreground: bool,
+}
+
+impl Handler for SetAppInForegroundParams {
+    type Ok = ();
+
+    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
+        core.update_app_in_foreground(self.foreground);
+        std::future::ready(Ok(()))
     }
 }
 
@@ -362,5 +485,25 @@ impl Handler for KnownRoomsParams {
             .iter()
             .map(ToString::to_string)
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::federation_host;
+
+    #[test]
+    fn federation_host_follows_delegation_and_defaults_to_8448() {
+        assert_eq!(
+            federation_host("example.org", Some("fed.example.org")),
+            "fed.example.org:8448"
+        );
+        assert_eq!(
+            federation_host("example.org", Some("fed.example.org:443")),
+            "fed.example.org:443"
+        );
+        assert_eq!(federation_host("example.org", None), "example.org:8448");
+        assert_eq!(federation_host("[::1]", None), "[::1]:8448");
+        assert_eq!(federation_host("[::1]:8008", None), "[::1]:8008");
     }
 }

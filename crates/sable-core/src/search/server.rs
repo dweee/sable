@@ -39,17 +39,24 @@ pub(super) struct ServerQuery<'a> {
 
 impl ServerQuery<'_> {
     fn signature(&self) -> Signature {
-        (
-            self.query.to_owned(),
-            self.filter.clone(),
-            self.order,
-            self.room_id.clone(),
-            self.context,
-        )
+        Signature {
+            query: self.query.to_owned(),
+            filter: self.filter.clone(),
+            order: self.order,
+            room_id: self.room_id.clone(),
+            context: self.context,
+        }
     }
 }
 
-type Signature = (String, IndexFilter, SearchOrder, OwnedRoomId, usize);
+#[derive(Clone, PartialEq)]
+struct Signature {
+    query: String,
+    filter: IndexFilter,
+    order: SearchOrder,
+    room_id: OwnedRoomId,
+    context: usize,
+}
 
 #[derive(Default)]
 pub(crate) struct ServerSearch {
@@ -392,7 +399,7 @@ mod tests {
                 "type": "m.room.message",
                 "event_id": "$edit",
                 "room_id": "!plain:localhost",
-                "sender": "@erwan:localhost",
+                "sender": "@kris:localhost",
                 "origin_server_ts": 2_000,
                 "content": {
                     "msgtype": "m.text",
@@ -416,7 +423,7 @@ mod tests {
                 "type": "m.room.message",
                 "event_id": "$original",
                 "room_id": "!plain:localhost",
-                "sender": "@erwan:localhost",
+                "sender": "@kris:localhost",
                 "origin_server_ts": 1_000,
                 "content": { "msgtype": "m.text", "body": "omg mea is doing god's work" },
                 "unsigned": {
@@ -424,7 +431,7 @@ mod tests {
                         "m.replace": {
                             "type": "m.room.message",
                             "event_id": "$edit",
-                            "sender": "@erwan:localhost",
+                            "sender": "@kris:localhost",
                             "origin_server_ts": 2_000,
                             "content": {
                                 "msgtype": "m.text",
@@ -463,7 +470,7 @@ mod tests {
                 "type": "m.room.message",
                 "event_id": id,
                 "room_id": "!plain:localhost",
-                "sender": "@erwan:localhost",
+                "sender": "@kris:localhost",
                 "origin_server_ts": ts,
                 "content": { "msgtype": "m.text", "body": body }
             })
@@ -499,7 +506,7 @@ mod tests {
     #[test]
     fn test_a_sender_scoped_query_survives_the_trip_to_the_homeserver() {
         let filter = IndexFilter {
-            senders: vec![user_id!("@erwan:localhost").to_owned()],
+            senders: vec![user_id!("@kris:localhost").to_owned()],
             ..scoped()
         };
 
@@ -592,7 +599,7 @@ mod tests {
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(message(
                 "$original",
-                "@erwan:localhost",
+                "@kris:localhost",
                 1_000,
                 "omg mea is doing god's work",
                 None,
@@ -636,7 +643,7 @@ mod tests {
     async fn test_the_latest_edit_hit_carries_the_original_timestamp() {
         let edit = message(
             "$edit",
-            "@erwan:localhost",
+            "@kris:localhost",
             2_000,
             "deploy fixed",
             Some("$original"),
@@ -669,14 +676,14 @@ mod tests {
     async fn test_a_stale_edit_is_not_a_hit_once_a_newer_one_exists() {
         let stale = message(
             "$old",
-            "@erwan:localhost",
+            "@kris:localhost",
             2_000,
             "deploy old",
             Some("$original"),
         );
         let latest = message(
             "$new",
-            "@erwan:localhost",
+            "@kris:localhost",
             3_000,
             "mea only",
             Some("$original"),

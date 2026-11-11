@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -10,14 +11,15 @@
   import { panelsFor } from './category-panels.js';
   import Switch from '#lib/ui/primitives/Switch.svelte';
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
-  import { settingFocusId, settingsCategories } from '#lib/settings/registry.js';
+  import { settingFocusId, settingsCategories, settingsContext } from '#lib/settings/registry.js';
   import type { SettingDefinition, SettingsCategory } from '#lib/settings/registry.js';
   import {
-    PREFERENCE_RANGES,
+    isLockedPreference,
     preferences,
     setPreference,
   } from '#lib/settings/preferences.svelte.js';
-  import type { Preferences } from '#lib/settings/preferences.svelte.js';
+  import { PREFERENCE_RANGES } from '#lib/settings/definitions.js';
+  import type { Preferences } from '#lib/settings/definitions.js';
 
   interface Props {
     category: SettingsCategory;
@@ -26,18 +28,23 @@
 
   let { category, onRangeDraft }: Props = $props();
 
+  const core = useCoreClient();
+  const context = $derived(settingsContext(core));
+
   const items = $derived(
-    category.items.filter((setting) => setting.supported?.() !== false && setting.panel !== true)
+    category.items.filter(
+      (setting) => setting.supported?.(context) !== false && setting.panel === undefined
+    )
   );
 
   const supportedSettings = $derived(
     settingsCategories.flatMap((entry) =>
-      entry.items.filter((setting) => setting.supported?.() !== false)
+      entry.items.filter((setting) => setting.supported?.(context) !== false)
     )
   );
   const shown = $derived(new Set(supportedSettings.map((setting) => setting.key)));
 
-  const panels = $derived(panelsFor(category.id).filter((panel) => panel.when?.() !== false));
+  const panels = $derived(panelsFor(category.id, context));
   const sections = $derived(
     category.sections
       .map((section) => ({
@@ -60,6 +67,31 @@
     return supportedSettings.find((item) => item.key === setting.gatedBy)?.name ?? '';
   }
 
+  let serverFeatures = $state.raw<readonly string[] | null>(null);
+  const needsServerFeatures = $derived(items.some((setting) => setting.serverFeature));
+
+  $effect(() => {
+    if (!needsServerFeatures) return;
+    let stale = false;
+    core.rpc.session
+      .serverFeatures()
+      .then((flags) => {
+        if (!stale) serverFeatures = flags;
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  });
+
+  function missingServerFeature(setting: SettingDefinition): boolean {
+    return (
+      setting.serverFeature !== undefined &&
+      serverFeatures !== null &&
+      !serverFeatures.includes(setting.serverFeature)
+    );
+  }
+
   /** Sentry reads its consent once, at boot. */
   let reloadPending = $state(false);
 </script>
@@ -68,19 +100,26 @@
   <ul class="settings settings-rows">
     {#each rows as setting (setting.key)}
       {@const gate = gated(setting)}
-      {@const disabled = setting.unavailable === true || gate}
+      {@const unsupported = missingServerFeature(setting)}
+      {@const lockedByDeployment = isLockedPreference(setting.key)}
+      {@const disabled = setting.unavailable === true || gate || unsupported || lockedByDeployment}
       {@const anchor = settingFocusId(setting.key)}
       <SettingsRow
         id={anchor}
+        key={setting.key}
         data-settings-focus={anchor}
         title={i18n.t(setting.name)}
         description={setting.description ? i18n.t(setting.description) : undefined}
         {disabled}
-        badge={setting.unavailable
-          ? i18n.t('settings.notAvailableYet')
-          : gate
-            ? i18n.t('settings.needsSetting', { name: i18n.t(gateName(setting)) })
-            : undefined}
+        badge={lockedByDeployment
+          ? i18n.t('settings.managedByDeployment')
+          : setting.unavailable
+            ? i18n.t('settings.notAvailableYet')
+            : gate
+              ? i18n.t('settings.needsSetting', { name: i18n.t(gateName(setting)) })
+              : unsupported
+                ? i18n.t('settings.needsServerFeature')
+                : undefined}
         wide={setting.type !== 'boolean'}
         control={setting.type === 'boolean' && !disabled ? `${anchor}-switch` : undefined}
         class={setting.gatedBy !== undefined ? 'gated' : undefined}

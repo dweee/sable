@@ -6,15 +6,18 @@ import type { RoomListItemView } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 
 import { splitVia } from '#lib/rooms/join-address.js';
-import { parseMatrixLink } from '#lib/rooms/matrix-link.js';
+import { matrixLinkAction, matrixLinkParameters, parseMatrixLink } from '#lib/rooms/matrix-link.js';
 
 import { findRoomByPathId, roomPathParam, roomPathParamFromId } from './room-list.svelte';
 
-function parentSpaceOf(
-  rooms: readonly RoomListItemView[],
-  roomId: string
-): RoomListItemView | undefined {
-  return rooms.find(
+let sidebarOrder: readonly string[] = [];
+
+export function setSidebarSpaceOrder(order: readonly string[]): void {
+  sidebarOrder = order;
+}
+
+function parentSpacesOf(rooms: readonly RoomListItemView[], roomId: string): RoomListItemView[] {
+  return rooms.filter(
     (space) =>
       space.room_kind === 'space' &&
       space.state === 'joined' &&
@@ -25,32 +28,47 @@ function parentSpaceOf(
 
 function rootSpaceOf(
   rooms: readonly RoomListItemView[],
-  roomId: string
+  roomId: string,
+  spaceOrder: readonly string[]
 ): RoomListItemView | undefined {
   const seen = new Set<string>([roomId]);
-  let space = parentSpaceOf(rooms, roomId);
-
-  while (space !== undefined && !seen.has(space.room_id)) {
-    seen.add(space.room_id);
-    const parent = parentSpaceOf(rooms, space.room_id);
-    if (parent === undefined) return space;
-    space = parent;
+  const roots: RoomListItemView[] = [];
+  let frontier = parentSpacesOf(rooms, roomId);
+  while (frontier.length > 0) {
+    const next: RoomListItemView[] = [];
+    for (const space of frontier) {
+      if (seen.has(space.room_id)) continue;
+      seen.add(space.room_id);
+      const parents = parentSpacesOf(rooms, space.room_id);
+      const unseen = parents.filter((parent) => !seen.has(parent.room_id));
+      if (parents.length === 0) roots.push(space);
+      else if (unseen.length === 0) roots.push(...parents.filter((parent) => parent !== space));
+      else next.push(...unseen);
+    }
+    frontier = next;
   }
-
-  return space;
+  const rank = (space: RoomListItemView): number => {
+    const index = spaceOrder.indexOf(space.room_id);
+    return index < 0 ? spaceOrder.length : index;
+  };
+  return roots.reduce<RoomListItemView | undefined>(
+    (best, space) => (best === undefined || rank(space) < rank(best) ? space : best),
+    undefined
+  );
 }
 
 /** Mirrors RoomNav's sectioning, so a permalink lands where the sidebar links. */
 function sectionPath(
   rooms: readonly RoomListItemView[],
   room: RoomListItemView | undefined,
-  roomParam: string
+  roomParam: string,
+  spaceOrder: readonly string[]
 ): string {
   if (room?.room_kind === 'space')
     return resolve('/(app)/space/[spaceId]/lobby', { spaceId: roomParam });
   if (room?.is_direct) return resolve('/(app)/direct/[roomId]', { roomId: roomParam });
 
-  const parentSpace = room ? rootSpaceOf(rooms, room.room_id) : undefined;
+  const parentSpace = room ? rootSpaceOf(rooms, room.room_id, spaceOrder) : undefined;
   if (parentSpace) {
     return resolve('/(app)/space/[spaceId]/[roomId]', {
       spaceId: roomPathParam(parentSpace, rooms),
@@ -73,7 +91,8 @@ export function roomSectionPath(
   const base = sectionPath(
     rooms,
     room,
-    room ? roomPathParam(room, rooms) : roomPathParamFromId(roomIdOrAlias)
+    room ? roomPathParam(room, rooms) : roomPathParamFromId(roomIdOrAlias),
+    sidebarOrder
   );
 
   const query = new URLSearchParams();
@@ -90,6 +109,17 @@ export function roomSectionPath(
 /** An alias resolves through its own domain; only a room id needs routing help. */
 export function viaFor(address: string, via: readonly string[]): string[] {
   return address.startsWith('#') ? [] : [...via];
+}
+
+/** Homeservers drop themselves from `via`, so a list naming only ours routes nowhere. */
+export async function joinVia(
+  core: Pick<CoreClient, 'rpc' | 'session'>,
+  via: readonly string[],
+  parentId: string | null
+): Promise<string[]> {
+  const own = core.session?.user_id.split(':').slice(1).join(':');
+  if (parentId === null || via.some((server) => server !== own)) return [...via];
+  return [...via, ...(await core.rpc.rooms.viaServers({ room_id: parentId }))];
 }
 
 /**
@@ -149,4 +179,37 @@ export function permalinkTarget(
     kind: 'room',
     path: roomSectionPath(rooms, link.room_id, link.kind === 'event' ? link.event_id : null, via),
   };
+}
+
+export function matrixLinkPath(href: string): string | null {
+  const link = parseMatrixLink(href);
+  if (link === null) return null;
+  const id = link.kind === 'user' ? link.user_id : link.room_id;
+  const event = link.kind === 'event' ? `/${encodeURIComponent(link.event_id)}` : '';
+  const parameters = matrixLinkParameters(href);
+  const query = new URLSearchParams(
+    [...parameters].filter(([key]) => key === 'via' || key.includes('.'))
+  );
+  const action = matrixLinkAction(href, link);
+  if (action !== null) query.set('action', action);
+  const search = query.toString();
+  const path = resolve('/(app)/to/[...permalink]', {
+    permalink: `${encodeURIComponent(id)}${event}`,
+  });
+  return search ? `${path}?${search}` : path;
+}
+
+export function existingChatPath(
+  rooms: readonly RoomListItemView[],
+  userId: string
+): string | null {
+  const room = rooms.find(
+    (entry) =>
+      entry.state === 'joined' &&
+      entry.is_direct &&
+      !entry.is_tombstoned &&
+      entry.direct_targets.length === 1 &&
+      entry.direct_targets.includes(userId)
+  );
+  return room ? roomSectionPath(rooms, room.room_id) : null;
 }

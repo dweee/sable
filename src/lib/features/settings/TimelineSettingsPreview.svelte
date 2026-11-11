@@ -34,7 +34,9 @@
     { user_id: previewUserId, display_name: 'You' },
   ].map((member) => ({
     ...member,
+    real_name: member.display_name,
     avatar_url: null,
+    real_avatar_url: null,
     power_level: 0,
     membership: 'join',
     member_ts: null,
@@ -143,7 +145,7 @@
     padding-inline-start: calc(var(--avatar-size-small) + var(--timeline-row-gap));
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .timeline-preview {
       display: flex;
       flex-direction: column;

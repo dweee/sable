@@ -1,4 +1,4 @@
-import type { SharedBatch } from '#lib/platform/share-target.js';
+import type { SharedBatch, SharedTarget } from '#lib/platform/share-target.js';
 
 export interface ShareFileRef {
   batchId: string;
@@ -6,8 +6,11 @@ export interface ShareFileRef {
   mime: string | undefined;
 }
 
+// The iOS share extension opens the app with its own scheme, which differs between builds.
+const SHARE_DEEP_LINK = /^(?:sable|moe\.sable\.next|moe\.sable\.app):\/\/share(?:[/?#]|$)/;
+
 export function isShareDeepLink(url: string): boolean {
-  return url.startsWith('sable://share');
+  return SHARE_DEEP_LINK.test(url);
 }
 
 export function mergeShareBatches(
@@ -16,6 +19,16 @@ export function mergeShareBatches(
 ): SharedBatch[] {
   const known = new Set(previous.map((batch) => batch.batchId));
   return [...previous, ...next.filter((batch) => !known.has(batch.batchId))];
+}
+
+/** Only when every batch was shared to the same conversation. */
+export function shareTarget(batches: readonly SharedBatch[]): SharedTarget | null {
+  const target = batches[0]?.target;
+  if (target === undefined) return null;
+  const same = batches.every(
+    (batch) => batch.target?.userId === target.userId && batch.target.roomId === target.roomId
+  );
+  return same ? target : null;
 }
 
 export function collectShareText(batches: readonly SharedBatch[]): string {

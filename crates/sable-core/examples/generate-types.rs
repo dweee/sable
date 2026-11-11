@@ -49,7 +49,7 @@ fn render(
     dt: &DataType,
 ) -> Result<String, specta_typescript::Error> {
     match dt {
-        DataType::Reference(reference) => exporter.reference(reference),
+        DataType::Reference(_) => exporter.reference(dt),
         DataType::Nullable(inner) => Ok(format!("{} | null", render(exporter, inner)?)),
         dt => exporter.inline(dt),
     }
@@ -133,6 +133,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .register::<AttachmentInfoView>()
         .register::<SendAttachmentRequest>()
         .register::<SendGalleryRequest>()
+        .register::<sable_model::emote_picker::EmoteRecentsInput>()
+        .register::<sable_model::emote_picker::EmoteRecents>()
         .register::<sable_model::search_query::ParsedQuery>()
         .register::<sable_model::matrix_link::MatrixLink>()
         .register::<sable_model::matrix_link::ViaSplit>()
@@ -156,6 +158,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .register::<sable_model::spaces::HierarchySection>()
         .register::<sable_model::spaces::JoinCandidate>()
         .register::<sable_model::spaces::LobbyAction>()
+        .register::<sable_model::spaces::SectionInputs>()
+        .register::<sable_model::spaces::ChildOrderOverride>()
+        .register::<sable_model::spaces::SuggestedOverride>()
+        .register::<sable_model::sidebar::LayoutRef>()
+        .register::<sable_model::sidebar::DropInstruction>()
         .register::<sable_model::event_preview::EventPreview>()
         .register::<sable_model::power_levels::PermissionGroup>()
         .register::<sable_model::search_filter::ResolvedQuery>()

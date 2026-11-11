@@ -35,6 +35,8 @@ export const SUPPORTER_VARIANTS = [
   'bigendergradient',
   'demigender',
   'demigendergradient',
+  'pluraljourney',
+  'pluraljourneygradient',
   'bisexual',
   'bisexualgradient',
   'pansexual',
@@ -49,6 +51,9 @@ export const SUPPORTER_VARIANTS = [
   'mlmgradient',
   'pride',
   'pridegradient',
+  'ukraine',
+  'palestine',
+  'cuba',
   'ceo',
 ] as const;
 export type SupporterVariant = (typeof SUPPORTER_VARIANTS)[number];

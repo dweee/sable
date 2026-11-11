@@ -592,7 +592,7 @@
   {
     "markdown": "||secret||",
     "pills": [],
-    "body": "||secret||",
+    "body": "[Spoiler]",
     "formatted_body": "<span data-mx-spoiler=\"\">secret</span>",
     "mentions": {
       "user_ids": [],
@@ -612,8 +612,8 @@
   {
     "markdown": "||a **b**||",
     "pills": [],
-    "body": "||a **b**||",
-    "formatted_body": "<span data-mx-spoiler=\"\">a </span><strong><span data-mx-spoiler=\"\">b</span></strong>",
+    "body": "[Spoiler]",
+    "formatted_body": "<span data-mx-spoiler=\"\">a <strong>b</strong></span>",
     "mentions": {
       "user_ids": [],
       "room": false
@@ -622,7 +622,7 @@
   {
     "markdown": "x ||y|| z",
     "pills": [],
-    "body": "x ||y|| z",
+    "body": "x [Spoiler] z",
     "formatted_body": "x <span data-mx-spoiler=\"\">y</span> z",
     "mentions": {
       "user_ids": [],
@@ -777,7 +777,7 @@
       }
     ],
     "body": ":blob:",
-    "formatted_body": "<img data-mx-emoticon=\"\" src=\"mxc://example.org/blob\" alt=\":blob:\" title=\":blob:\" height=\"32\">",
+    "formatted_body": "<img data-mx-emoticon=\"\" src=\"mxc://example.org/blob\" alt=\"blob\" title=\"blob\" height=\"32\">",
     "mentions": {
       "user_ids": [],
       "room": false
@@ -817,7 +817,7 @@
       }
     ],
     "body": "`:blob:`",
-    "formatted_body": "<img data-mx-emoticon=\"\" src=\"mxc://example.org/blob\" alt=\":blob:\" title=\":blob:\" height=\"32\">",
+    "formatted_body": "<img data-mx-emoticon=\"\" src=\"mxc://example.org/blob\" alt=\"blob\" title=\"blob\" height=\"32\">",
     "mentions": {
       "user_ids": [],
       "room": false
@@ -868,6 +868,36 @@
     "pills": [],
     "body": "# Notes\n\n- one\n- two\n\n> said\n\n```js\nlet x = 1;\n```",
     "formatted_body": "<h1>Notes</h1><ul><li>one</li><li>two</li></ul><blockquote><p>said</p></blockquote><pre><code class=\"language-js\">let x = 1;</code></pre>",
+    "mentions": {
+      "user_ids": [],
+      "room": false
+    }
+  },
+  {
+    "markdown": "*`Hello` World*",
+    "pills": [],
+    "body": "*`Hello` World*",
+    "formatted_body": "<em><code>Hello</code> World</em>",
+    "mentions": {
+      "user_ids": [],
+      "room": false
+    }
+  },
+  {
+    "markdown": "**a `b` c** next",
+    "pills": [],
+    "body": "**a `b` c** next",
+    "formatted_body": "<strong>a <code>b</code> c</strong> next",
+    "mentions": {
+      "user_ids": [],
+      "room": false
+    }
+  },
+  {
+    "markdown": "[`x`](https://example.org)",
+    "pills": [],
+    "body": "[`x`](https://example.org)",
+    "formatted_body": "<a href=\"https://example.org\"><code>x</code></a>",
     "mentions": {
       "user_ids": [],
       "room": false

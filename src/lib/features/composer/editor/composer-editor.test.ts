@@ -18,6 +18,7 @@ const defaultUserAgent = navigator.userAgent;
 afterEach(() => {
   preferences.enterForNewline = 'send';
   preferences.richTextComposer = true;
+  preferences.emoticonToEmoji = false;
   dispose?.();
   dispose = undefined;
   document.body.replaceChildren();
@@ -152,12 +153,12 @@ test('unlinking a mention makes its Matrix ID literal for a bot command', () => 
   editor.setDoc(
     composerSchema.node('doc', null, [
       composerSchema.nodes.paragraph.create(null, [
-        composerSchema.text('!ban sable-coc '),
+        composerSchema.text('!ban test-room '),
         composerSchema.nodes.mention.create({
-          userId: '@doesnm:doesnmlab.xyz',
-          name: 'doesnm',
+          userId: '@bob:example.org',
+          name: 'Bob',
         }),
-        composerSchema.text(' russian troll'),
+        composerSchema.text(' spam'),
       ]),
     ])
   );
@@ -169,9 +170,9 @@ test('unlinking a mention makes its Matrix ID literal for a bot command', () => 
   const doc = editor.doc();
   if (!doc) throw new Error('no document after unlinking mention');
   expect(serializeComposer(doc)).toEqual({
-    body: '!ban sable-coc @doesnm:doesnmlab.xyz russian troll',
+    body: '!ban test-room @bob:example.org spam',
     formatted: null,
-    mentions: { userIds: [], room: false },
+    mentions: { user_ids: [], room: false },
   });
 });
 
@@ -277,6 +278,19 @@ describe('document replacement', () => {
   });
 });
 
+test('typing $…$ in the rich composer inserts inline math, but prices stay text', () => {
+  const sent = (text: string): string | null => {
+    const editor = open();
+    typeAfterBreak(editor, text);
+    const doc = editor.doc();
+    if (!doc) throw new Error('no document');
+    return serializeComposer(doc).formatted;
+  };
+
+  expect(sent('so $x^2$ ok')).toBe('so <span data-mx-maths="x^2"><code>x^2</code></span> ok');
+  expect(sent('costs $5 and $6')).toBeNull();
+});
+
 describe('history reset', () => {
   test('prevents Undo from restoring sent content', () => {
     const editor = open();
@@ -321,7 +335,7 @@ describe('setHtml', () => {
     expect(doc && serializeComposer(doc)).toEqual({
       body: 'ask Member One',
       formatted: 'ask <a href="https://matrix.to/#/@one:example.org">Member One</a>',
-      mentions: { userIds: ['@one:example.org'], room: false },
+      mentions: { user_ids: ['@one:example.org'], room: false },
     });
   });
 });
@@ -716,6 +730,19 @@ test('the active option is written straight onto the editor node', () => {
   editor.syncActiveOption();
   expect(surface?.getAttribute('aria-activedescendant')).toBeNull();
   expect(surface?.getAttribute('aria-expanded')).toBe('false');
+});
+
+test('a document set while unmounted is shown once the editor mounts again', () => {
+  const editor = open();
+  editor.setLines('first room');
+  dispose?.();
+
+  editor.clear();
+  expect(editor.isEmpty()).toBe(true);
+  editor.setLines('second room');
+  dispose = editor.mount(document.body);
+
+  expect(editor.text()).toBe('second room');
 });
 
 function press(
@@ -1391,8 +1418,8 @@ describe('the markdown source toggle round trip', () => {
     const modes: boolean[] = [];
     const editor = openWith({ onSourceToggle: (source) => modes.push(source) });
     editor.setText('hi');
-    press(editor, 'm', { mod: true, shift: true });
-    press(editor, 'm', { mod: true, shift: true });
+    press(editor, 'l', { mod: true, shift: true });
+    press(editor, 'l', { mod: true, shift: true });
 
     expect(modes).toEqual([true, false]);
   });
@@ -1442,6 +1469,146 @@ function type(editor: ComposerEditor, text: string): void {
     if (!handled) editorView.dispatch(editorView.state.tr.insertText(char, from, to));
   }
 }
+
+describe.each([false, true])('emoticon conversion (rich text: %s)', (rich) => {
+  beforeEach(() => {
+    preferences.richTextComposer = rich;
+    preferences.emoticonToEmoji = true;
+  });
+
+  test('converts emoticons and generated variants while typing', () => {
+    const editor = open();
+    type(editor, 'hello <3 :) =] :-] XD ');
+
+    expect(editor.doc()?.textContent).toBe('hello ❤️ 🙂 🙂 🙂 😆 ');
+    const doc = editor.doc();
+    if (!doc) throw new Error('no doc');
+    expect((rich ? serializeComposer(doc) : serializePlain(doc)).body).toBe('hello ❤️ 🙂 🙂 🙂 😆');
+  });
+
+  test('uses the current preference without remounting the editor', () => {
+    preferences.emoticonToEmoji = false;
+    const editor = open();
+    type(editor, '<3');
+    expect(editor.doc()?.textContent).toBe('<3');
+
+    preferences.emoticonToEmoji = true;
+    type(editor, ' :)');
+    expect(editor.doc()?.textContent).toBe('<3 🙂');
+
+    preferences.emoticonToEmoji = false;
+    type(editor, ' <3');
+    expect(editor.doc()?.textContent).toBe('<3 🙂 <3');
+  });
+
+  test('keeps emoji shortcodes available with emoticon conversion enabled', () => {
+    const editor = open();
+    type(editor, ':joy: :smile:');
+
+    expect(editor.doc()?.textContent).toBe('😂 😄');
+  });
+
+  test('converts a shortcode right after punctuation but not inside a word or after a colon', () => {
+    const editor = open();
+    type(editor, '+:x: (:joy:) a:x: 12:joy: ::x:');
+
+    expect(editor.doc()?.textContent).toBe('+❌ (😂) a:x: 12:joy: ::x:');
+  });
+
+  test('Backspace restores the literal emoticon', () => {
+    const editor = open();
+    type(editor, '<3');
+    press(editor, 'Backspace');
+
+    expect(editor.doc()?.textContent).toBe('<3');
+    type(editor, ' ');
+    expect(editor.doc()?.textContent).toBe('<3 ');
+  });
+
+  test('leaves URLs, escaped emoticons and emoticons inside words alone', () => {
+    const editor = open();
+    const text = 'https://example.org/:) word<3 \\:D';
+    type(editor, text);
+
+    expect(editor.doc()?.textContent).toBe(text);
+  });
+
+  test('does not convert pasted text', () => {
+    const editor = open();
+    const data = new DataTransfer();
+    data.setData('text/plain', 'hello <3 :)');
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: data });
+    surface().dispatchEvent(event);
+
+    expect(editor.doc()?.textContent).toBe('hello <3 :)');
+  });
+});
+
+describe('emoticon conversion in code', () => {
+  beforeEach(() => {
+    preferences.richTextComposer = true;
+    preferences.emoticonToEmoji = true;
+  });
+
+  test.each(['<p><code>code text</code></p>', '<pre>code text</pre>'])(
+    'leaves rich text code literal: %s',
+    (html) => {
+      const editor = open();
+      editor.setHtml(html);
+      const target = view(editor);
+      target.dispatch(target.state.tr.setSelection(TextSelection.create(target.state.doc, 6)));
+      type(editor, ':)');
+
+      expect(editor.doc()?.textContent).toBe('code :)text');
+    }
+  );
+
+  test.each(['`code ', '``code ', '```js\n', '~~~\n'])(
+    'leaves Markdown code literal after %j',
+    (prefix) => {
+      preferences.richTextComposer = false;
+      const editor = open();
+      type(editor, `${prefix}:)`);
+
+      expect(editor.doc()?.textContent).toBe(`${prefix}:)`);
+    }
+  );
+
+  test('converts outside a closed Markdown code span', () => {
+    preferences.richTextComposer = false;
+    const editor = open();
+    type(editor, '`:)` :)');
+
+    expect(editor.doc()?.textContent).toBe('`:)` 🙂');
+  });
+
+  test('does not convert with an active inline code mark', () => {
+    const editor = open();
+    editor.format('code');
+    type(editor, ':)');
+
+    expect(editor.doc()?.textContent).toBe(':)');
+  });
+
+  test('handles the source toggle and closed fences', () => {
+    const editor = open();
+    editor.toggleSource();
+    type(editor, '```\n:)\n```\n<3');
+
+    expect(editor.doc()?.textContent).toBe('```\n:)\n```\n❤️');
+  });
+
+  test('preserves formatting on the replacement', () => {
+    const editor = open();
+    editor.format('strong');
+    type(editor, ':)');
+    const doc = editor.doc();
+    if (!doc) throw new Error('no doc');
+
+    expect(serializeComposer(doc).formatted).toBe('<strong>🙂</strong>');
+  });
+});
 
 describe('block markup on a soft line', () => {
   test('enter after a fence typed below a soft break opens a block instead of sending', () => {
@@ -1515,6 +1682,128 @@ describe('enter inside a list', () => {
     press(editor, 'Enter');
     expect(sent).toBe(1);
   });
+});
+
+test('selecting quote text toggles a quote past its trailing paragraph', () => {
+  const editor = open();
+  editor.setText('one\ntwo');
+  const target = view(editor);
+  target.dispatch(target.state.tr.setSelection(new AllSelection(target.state.doc)));
+  editor.format('blockquote');
+  target.dispatch(
+    target.state.tr.setSelection(
+      TextSelection.create(target.state.doc, 2, target.state.doc.content.size - 1)
+    )
+  );
+
+  editor.format('blockquote');
+
+  expect(target.state.doc.toString()).toBe('doc(paragraph("one", hard_break, "two"), paragraph)');
+});
+
+describe('rich formatting shortcuts', () => {
+  test('bold applies a rich text mark', () => {
+    const editor = open();
+    editor.setText('hello');
+    const target = view(editor);
+    target.dispatch(target.state.tr.setSelection(new AllSelection(target.state.doc)));
+
+    press(editor, 'b', { mod: true });
+
+    expect(surface().querySelector('strong')?.textContent).toBe('hello');
+  });
+
+  test('spoilers request a reason', () => {
+    const onSpoilerRequest = vi.fn();
+    const editor = openWith({ onSpoilerRequest });
+
+    press(editor, 'h', { mod: true });
+
+    expect(onSpoilerRequest).toHaveBeenCalledOnce();
+  });
+});
+
+test('markdown bold shortcut inserts Markdown syntax', () => {
+  preferences.richTextComposer = false;
+  const editor = open();
+  editor.setText('hello');
+  const target = view(editor);
+  target.dispatch(target.state.tr.setSelection(new AllSelection(target.state.doc)));
+
+  press(editor, 'b', { mod: true });
+
+  expect(editor.text()).toBe('**hello**');
+  expect(surface().querySelector('strong')).toBeNull();
+});
+
+test('markdown spoiler shortcut inserts syntax without requesting a reason', () => {
+  preferences.richTextComposer = false;
+  const onSpoilerRequest = vi.fn();
+  const editor = openWith({ onSpoilerRequest });
+  editor.setText('secret');
+  const target = view(editor);
+  target.dispatch(target.state.tr.setSelection(new AllSelection(target.state.doc)));
+
+  press(editor, 'h', { mod: true });
+
+  expect(editor.text()).toBe('||secret||');
+  expect(onSpoilerRequest).not.toHaveBeenCalled();
+});
+
+test('source bold shortcut inserts Markdown syntax', () => {
+  const editor = open();
+  editor.setText('hello');
+  editor.toggleSource();
+  const target = view(editor);
+  target.dispatch(target.state.tr.setSelection(new AllSelection(target.state.doc)));
+
+  press(editor, 'b', { mod: true });
+
+  expect(editor.text()).toBe('**hello**');
+  expect(surface().querySelector('strong')).toBeNull();
+});
+
+test('source spoiler shortcut inserts syntax without requesting a reason', () => {
+  const onSpoilerRequest = vi.fn();
+  const editor = openWith({ onSpoilerRequest });
+  editor.setText('secret');
+  editor.toggleSource();
+  const target = view(editor);
+  target.dispatch(target.state.tr.setSelection(new AllSelection(target.state.doc)));
+
+  press(editor, 'h', { mod: true });
+
+  expect(editor.text()).toBe('||secret||');
+  expect(onSpoilerRequest).not.toHaveBeenCalled();
+});
+
+test('link requests work in rich mode', () => {
+  const onLinkRequest = vi.fn();
+  const editor = openWith({ onLinkRequest });
+
+  press(editor, 'k', { mod: true, shift: true });
+
+  expect(onLinkRequest).toHaveBeenCalledOnce();
+});
+
+test('link requests work in markdown mode', () => {
+  preferences.richTextComposer = false;
+  const onLinkRequest = vi.fn();
+  const editor = openWith({ onLinkRequest });
+
+  press(editor, 'k', { mod: true, shift: true });
+
+  expect(onLinkRequest).toHaveBeenCalledOnce();
+});
+
+test('link requests work in source mode', () => {
+  const onLinkRequest = vi.fn();
+  const editor = openWith({ onLinkRequest });
+  editor.toggleSource();
+
+  press(editor, 'k', { mod: true, shift: true });
+
+  expect(onLinkRequest).toHaveBeenCalledOnce();
 });
 
 describe('markdown source mode', () => {
@@ -1989,7 +2278,9 @@ describe('the editor api the composer component drives', () => {
     const onFiles = vi.fn();
     const editor = openWith({ onFiles });
     const file = new File(['x'], 'x.png', { type: 'image/png' });
-    const event = { dataTransfer: { files: [file], items: [] } } as unknown as DragEvent;
+    const event = {
+      dataTransfer: { files: [file], items: [], getData: () => '' },
+    } as unknown as DragEvent;
     const handled = view(editor).someProp('handleDrop', (handler) =>
       handler(view(editor), event, Slice.empty, false)
     );
@@ -2420,4 +2711,24 @@ describe('pasting what select-all copied', () => {
     expect(editorView.state.doc.childCount).toBe(1);
     expect(editorView.state.doc.firstChild?.childCount).toBe(2);
   });
+});
+
+test('a length-limited editor rejects typing past the limit and still allows deletion', () => {
+  const editor = openWith({ maxLength: 5 });
+  typeAfterBreak(editor, 'hello');
+  typeAfterBreak(editor, '!');
+  expect(editor.text()).toBe('hello');
+  view(editor).dispatch(view(editor).state.tr.delete(5, 6));
+  typeAfterBreak(editor, '!');
+  expect(editor.text()).toBe('hell!');
+});
+
+test('an existing bio over the limit can still be loaded and shortened', () => {
+  const editor = openWith({ maxLength: 5 });
+  editor.setText('existing biography');
+  expect(editor.text()).toBe('existing biography');
+  typeAfterBreak(editor, '!');
+  expect(editor.text()).toBe('existing biography');
+  view(editor).dispatch(view(editor).state.tr.delete(1, 10));
+  expect(editor.text()).toBe('biography');
 });

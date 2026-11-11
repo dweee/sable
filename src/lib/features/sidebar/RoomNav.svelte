@@ -1,15 +1,15 @@
 <script lang="ts">
   import type { Component } from 'svelte';
+  import type { Attachment } from 'svelte/attachments';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import type { NotificationModeView, RoomListItemView } from '#src/generated/protocol';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
+  import { roomSectionPath } from '#lib/rooms/permalink.js';
   import { voiceChat } from '#lib/features/room/voice-chat.svelte.js';
   import {
     findRoomByPathId,
-    roomAvatarUrl,
-    roomLabel,
     roomPathParam,
     roomPathParamFromId,
     useRoomList,
@@ -42,12 +42,10 @@
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import TypingDots from '#lib/ui/primitives/TypingDots.svelte';
   import UnreadBadge from '#lib/ui/primitives/UnreadBadge.svelte';
+  import { rovingFocus } from '#lib/ui/roving-focus.js';
   import LeaveRoomDialog from '#lib/features/room/LeaveRoomDialog.svelte';
-  import {
-    preferences,
-    readReceiptIsPrivate,
-    setPreference,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { isBridgedSpace } from '#lib/rooms/bridged-spaces.svelte.js';
   import { roomIconOverride, showsRoomAvatar } from '#lib/rooms/room-appearance.svelte.js';
   import RoomSettingsDialog from '#lib/features/room/settings/RoomSettingsDialog.svelte';
   import { goToPage } from '#lib/features/room/room-navigation.js';
@@ -57,7 +55,8 @@
   import type { CallVoiceState } from '#lib/features/call/call-session.svelte.js';
   import CallVolumePopover from '#lib/features/call/CallVolumePopover.svelte';
   import MentionProfile from '#lib/features/room/members/MentionProfile.svelte';
-  import { participantKeys } from '#lib/features/call/participant-keys.js';
+  import { byName, participantKeys } from '#lib/features/call/participant-keys.js';
+  import BridgeBadge from './BridgeBadge.svelte';
   import CallParticipantList from './CallParticipantList.svelte';
   import ReplacedRooms from './ReplacedRooms.svelte';
   import RoomInvites from './RoomInvites.svelte';
@@ -70,21 +69,13 @@
   import GearIcon from 'phosphor-svelte/lib/GearIcon';
   import SignOutIcon from 'phosphor-svelte/lib/SignOutIcon';
   import { claimedRoomIds, markRoomsRead } from './nav-rooms.js';
-  import {
-    isFavourite,
-    roomComparator,
-    roomRow,
-    treeRows,
-    withoutFavourites,
-    type RoomNavRow,
-  } from './nav-rows.js';
+  import { roomRow, type RoomNavRow } from './nav-rows.js';
   import { PeerProfiles } from './peer-profiles.svelte.js';
   import { publishVisibleRoomOrder } from './visible-rooms.svelte.js';
   import { navSectionKind, navSectionLabels, type NavSectionKind } from './nav-section.js';
   import {
     flattenSpaceTree,
-    spaceTree as buildSpaceTree,
-    type SpaceTreeNode,
+    spaceTreeNodes,
     type SpaceTreeRoom,
     type SpaceTreeSpace,
     type Thread,
@@ -92,6 +83,8 @@
 
   const MAX_VOICE_FACES = 3;
   const WARM_DWELL_MS = 300;
+  const EAGER_ROWS = 50;
+  const HYDRATE_MARGIN = '400px';
   let contextRoom = $state<RoomListItemView | null>(null);
   let contextParentSpaceId = $state<string | null>(null);
   let contextAnchor = $state.raw<HTMLElement | CursorAnchor | null>(null);
@@ -133,6 +126,7 @@
   interface Props {
     pathname?: string;
     spaceId?: string;
+    roomId?: string;
     onNavigate?: (href: string) => void;
     width?: number;
     collapsed?: boolean;
@@ -144,6 +138,7 @@
   let {
     pathname = page.url.pathname,
     spaceId = page.params.spaceId,
+    roomId = page.params.roomId,
     onNavigate,
     width,
     collapsed = false,
@@ -179,9 +174,10 @@
   const presenceStore = usePresenceStore();
 
   function dmPeerId(room: RoomListItemView): string | null {
-    if (room.direct_targets.length === 0) return null;
     const own = core.session?.user_id;
-    return room.direct_targets.find((target) => target !== own) ?? room.direct_targets[0];
+    if (!own) return null;
+    const peers = room.direct_targets.filter((target) => target !== own);
+    return peers.length === 1 ? peers[0] : null;
   }
 
   const peerProfiles = new PeerProfiles(core);
@@ -196,7 +192,11 @@
   );
 
   let activeSpaceId = $derived(activeSpace?.room_id ?? null);
+  let activeRoom = $derived(
+    activeSpace ? (findRoomByPathId(roomList.rooms, roomId) ?? null) : null
+  );
   let iconMode = $derived(roomIconOverride(activeSpaceId) ?? preferences.showRoomIcon);
+  let showBridgeBadges = $derived(preferences.showBridgeBadges && !isBridgedSpace(activeSpaceId));
 
   function navigateTo(href: string): void {
     if (onNavigate) {
@@ -243,113 +243,82 @@
     return space?.name ?? i18n.t(labels.title);
   });
   let TitleIcon = $derived(SECTION_ICONS[section]);
-  let spaceTree = $derived.by<SpaceTreeNode[]>(() => {
-    if (!pathname.startsWith('/space')) return [];
-
-    const space = findRoomByPathId(roomList.rooms, spaceId);
-    if (space?.room_kind !== 'space') return [];
-
-    const roomsById = new Map(
-      roomList.rooms
-        .filter(
-          (room) => room.state === 'joined' && !(room.room_kind === 'space' && room.is_tombstoned)
-        )
-        .map((room) => [room.room_id, room])
-    );
-    return buildSpaceTree(space, roomsById, Number(preferences.subspaceHierarchyLimit));
-  });
   let spacedRoomIds = $derived(claimedRoomIds(roomList.rooms));
-  let compareRooms = $derived(roomComparator(preferences.roomSort));
+  let sortKey = $derived<'directSort' | 'roomSort'>(directSection ? 'directSort' : 'roomSort');
   let favouriteView = $derived(activeSpaceId ?? section);
   let groupFavourites = $derived(groupsFavourites(favouriteView));
-  let spaceRootItems = $derived(groupFavourites ? withoutFavourites(spaceTree) : spaceTree);
-  let listedRooms = $derived.by<RoomNavRow[]>(() => {
-    if (directSection) {
-      return roomList.rooms
-        .filter((room) => room.state === 'joined' && room.is_direct && !room.is_tombstoned)
-        .map(roomRow)
-        .sort(compareRooms);
-    }
+  let navSection = $derived(roomList.section(favouriteView));
 
-    if (pathname.startsWith('/space')) {
-      return spaceTree.filter((item): item is SpaceTreeRoom => item.kind === 'room');
-    }
+  function listedRooms(roomIds: readonly string[] | undefined): RoomListItemView[] {
+    return (roomIds ?? []).flatMap((roomId) => roomList.byId(roomId) ?? []);
+  }
 
-    const claimedByJoinedSpace = unspacedSection
-      ? claimedRoomIds(roomList.rooms)
-      : new Set<string>();
+  function sectionRows(roomIds: readonly string[] | undefined, keyed: boolean): RoomNavRow[] {
+    const listed = listedRooms(roomIds);
+    if (activeSpaceId === null) return listed.map(roomRow);
+    const spaceId = activeSpaceId;
+    return listed.map((room): SpaceTreeRoom => ({
+      kind: 'room',
+      room,
+      roomId: room.room_id,
+      parentSpaceId: spaceId,
+      depth: 0,
+      key: keyed ? `${spaceId}/${room.room_id}` : room.room_id,
+      threads: [],
+    }));
+  }
 
-    return roomList.rooms
-      .filter(
-        (room) =>
-          room.state === 'joined' &&
-          !room.is_tombstoned &&
-          room.room_kind !== 'space' &&
-          !(unspacedSection && room.is_direct) &&
-          !claimedByJoinedSpace.has(room.room_id)
-      )
-      .map(roomRow)
-      .sort(compareRooms);
-  });
-  let favourites = $derived.by<RoomNavRow[]>(() => {
-    if (!groupFavourites) return [];
-    const rows = pathname.startsWith('/space') ? treeRows(spaceTree) : listedRooms;
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- local to this derivation
-    const seen = new Set<string>();
-    return rows
-      .filter((row) => {
-        if (!isFavourite(row) || seen.has(row.roomId)) return false;
-        seen.add(row.roomId);
-        return true;
-      })
-      .map((row) => ({ ...row, depth: 0, key: row.roomId }))
-      .sort(compareRooms);
-  });
-  let rooms = $derived(
-    groupFavourites ? listedRooms.filter((row) => !isFavourite(row)) : listedRooms
-  );
+  let favourites = $derived(sectionRows(navSection?.favourites, false));
+  let rooms = $derived(sectionRows(navSection?.rooms, true));
   let sectionRooms = $derived([...favourites, ...rooms]);
-  let invites = $derived.by<RoomListItemView[]>(() => {
-    const pending = roomList.rooms.filter(
-      (room) =>
-        room.state === 'invited' &&
-        !isDeclining(room.room_id) &&
-        !dismissedInvites.has(room.room_id)
-    );
-
-    if (directSection) {
-      return pending.filter((room) => room.is_direct);
-    }
-
-    if (pathname.startsWith('/space')) {
-      const children = new Set(activeSpace?.space_children.map((child) => child.room_id) ?? []);
-      return pending.filter((room) => children.has(room.room_id));
-    }
-
-    const claimedByJoinedSpace = unspacedSection
-      ? claimedRoomIds(roomList.rooms)
-      : new Set<string>();
-
-    return pending.filter(
-      (room) => !(unspacedSection && room.is_direct) && !claimedByJoinedSpace.has(room.room_id)
-    );
-  });
+  let invites = $derived(
+    listedRooms(navSection?.invites).filter(
+      (room) => !isDeclining(room.room_id) && !dismissedInvites.has(room.room_id)
+    )
+  );
   $effect(() => {
     publishVisibleRoomOrder(sectionRooms.map((row) => row.roomId));
   });
-  let calendarRooms = $derived(
-    spaceTree
-      .filter((item): item is SpaceTreeRoom => item.kind === 'room')
-      .map((item) => item.room)
-      .filter((room) => room.room_kind === 'calendar')
+  let calendarRooms = $derived(listedRooms(navSection?.calendars));
+  let subspaces = $derived(
+    activeSpaceId === null
+      ? []
+      : spaceTreeNodes(navSection?.subspaces ?? [], activeSpaceId, (roomId) =>
+          roomList.byId(roomId)
+        )
   );
-  let subspaces = $derived(spaceRootItems.filter((item) => item.kind !== 'room'));
   let visibleSubspaces = $derived<RoomNavItem[]>(
     flattenSpaceTree(subspaces, {
       closed: (key) => closedCategories.has(key),
       keep: stillShownRow,
     })
   );
+  let eagerKeys = $derived(
+    new Set(
+      [...favourites, ...rooms, ...visibleSubspaces].slice(0, EAGER_ROWS).map((item) => item.key)
+    )
+  );
+  const hydrated = new SvelteSet<string>();
+  let rowObserver: IntersectionObserver | undefined;
+
+  function hydrateWhenNear(): Attachment<HTMLElement> {
+    return (node) => {
+      rowObserver ??= new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting || !(entry.target instanceof HTMLElement)) continue;
+            rowObserver?.unobserve(entry.target);
+            const rowKey = entry.target.dataset.rowKey;
+            if (rowKey) hydrated.add(rowKey);
+          }
+        },
+        { rootMargin: HYDRATE_MARGIN }
+      );
+      rowObserver.observe(node);
+      return () => rowObserver?.unobserve(node);
+    };
+  }
+
   function stillShownRow(item: RoomNavRow): boolean {
     const room = item.room;
     if (room === undefined) return false;
@@ -378,6 +347,9 @@
     if (unspacedSection) {
       return resolve('/(app)/rooms/[roomId]', { roomId: routeId });
     }
+
+    // The disabled Home layout redirects to /rooms and drops the selected room.
+    if (!preferences.showHome) return roomSectionPath(roomList.rooms, row.roomId);
 
     return resolve('/(app)/home/[roomId]', { roomId: routeId });
   }
@@ -408,8 +380,7 @@
   function markSectionRead(): void {
     markRoomsRead(
       sectionRooms.map((item) => item.room),
-      core.rpc.timeline,
-      readReceiptIsPrivate()
+      core.rpc.timeline
     );
   }
 
@@ -431,6 +402,7 @@
 >
   <RoomNavHeader
     {activeSpace}
+    {activeRoom}
     {title}
     titleIcon={TitleIcon}
     {collapsed}
@@ -450,21 +422,21 @@
       }}
     >
       <span class="menu-check" aria-hidden="true">{groupFavourites ? '✓' : ''}</span>
-      {i18n.t('nav.groupFavourites')}
+      <span>{i18n.t('nav.groupFavourites')}</span>
     </ActionMenuItem>
     <ActionMenuSeparator />
     {#if !activeSpace}
       {#each ROOM_SORTS as option (option)}
         <ActionMenuItem
-          checked={preferences.roomSort === option}
+          checked={preferences[sortKey] === option}
           onSelect={() => {
-            setPreference('roomSort', option);
+            setPreference(sortKey, option);
           }}
         >
           <span class="menu-check" aria-hidden="true"
-            >{preferences.roomSort === option ? '✓' : ''}</span
+            >{preferences[sortKey] === option ? '✓' : ''}</span
           >
-          {i18n.t(ROOM_SORT_LABELS[option])}
+          <span>{i18n.t(ROOM_SORT_LABELS[option])}</span>
         </ActionMenuItem>
       {/each}
     {:else}
@@ -504,6 +476,8 @@
     <button
       type="button"
       class="room-options-trigger selection-open"
+      tabindex="-1"
+      aria-hidden="true"
       aria-label={i18n.t('room.menuLabel')}
       aria-haspopup="menu"
       aria-expanded={open}
@@ -518,14 +492,22 @@
 
   {#snippet navRoom(item: RoomNavRow, sectionClosed: boolean)}
     {@const room = item.room}
-    {@const name = room ? roomLabel(room) : item.roomId}
-    {@const avatarUrl = room ? roomAvatarUrl(room) : null}
+    {@const name = room ? room.display_name : item.roomId}
+    {@const avatarUrl = room ? room.display_avatar_url : null}
     {@const href = roomHref(item)}
     {@const active = pathname === href}
     {@const counts = room ? roomList.badgeUnreadFor(room) : NO_UNREAD}
     {@const mentions = counts.highlight}
     {@const unread = counts.unread}
     {@const marked = counts.marked ?? false}
+    {@const unreadLabel =
+      mentions > 0
+        ? i18n.t('nav.unreadMentions', { count: mentions })
+        : unread > 0
+          ? i18n.t('nav.unreadMessages', { count: unread })
+          : marked
+            ? i18n.t('nav.markedUnread')
+            : null}
     {@const live = room?.call_participants.length ?? 0}
     {@const notifyMode = room ? roomList.notificationOverride(room.room_id) : null}
     {@const typing =
@@ -539,11 +521,19 @@
     {@const peerPresence = peerId ? presenceStore.peek(peerId) : null}
     {@const peerStatus = peerId ? resolveUserStatus(peerProfiles.get(peerId), peerPresence) : null}
     {@const closed = sectionClosed && !(room !== undefined && (active || hasUnread(counts)))}
-    <div class={['room-row-wrap', { 'closed-row': closed }]}>
+    {@const full = eagerKeys.has(item.key) || hydrated.has(item.key)}
+    <div
+      class={['room-row-wrap', { 'closed-row': closed }]}
+      data-row-key={item.key}
+      {@attach full ? undefined : hydrateWhenNear()}
+    >
       {@render threadLines(item.threads)}
       {#snippet roomTrigger({ props }: { props: Record<string, unknown> })}
+        <!-- eslint-disable svelte/no-navigation-without-resolve -- roomHref() resolves the route itself -->
         <a
           {...props}
+          role="treeitem"
+          aria-level={collapsed ? 1 : 2}
           draggable="false"
           oncontextmenu={mouseContextMenu((event) => {
             if (room) openContextMenu(event, room, item.parentSpaceId ?? null);
@@ -561,167 +551,189 @@
           {href}
           style:--room-depth={collapsed ? 0 : item.depth}
           onclick={() => onNavigate?.(href)}
-          aria-label={collapsed ? name : undefined}
+          aria-label={collapsed ? (unreadLabel ? `${name}, ${unreadLabel}` : name) : undefined}
           aria-current={active ? 'page' : undefined}
-          {@attach peerId !== null && !collapsed
+          {@attach full && peerId !== null && !collapsed
             ? whenVisible(() => {
                 peerProfiles.request(peerId);
               })
             : undefined}
-          {@attach whenVisible(
-            () => {
-              roomList.warm(item.roomId);
-            },
-            '0px',
-            WARM_DWELL_MS
-          )}
+          {@attach full
+            ? whenVisible(
+                () => {
+                  roomList.warm(item.roomId);
+                },
+                '0px',
+                WARM_DWELL_MS
+              )
+            : undefined}
         >
-          {#if (room?.is_direct ?? false) || showsRoomAvatar(iconMode, collapsed, Boolean(avatarUrl))}
-            {#snippet glyph()}
-              <RoomIcon
-                roomKind={room?.room_kind ?? null}
-                hasParent={spacedRoomIds.has(item.roomId)}
-                joinRule={room?.join_rule ?? null}
-                weight={active ? 'fill' : 'regular'}
-              />
-            {/snippet}
-            <span class="room-avatar">
-              {#if avatarUrl}
-                <Avatar
-                  class={['room-avatar-icon', { voice: room?.room_kind === 'voice' }]}
-                  id={item.roomId}
-                  src={avatarUrl}
-                  size="small"
-                  uniform
-                  recolor={!room?.is_direct}
-                >
-                  {@render glyph()}
-                </Avatar>
-              {:else if room && (room.is_direct || unspacedSection)}
-                <Avatar class="room-avatar-icon" id={item.roomId} {name} size="small" />
-              {:else}
-                <div
-                  class={[
-                    'avatar-root avatar-small room-avatar-icon glyph',
-                    { voice: room?.room_kind === 'voice' },
-                  ]}
-                  aria-hidden="true"
-                >
-                  <span class="avatar-fallback">{@render glyph()}</span>
-                </div>
-              {/if}
-              {#if peerPresence && peerPresence.presence !== 'offline'}
-                <PresenceDot
-                  presence={peerPresence.presence}
-                  label={i18n.t(`presence.${peerPresence.presence}`)}
-                  class="room-presence"
-                  size="medium"
-                />
-              {/if}
-            </span>
+          {#if !full}
+            {#if !collapsed}<span class="room-text"><span class="room-name">{name}</span></span
+              >{/if}
           {:else}
-            <span class="room-icon" aria-hidden="true">
-              <RoomIcon
-                roomKind={room?.room_kind ?? null}
-                hasParent={spacedRoomIds.has(item.roomId)}
-                joinRule={room?.join_rule ?? null}
-                weight={active ? 'fill' : 'regular'}
-              />
-            </span>
-          {/if}
-          {#if !collapsed}
-            <span class="room-text">
-              <span class="room-name">{name}</span>
-              {#if room?.is_direct && room.topic && preferences.showDmTopics}
-                <span class="room-topic">{room.topic}</span>
-              {:else if peerStatus}
-                {@const peerStatusLabel = [peerStatus.emoji, peerStatus.text]
-                  .filter(Boolean)
-                  .join(' ')}
-                <Tooltip label={peerStatusLabel}>
-                  {#snippet trigger({ props })}
-                    <span {...props} class="room-topic">
-                      {#if peerStatus.emoji}<span class="room-status-emoji">{peerStatus.emoji}</span
-                        >{/if}{peerStatus.text}
-                    </span>
-                  {/snippet}
-                </Tooltip>
-              {:else if room?.room_kind === 'calendar' && preferences.showSpaceEvents}
-                <CalendarRowEvent roomId={room.room_id} />
-              {/if}
-            </span>
-            {#if room && live > 0}
-              {@const faces = room.call_participants.slice(0, MAX_VOICE_FACES)}
-              {@const faceKeys = participantKeys(faces)}
-              <span
-                class="voice-live"
-                role="img"
-                aria-label={i18n.t('nav.voiceLive', { count: live })}
-                {@attach whenVisible(() => {
-                  for (const userId of faces) peerProfiles.request(userId);
-                })}
-              >
-                <span class="voice-faces">
-                  {#each faces as userId, index (faceKeys[index])}
-                    {@const profile = peerProfiles.get(userId)}
-                    <Avatar
-                      class="voice-face"
-                      src={profile?.avatar_url ?? null}
-                      name={profile?.display_name ?? userId}
-                      id={userId}
-                    />
-                  {/each}
-                </span>
-                <StatusBadge label={String(live)} variant="primary" />
+            {#if (room?.is_direct ?? false) || showsRoomAvatar(iconMode, collapsed, Boolean(avatarUrl))}
+              {#snippet glyph()}
+                <RoomIcon
+                  roomKind={room?.room_kind ?? null}
+                  hasParent={spacedRoomIds.has(item.roomId)}
+                  joinRule={room?.join_rule ?? null}
+                  weight={active ? 'fill' : 'regular'}
+                />
+              {/snippet}
+              <span class="room-avatar">
+                {#if avatarUrl}
+                  <Avatar
+                    class={['room-avatar-icon', { voice: room?.room_kind === 'voice' }]}
+                    id={item.roomId}
+                    src={avatarUrl}
+                    size="small"
+                    uniform
+                    recolor={!room?.is_direct}
+                  >
+                    {@render glyph()}
+                  </Avatar>
+                {:else if room && (room.is_direct || unspacedSection)}
+                  <Avatar class="room-avatar-icon" id={item.roomId} {name} size="small" />
+                {:else}
+                  <div
+                    class={[
+                      'avatar-root avatar-small room-avatar-icon glyph',
+                      { voice: room?.room_kind === 'voice' },
+                    ]}
+                    aria-hidden="true"
+                  >
+                    <span class="avatar-fallback">{@render glyph()}</span>
+                  </div>
+                {/if}
+                {#if room?.bridge && showBridgeBadges}
+                  {@const bridge = room.bridge}
+                  <Tooltip label={i18n.t('nav.bridgedFrom', { network: bridge.network })}>
+                    {#snippet trigger({ props })}
+                      <BridgeBadge {...props} {bridge} />
+                    {/snippet}
+                  </Tooltip>
+                {/if}
+                {#if peerPresence && peerPresence.presence !== 'offline'}
+                  <PresenceDot
+                    presence={peerPresence.presence}
+                    label={i18n.t(`presence.${peerPresence.presence}`)}
+                    class="room-presence"
+                    size="medium"
+                  />
+                {/if}
+              </span>
+            {:else}
+              <span class="room-icon" aria-hidden="true">
+                <RoomIcon
+                  roomKind={room?.room_kind ?? null}
+                  hasParent={spacedRoomIds.has(item.roomId)}
+                  joinRule={room?.join_rule ?? null}
+                  weight={active ? 'fill' : 'regular'}
+                />
               </span>
             {/if}
-            <span class="room-status">
-              {#if typing}
-                <span class="room-typing"><TypingDots /></span>
-              {:else}
-                <UnreadBadge
-                  {counts}
-                  dm={room?.is_direct ?? false}
+            {#if !collapsed}
+              <span class="room-text">
+                <span class="room-name">{name}</span>
+                {#if room?.is_direct && room.topic && preferences.showDmTopics}
+                  <span class="room-topic">{room.topic}</span>
+                {:else if peerStatus}
+                  {@const peerStatusLabel = [peerStatus?.emoji, peerStatus?.text]
+                    .filter(Boolean)
+                    .join(' ')}
+                  <Tooltip label={peerStatusLabel}>
+                    {#snippet trigger({ props })}
+                      <span {...props} class="room-topic">
+                        {#if peerStatus?.emoji}<span class="room-status-emoji"
+                            >{peerStatus.emoji}</span
+                          >{/if}{peerStatus?.text}
+                      </span>
+                    {/snippet}
+                  </Tooltip>
+                {:else if room?.room_kind === 'calendar' && preferences.showSpaceEvents}
+                  <CalendarRowEvent roomId={room.room_id} />
+                {/if}
+              </span>
+              {#if room && live > 0}
+                {@const faces = byName(
+                  room.call_participants,
+                  (userId) => peerProfiles.get(userId)?.display_name
+                ).slice(0, MAX_VOICE_FACES)}
+                {@const faceKeys = participantKeys(faces)}
+                <span
+                  class="voice-live"
                   role="img"
-                  aria-label={mentions > 0
-                    ? i18n.t('nav.unreadMentions', { count: mentions })
-                    : unread > 0
-                      ? i18n.t('nav.unreadMessages', { count: unread })
-                      : i18n.t('nav.markedUnread')}
-                />
-              {/if}
-              {#if notifyMode}
-                {@const chip = notificationChip(notifyMode)}
-                <span class="room-mode" role="img" aria-label={i18n.t(chip.label)}>
-                  <chip.icon />
+                  aria-label={i18n.t('nav.voiceLive', { count: live })}
+                  {@attach whenVisible(() => {
+                    for (const userId of faces) peerProfiles.request(userId);
+                  })}
+                >
+                  <span class="voice-faces">
+                    {#each faces as userId, index (faceKeys[index])}
+                      {@const profile = peerProfiles.get(userId)}
+                      <Avatar
+                        class="voice-face"
+                        src={profile?.avatar_url ?? null}
+                        name={profile?.display_name ?? userId}
+                        id={userId}
+                      />
+                    {/each}
+                  </span>
+                  <StatusBadge label={String(live)} variant="primary" />
                 </span>
               {/if}
-            </span>
-          {:else if !typing}
-            <UnreadBadge
-              class="room-collapsed-badge"
-              {counts}
-              dm={room?.is_direct ?? false}
-              role="img"
-              aria-label={mentions > 0
-                ? i18n.t('nav.unreadMentions', { count: mentions })
-                : unread > 0
-                  ? i18n.t('nav.unreadMessages', { count: unread })
-                  : i18n.t('nav.markedUnread')}
-            />
+              <span class="room-status">
+                {#if typing}
+                  <span class="room-typing"><TypingDots /></span>
+                {:else}
+                  <UnreadBadge
+                    {counts}
+                    dm={room?.is_direct ?? false}
+                    role="img"
+                    aria-label={mentions > 0
+                      ? i18n.t('nav.unreadMentions', { count: mentions })
+                      : unread > 0
+                        ? i18n.t('nav.unreadMessages', { count: unread })
+                        : i18n.t('nav.markedUnread')}
+                  />
+                {/if}
+                {#if notifyMode}
+                  {@const chip = notificationChip(notifyMode)}
+                  <span class="room-mode" role="img" aria-label={i18n.t(chip.label)}>
+                    <chip.icon />
+                  </span>
+                {/if}
+              </span>
+            {:else if !typing}
+              <UnreadBadge
+                class="room-collapsed-badge"
+                {counts}
+                dm={room?.is_direct ?? false}
+                role="img"
+                aria-label={mentions > 0
+                  ? i18n.t('nav.unreadMentions', { count: mentions })
+                  : unread > 0
+                    ? i18n.t('nav.unreadMessages', { count: unread })
+                    : i18n.t('nav.markedUnread')}
+              />
+            {/if}
           {/if}
         </a>
+        <!-- eslint-enable svelte/no-navigation-without-resolve -->
       {/snippet}
-      {#if collapsed}
+      {#if collapsed && full}
         <Tooltip label={name} side="right" trigger={roomTrigger} />
       {:else}
         {@render roomTrigger({ props: {} })}
-        {#if room}
+        {#if room && full && !collapsed}
           <span class="room-options-slot">
             {#if room.room_kind === 'voice'}
               <button
                 class="room-options-trigger"
                 type="button"
+                tabindex="-1"
+                aria-hidden="true"
                 aria-label={i18n.t(active && voiceChat.open ? 'call.hideChat' : 'call.showChat')}
                 aria-pressed={active && voiceChat.open}
                 onclick={() => {
@@ -737,7 +749,7 @@
         {/if}
       {/if}
     </div>
-    {#if room?.room_kind === 'voice' && live > 0}
+    {#if full && room?.room_kind === 'voice' && live > 0}
       <CallParticipantList
         {room}
         {collapsed}
@@ -754,16 +766,23 @@
 
   {#snippet navLink(item: SpaceTreeSpace)}
     {@const room = item.room}
-    {@const name = roomLabel(room)}
+    {@const name = room.display_name}
     {@const href = resolve('/(app)/space/[spaceId]/lobby', {
       spaceId: roomPathParam(room, roomList.rooms),
     })}
     {@const active = pathname === href}
-    <div class="room-row-wrap">
+    {@const full = eagerKeys.has(item.key) || hydrated.has(item.key)}
+    <div
+      class="room-row-wrap"
+      data-row-key={item.key}
+      {@attach full ? undefined : hydrateWhenNear()}
+    >
       {@render threadLines(item.threads)}
       {#snippet linkTrigger({ props }: { props: Record<string, unknown> })}
         <a
           {...props}
+          role="treeitem"
+          aria-level={collapsed ? 1 : 2}
           draggable="false"
           oncontextmenu={mouseContextMenu((event) => {
             openContextMenu(event, room, null);
@@ -780,34 +799,39 @@
           aria-label={collapsed ? name : undefined}
           aria-current={active ? 'page' : undefined}
         >
-          <span class="room-avatar">
-            <Avatar
-              class={['room-avatar-icon', { glyph: !roomAvatarUrl(room) }]}
-              id={roomAvatarUrl(room) ? room.room_id : null}
-              src={roomAvatarUrl(room)}
-              size="small"
-              uniform
-            >
-              <RoomIcon
-                roomKind={room.room_kind}
-                joinRule={room.join_rule}
-                weight={active ? 'fill' : 'regular'}
-              />
-            </Avatar>
-          </span>
+          {#if full}
+            <span class="room-avatar">
+              <Avatar
+                class={['room-avatar-icon', { glyph: !room.display_avatar_url }]}
+                id={room.display_avatar_url ? room.room_id : null}
+                src={room.display_avatar_url}
+                size="small"
+                uniform
+              >
+                <RoomIcon
+                  roomKind={room.room_kind}
+                  joinRule={room.join_rule}
+                  weight={active ? 'fill' : 'regular'}
+                />
+              </Avatar>
+            </span>
+          {/if}
           {#if !collapsed}
             <span class="room-text"><span class="room-name">{name}</span></span>
-            <span class="room-link-icon" aria-hidden="true"><SquaresFourIcon /></span>
+            {#if full}<span class="room-link-icon" aria-hidden="true"><SquaresFourIcon /></span
+              >{/if}
           {/if}
         </a>
       {/snippet}
-      {#if collapsed}
+      {#if collapsed && full}
         <Tooltip label={name} side="right" trigger={linkTrigger} />
       {:else}
         {@render linkTrigger({ props: {} })}
-        <span class="room-options-slot">
-          {@render optionsButton(room, null)}
-        </span>
+        {#if full && !collapsed}
+          <span class="room-options-slot">
+            {@render optionsButton(room, null)}
+          </span>
+        {/if}
       {/if}
     </div>
   {/snippet}
@@ -825,110 +849,125 @@
 
     <RoomInvites {collapsed} {invites} />
 
-    {#if favourites.length > 0}
+    <div
+      role="tree"
+      data-focus-region="rooms"
+      aria-label={listLabel}
+      {@attach rovingFocus({ tree: true })}
+    >
+      {#if favourites.length > 0}
+        {#if !collapsed}
+          <!-- svelte-ignore a11y_role_has_required_aria_props -->
+          <button
+            type="button"
+            role="treeitem"
+            aria-level="1"
+            class="rooms-heading selection-layer"
+            aria-expanded={!favouritesClosed}
+            data-state={favouritesClosed ? 'closed' : 'open'}
+            aria-controls={favouritesListId}
+            onclick={() => {
+              favouritesClosed = !favouritesClosed;
+            }}
+          >
+            <span class="rooms-heading-label">{i18n.t('nav.favourites')}</span>
+            <span class={['category-caret', { closed: favouritesClosed }]} aria-hidden="true"
+              ><CaretDownIcon /></span
+            >
+          </button>
+        {/if}
+        <div id={favouritesListId} class={['room-list favourites', { collapsed }]}>
+          {#each favourites as item (item.key)}
+            {@render navRoom(item, favouritesClosed)}
+          {/each}
+        </div>
+      {/if}
+
       {#if !collapsed}
+        <!-- svelte-ignore a11y_role_has_required_aria_props -->
         <button
           type="button"
+          role="treeitem"
+          aria-level="1"
           class="rooms-heading selection-layer"
-          aria-expanded={!favouritesClosed}
-          data-state={favouritesClosed ? 'closed' : 'open'}
-          aria-controls={favouritesListId}
+          aria-expanded={!roomsClosed}
+          data-state={roomsClosed ? 'closed' : 'open'}
+          aria-controls={roomListId}
           onclick={() => {
-            favouritesClosed = !favouritesClosed;
+            roomsClosed = !roomsClosed;
           }}
         >
-          <span class="rooms-heading-label">{i18n.t('nav.favourites')}</span>
-          <span class={['category-caret', { closed: favouritesClosed }]} aria-hidden="true"
+          <span class="rooms-heading-label">{listLabel}</span>
+          <span class={['category-caret', { closed: roomsClosed }]} aria-hidden="true"
             ><CaretDownIcon /></span
           >
         </button>
       {/if}
-      <div id={favouritesListId} class={['room-list favourites', { collapsed }]}>
-        {#each favourites as item (item.key)}
-          {@render navRoom(item, favouritesClosed)}
-        {/each}
-      </div>
-    {/if}
 
-    {#if !collapsed}
-      <button
-        type="button"
-        class="rooms-heading selection-layer"
-        aria-expanded={!roomsClosed}
-        data-state={roomsClosed ? 'closed' : 'open'}
-        aria-controls={roomListId}
-        onclick={() => {
-          roomsClosed = !roomsClosed;
-        }}
-      >
-        <span class="rooms-heading-label">{listLabel}</span>
-        <span class={['category-caret', { closed: roomsClosed }]} aria-hidden="true"
-          ><CaretDownIcon /></span
-        >
-      </button>
-    {/if}
-
-    <div id={roomListId}>
-      {#if sectionRooms.length === 0 && subspaces.length === 0}
-        {#if !collapsed && !roomsClosed}
-          <div class="empty-rooms">
-            <p>{listEmpty}</p>
+      <div id={roomListId}>
+        {#if sectionRooms.length === 0 && subspaces.length === 0}
+          {#if !collapsed && !roomsClosed}
+            <div class="empty-rooms">
+              <p>{listEmpty}</p>
+            </div>
+          {/if}
+        {:else}
+          <div class={['room-list', { collapsed }]}>
+            {#each rooms as item (item.key)}
+              {@render navRoom(item, roomsClosed)}
+            {/each}
+            {#each visibleSubspaces as item (item.key)}
+              {#if item.kind === 'category'}
+                {@const name = item.room.display_name}
+                {@const isClosed = closedCategories.has(item.key)}
+                <div class="room-row-wrap">
+                  {@render threadLines(item.threads)}
+                  {#snippet categoryTrigger({ props }: { props: Record<string, unknown> })}
+                    <button
+                      {...props}
+                      type="button"
+                      role="treeitem"
+                      aria-level="1"
+                      class={['room-category selection-layer', { collapsed }]}
+                      oncontextmenu={mouseContextMenu((event) => {
+                        openContextMenu(event, item.room, null);
+                      })}
+                      {@attach longPress({
+                        onPress: (event) => {
+                          openContextMenu(event, item.room, null);
+                        },
+                      })}
+                      style:--room-depth={collapsed ? 0 : item.depth}
+                      aria-label={collapsed ? `${name} (${i18n.t('nav.space')})` : undefined}
+                      aria-expanded={!isClosed}
+                      onclick={() => {
+                        toggleCategory(item.key);
+                      }}
+                    >
+                      {#if !collapsed}<span class="category-name">{name}</span>{/if}
+                      <span class={['category-caret', { closed: isClosed }]} aria-hidden="true"
+                        ><CaretDownIcon /></span
+                      >
+                    </button>
+                  {/snippet}
+                  {#if collapsed}
+                    <Tooltip label={name} side="right" trigger={categoryTrigger} />
+                  {:else}
+                    {@render categoryTrigger({ props: {} })}
+                    <span class="room-options-slot">
+                      {@render optionsButton(item.room, null)}
+                    </span>
+                  {/if}
+                </div>
+              {:else if item.kind === 'link'}
+                {@render navLink(item)}
+              {:else if isRoom(item)}
+                {@render navRoom(item, false)}
+              {/if}
+            {/each}
           </div>
         {/if}
-      {:else}
-        <div class={['room-list', { collapsed }]}>
-          {#each rooms as item (item.key)}
-            {@render navRoom(item, roomsClosed)}
-          {/each}
-          {#each visibleSubspaces as item (item.key)}
-            {#if item.kind === 'category'}
-              {@const name = roomLabel(item.room)}
-              {@const isClosed = closedCategories.has(item.key)}
-              <div class="room-row-wrap">
-                {@render threadLines(item.threads)}
-                {#snippet categoryTrigger({ props }: { props: Record<string, unknown> })}
-                  <button
-                    {...props}
-                    type="button"
-                    class={['room-category selection-layer', { collapsed }]}
-                    oncontextmenu={mouseContextMenu((event) => {
-                      openContextMenu(event, item.room, null);
-                    })}
-                    {@attach longPress({
-                      onPress: (event) => {
-                        openContextMenu(event, item.room, null);
-                      },
-                    })}
-                    style:--room-depth={collapsed ? 0 : item.depth}
-                    aria-label={collapsed ? `${name} (${i18n.t('nav.space')})` : undefined}
-                    aria-expanded={!isClosed}
-                    onclick={() => {
-                      toggleCategory(item.key);
-                    }}
-                  >
-                    {#if !collapsed}<span class="category-name">{name}</span>{/if}
-                    <span class={['category-caret', { closed: isClosed }]} aria-hidden="true"
-                      ><CaretDownIcon /></span
-                    >
-                  </button>
-                {/snippet}
-                {#if collapsed}
-                  <Tooltip label={name} side="right" trigger={categoryTrigger} />
-                {:else}
-                  {@render categoryTrigger({ props: {} })}
-                  <span class="room-options-slot">
-                    {@render optionsButton(item.room, null)}
-                  </span>
-                {/if}
-              </div>
-            {:else if item.kind === 'link'}
-              {@render navLink(item)}
-            {:else if isRoom(item)}
-              {@render navRoom(item, false)}
-            {/if}
-          {/each}
-        </div>
-      {/if}
+      </div>
     </div>
     {#if unspacedSection}<ReplacedRooms {collapsed} />{/if}
   </div>
@@ -1018,6 +1057,10 @@
   @media (prefers-reduced-motion: no-preference) {
     .category-caret {
       transition: transform var(--duration-fast) var(--ease-smooth-out);
+    }
+
+    .room-row-wrap {
+      transition: background-color var(--motion-fast) var(--motion-easing-standard);
     }
   }
 
@@ -1116,8 +1159,11 @@
   }
 
   @media (any-hover: hover) and (any-pointer: fine) {
-    .room-row-wrap:not(:has(.room-status > *, .voice-live)):is(:hover, :focus-within) .room-row,
-    .room-row-wrap:not(:has(.room-status > *, .voice-live)):has(
+    .room-list:not(.collapsed)
+      .room-row-wrap:not(:has(.room-status > *, .voice-live)):is(:hover, :focus-within)
+      .room-row,
+    .room-list:not(.collapsed)
+      .room-row-wrap:not(:has(.room-status > *, .voice-live)):has(
         :global(.room-options-trigger[data-state='open'])
       )
       .room-row {
@@ -1245,7 +1291,7 @@
     display: flex;
     flex: 1;
     font: inherit;
-    font-weight: var(--font-weight-500);
+    font-weight: var(--font-weight-normal);
     gap: var(--space-200);
     min-height: 2.25rem;
     min-width: 0;
@@ -1268,7 +1314,7 @@
   }
 
   .room-row.unread {
-    font-weight: var(--font-weight-600);
+    font-weight: var(--font-weight-bold);
   }
 
   .room-avatar {
@@ -1480,7 +1526,7 @@
     outline-offset: 2px;
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .room-nav {
       flex: 0 0 var(--room-nav-width);
       width: var(--room-nav-width);

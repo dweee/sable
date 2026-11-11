@@ -1,16 +1,15 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import { untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { savedSpacePaths, spaceIndexRedirect } from '#lib/features/sidebar/space-paths.js';
   import { findRoomByPathId, roomPathParam, useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import RoutePlaceholder from '#lib/ui/RoutePlaceholder.svelte';
 
   const roomList = useRoomList();
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   let space = $derived(findRoomByPathId(roomList.rooms, page.params.spaceId));
   let spaceId = $derived(space?.room_id ?? null);
 
@@ -27,6 +26,7 @@
         (pathId) => findRoomByPathId(roomList.rooms, pathId)?.state === 'joined'
       );
     });
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- spaceIndexRedirect() picks among resolved paths
     if (target !== null) void goto(target, { replace: true });
   });
 </script>

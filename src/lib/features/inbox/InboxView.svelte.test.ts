@@ -34,22 +34,28 @@ const room = withCounts({
 } as RoomListItemView);
 
 Object.assign(core.rpc.members, {
-  permissions: vi.fn(() =>
+  joinRequests: vi.fn(() =>
     Promise.resolve({
-      can_invite: true,
-      can_kick: true,
-      own_power_level: 100,
-    } as RoomPermissionsView)
-  ),
-  list: vi.fn(() =>
-    Promise.resolve([
-      {
-        user_id: '@alice:example.org',
-        display_name: 'Alice',
-        power_level: 0,
-        membership: 'knock',
-      },
-    ])
+      rooms: [
+        {
+          room_id: room.room_id,
+          permissions: {
+            can_invite: true,
+            can_kick: true,
+            own_power_level: 100,
+          } as RoomPermissionsView,
+          members: [
+            {
+              user_id: '@alice:example.org',
+              display_name: 'Alice',
+              power_level: 0,
+              membership: 'knock',
+            },
+          ],
+        },
+      ],
+      failed: false,
+    })
   ),
 });
 Object.assign(core.rpc.notifications, {
@@ -148,6 +154,9 @@ test('a room behind the badge with nothing in the feed still gets a row', async 
       notification: { room: null, default: 'all' },
     }),
   ];
+  Object.assign(roomList, {
+    badgeUnreadFor: () => ({ unread: 2, notifying: 2, highlight: 0, marked: false }),
+  });
   render(InboxView);
   const user = userEvent.setup();
 
@@ -156,9 +165,8 @@ test('a room behind the badge with nothing in the feed still gets a row', async 
   expect(core.rpc.timeline.markRead).toHaveBeenCalledWith({
     room_id: '!room:example.org',
     event_id: null,
-    private_receipt: false,
     thread_root: null,
     subscription: null,
-    fully_read: false,
+    fully_read: true,
   });
 });

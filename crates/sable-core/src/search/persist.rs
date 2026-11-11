@@ -8,8 +8,8 @@ use tracing::{info, warn};
 use super::Document;
 use crate::store::StoreError;
 
-const SCHEMA: u32 = 5;
-pub(super) const DERIVATION: u32 = 1;
+pub(super) const SCHEMA: u32 = 5;
+pub(super) const DERIVATION: u32 = 2;
 const LEGACY_SCHEMAS: [u32; 2] = [3, 4];
 
 pub(super) type ChunkId = u32;
@@ -49,9 +49,11 @@ pub(super) struct Manifest {
     pub(super) chunks: Vec<ChunkEntry>,
     pub(super) edits: Vec<(OwnedEventId, OwnedEventId)>,
     #[serde(default)]
+    pub(super) redacted: Vec<OwnedEventId>,
+    #[serde(default)]
     pub(super) pending_redactions: Vec<OwnedEventId>,
     #[serde(default)]
-    pub(super) pending_edits: Vec<Document>,
+    pub(super) pending_replacements: Vec<matrix_sdk::deserialized_responses::TimelineEvent>,
     #[serde(default)]
     pub(super) floor: u64,
     #[serde(default)]
@@ -72,8 +74,9 @@ impl Manifest {
             next_chunk,
             chunks,
             edits,
+            redacted: Vec::new(),
             pending_redactions: Vec::new(),
-            pending_edits: Vec::new(),
+            pending_replacements: Vec::new(),
             floor,
             derived: DERIVATION,
             rederive_from: 0,
@@ -149,11 +152,11 @@ enum Read<T> {
 const ZLIB_HEADER: u8 = 0x78;
 const COMPRESSION_LEVEL: u8 = 6;
 
-fn encode(json: &[u8]) -> Vec<u8> {
+pub(super) fn encode(json: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(json, COMPRESSION_LEVEL)
 }
 
-fn decode(bytes: Vec<u8>) -> Result<Vec<u8>, StoreError> {
+pub(super) fn decode(bytes: Vec<u8>) -> Result<Vec<u8>, StoreError> {
     if bytes.first() == Some(&ZLIB_HEADER) {
         miniz_oxide::inflate::decompress_to_vec_zlib(&bytes)
             .map_err(|error| StoreError::Message(format!("{error:?}")))
@@ -374,6 +377,16 @@ pub(super) async fn open(client: &matrix_sdk::Client, room_id: &OwnedRoomId) -> 
     }
 }
 
+pub(super) async fn read_manifest(
+    client: &matrix_sdk::Client,
+    room_id: &OwnedRoomId,
+) -> Option<Manifest> {
+    match read::<Manifest>(client, &manifest_key(room_id)).await {
+        Read::Found(manifest) if manifest.version == SCHEMA => Some(manifest),
+        _ => None,
+    }
+}
+
 pub(super) async fn load_chunk(
     client: &matrix_sdk::Client,
     room_id: &OwnedRoomId,
@@ -498,8 +511,31 @@ pub(super) struct StoredCrawl {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct StoredCrawlRoom {
+    #[serde(default)]
+    pub(super) shared_resume: bool,
+    #[serde(default)]
+    pub(super) frontier: Option<u64>,
+    #[serde(default = "default_gapped")]
+    pub(super) gapped: bool,
     pub(super) token: Option<String>,
     pub(super) reached_start: bool,
+    #[serde(default)]
+    pub(super) cover: Option<Cover>,
+}
+
+const fn default_gapped() -> bool {
+    // Older checkpoints did not track undecryptable events.
+    true
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct Cover {
+    #[serde(default)]
+    pub(super) anchor: Option<OwnedEventId>,
+    pub(super) from: u64,
+    pub(super) until: u64,
+    pub(super) resume: Option<String>,
+    pub(super) stops: bool,
 }
 
 pub(super) async fn load_crawl(client: &matrix_sdk::Client) -> StoredCrawl {
@@ -574,17 +610,21 @@ pub(super) async fn forget_crawl(client: &matrix_sdk::Client) -> bool {
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) async fn reset_state_cache(path: &std::path::Path) -> Result<(), StoreError> {
+pub(crate) async fn reset_state_cache(
+    path: &std::path::Path,
+    key: Option<&crate::secrets::Key>,
+) -> Result<(), StoreError> {
     use matrix_sdk::SqliteStateStore;
     use matrix_sdk_base::StateStore as _;
 
-    let source = SqliteStateStore::open(path, None)
+    let source = SqliteStateStore::open_with_config(&crate::store_encryption::config(path, key))
         .await
         .map_err(StoreError::backend)?;
     let temporary = tempfile::tempdir_in(path).map_err(StoreError::backend)?;
-    let target = SqliteStateStore::open(temporary.path(), None)
-        .await
-        .map_err(StoreError::backend)?;
+    let target =
+        SqliteStateStore::open_with_config(&crate::store_encryption::config(temporary.path(), key))
+            .await
+            .map_err(StoreError::backend)?;
 
     let mut rooms: Vec<OwnedRoomId> = match copy_value(&source, &target, &rooms_key()).await? {
         Some(bytes) => serde_json::from_slice(&decode(bytes)?).map_err(StoreError::backend)?,
@@ -716,7 +756,9 @@ mod codec_tests {
             .unwrap();
         store.close().await.unwrap();
 
-        super::reset_state_cache(directory.path()).await.unwrap();
+        super::reset_state_cache(directory.path(), None)
+            .await
+            .unwrap();
 
         let store = matrix_sdk::SqliteStateStore::open(directory.path(), None)
             .await
@@ -769,7 +811,11 @@ mod codec_tests {
             .unwrap();
         store.close().await.unwrap();
 
-        assert!(super::reset_state_cache(directory.path()).await.is_err());
+        assert!(
+            super::reset_state_cache(directory.path(), None)
+                .await
+                .is_err()
+        );
 
         let store = matrix_sdk::SqliteStateStore::open(directory.path(), None)
             .await

@@ -12,8 +12,7 @@ use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::{ClientSecret, OwnedClientSecret, OwnedSessionId, UInt};
 
 use crate::ResultExt;
-use crate::errors::retry_delay_ms;
-use crate::protocol::{RegistrationResultView, RpcError};
+use crate::protocol::{RegistrationResultView, RpcCode, RpcError};
 use crate::session::{Credentials, PersistedSession};
 use crate::{Core, protocol, session};
 use serde::{Deserialize, Serialize};
@@ -43,11 +42,11 @@ fn map_email_submit_error(body: &[u8]) -> RpcError {
         .and_then(|error| error.errcode)
         .as_deref()
     {
-        Some("M_THREEPID_IN_USE") => RpcError::InvalidEmail,
+        Some("M_THREEPID_IN_USE") => RpcCode::InvalidEmail.into(),
         Some("M_THREEPID_AUTH_FAILED" | "M_INVALID_PARAM") | None => {
-            RpcError::EmailVerificationFailed
+            RpcCode::EmailVerificationFailed.into()
         }
-        Some(_) => RpcError::EmailVerificationFailed,
+        Some(_) => RpcCode::EmailVerificationFailed.into(),
     }
 }
 
@@ -59,12 +58,31 @@ pub(super) struct PendingRegistration {
     client: matrix_sdk::Client,
     username: String,
     password: String,
+    device_display_name: Option<String>,
     registration_email: Option<String>,
     registration_token: Option<String>,
     session: String,
     flows: Vec<Vec<String>>,
     completed: Vec<String>,
     email: Option<PendingEmail>,
+}
+
+impl PendingRegistration {
+    fn request(&self, auth: AuthData) -> RegistrationRequest {
+        registration_request(
+            &self.username,
+            &self.password,
+            self.device_display_name.as_deref(),
+            Some(auth),
+        )
+    }
+}
+
+#[cfg(target_os = "ios")]
+impl PendingRegistration {
+    pub(super) fn client(&self) -> matrix_sdk::Client {
+        self.client.clone()
+    }
 }
 
 struct PendingEmail {
@@ -90,12 +108,14 @@ enum RegistrationAction {
 pub(super) fn registration_request(
     username: &str,
     password: &str,
+    device_display_name: Option<&str>,
     auth: Option<AuthData>,
 ) -> RegistrationRequest {
     let mut request = RegistrationRequest::new();
     request.username = Some(username.to_owned());
     request.password = Some(password.to_owned());
-    request.initial_device_display_name = Some("Sable".to_owned());
+    request.initial_device_display_name =
+        Some(session::device_display_name(device_display_name).to_owned());
     request.auth = auth;
     request
 }
@@ -220,24 +240,19 @@ impl Core {
         Ok(RegistrationResultView::Complete { user_id })
     }
 
-    fn registration_error(&self, error: matrix_sdk::Error) -> RpcError {
-        match error.client_api_error_kind() {
+    fn registration_error(&self, error: &matrix_sdk::Error) -> RpcError {
+        let rpc = match error.client_api_error_kind() {
             Some(ErrorKind::Forbidden | ErrorKind::ThreepidDenied) => {
-                RpcError::RegistrationUnavailable
+                RpcCode::RegistrationUnavailable
             }
-            Some(ErrorKind::UserInUse) => RpcError::UsernameTaken,
-            Some(ErrorKind::InvalidUsername) => RpcError::InvalidUsername,
-            Some(ErrorKind::ThreepidInUse) => RpcError::InvalidEmail,
-            Some(ErrorKind::ThreepidAuthFailed) => RpcError::EmailVerificationFailed,
-            Some(ErrorKind::WeakPassword) => RpcError::WeakPassword,
-            Some(ErrorKind::LimitExceeded(limit)) => RpcError::RateLimited {
-                retry_after_ms: limit.retry_after.as_ref().and_then(retry_delay_ms),
-            },
-            _ => match error {
-                matrix_sdk::Error::Http(error) => self.homeserver_http_error("register", *error),
-                _ => self.failed("register", error),
-            },
-        }
+            Some(ErrorKind::UserInUse) => RpcCode::UsernameTaken,
+            Some(ErrorKind::InvalidUsername) => RpcCode::InvalidUsername,
+            Some(ErrorKind::ThreepidInUse) => RpcCode::InvalidEmail,
+            Some(ErrorKind::ThreepidAuthFailed) => RpcCode::EmailVerificationFailed,
+            Some(ErrorKind::WeakPassword) => RpcCode::WeakPassword,
+            _ => return self.rpc_error("register", error),
+        };
+        crate::errors::coded("register", rpc, error)
     }
 
     fn registration_step(
@@ -361,6 +376,7 @@ impl Core {
         password: String,
         registration_email: Option<String>,
         registration_token: Option<String>,
+        device_display_name: Option<String>,
     ) -> Result<RegistrationResultView, RpcError> {
         let attempt_id = self
             .next_registration_attempt
@@ -381,7 +397,8 @@ impl Core {
             .map(|token| token.trim().to_owned())
             .filter(|token| !token.is_empty());
 
-        let request = registration_request(&username, &password, None);
+        let request =
+            registration_request(&username, &password, device_display_name.as_deref(), None);
 
         match client.matrix_auth().register(request).await {
             Ok(_) => {
@@ -390,7 +407,7 @@ impl Core {
             }
             Err(error) => {
                 let Some(info) = error.as_uiaa_response().cloned() else {
-                    return Err(self.registration_error(error));
+                    return Err(self.registration_error(&error));
                 };
                 let Some(session) = info.session.clone() else {
                     return Err(self.failed("register", "UIAA response had no session"));
@@ -415,6 +432,7 @@ impl Core {
                     client,
                     username,
                     password,
+                    device_display_name,
                     registration_email,
                     registration_token,
                     session,
@@ -471,12 +489,10 @@ impl Core {
                 Some(AuthData::Dummy(dummy))
             }
             "m.login.registration_token" if token_needs_fallback => {
-                if *acknowledge_fallback {
+                (*acknowledge_fallback).then(|| {
                     *acknowledge_fallback = false;
-                    Some(AuthData::fallback_acknowledgement(pending.session.clone()))
-                } else {
-                    None
-                }
+                    AuthData::fallback_acknowledgement(pending.session.clone())
+                })
             }
             "m.login.registration_token" => pending.registration_token.as_ref().map(|token| {
                 let mut registration_token =
@@ -520,7 +536,7 @@ impl Core {
     fn update_registration_from_error(
         &self,
         pending: &mut PendingRegistration,
-        error: matrix_sdk::Error,
+        error: &matrix_sdk::Error,
         submitted_stage: &str,
     ) -> Result<bool, RpcError> {
         let Some(info) = error.as_uiaa_response().cloned() else {
@@ -554,7 +570,7 @@ impl Core {
             .lock()
             .await
             .take()
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
 
         loop {
             let Some(stages) = pending.flows.first() else {
@@ -594,7 +610,7 @@ impl Core {
                     return Ok(result);
                 }
             };
-            let request = registration_request(&pending.username, &pending.password, Some(auth));
+            let request = pending.request(auth);
 
             match pending.client.matrix_auth().register(request).await {
                 Ok(_) => {
@@ -616,7 +632,7 @@ impl Core {
                 Err(error) => {
                     let progressed = match self.update_registration_from_error(
                         &mut pending,
-                        error,
+                        &error,
                         &submitted_stage,
                     ) {
                         Ok(progressed) => progressed,
@@ -638,9 +654,10 @@ impl Core {
                             return Ok(result);
                         }
                         self.restore_pending_registration(pending).await;
-                        return Err(RpcError::RegistrationStageFailed {
+                        return Err(RpcCode::RegistrationStageFailed {
                             stage: submitted_stage,
-                        });
+                        }
+                        .into());
                     }
                 }
             }
@@ -660,7 +677,7 @@ impl Core {
             .lock()
             .await
             .take()
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         let is_email_stage = pending
             .flows
             .first()
@@ -675,13 +692,13 @@ impl Core {
             .is_some_and(|stage| stage == "m.login.email.identity");
         if !is_email_stage {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         }
 
         let address = address.trim().to_owned();
         if address.is_empty() || !address.contains('@') {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::InvalidEmail);
+            return Err(RpcCode::InvalidEmail.into());
         }
 
         let Some(email) = pending.email.as_mut() else {
@@ -709,7 +726,7 @@ impl Core {
             Ok(response) => response,
             Err(error) => {
                 self.restore_pending_registration(pending).await;
-                return Err(self.registration_error(error.into()));
+                return Err(self.registration_error(&error.into()));
             }
         };
         {
@@ -753,7 +770,7 @@ impl Core {
             .lock()
             .await
             .take()
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         let (submit_url, sid, client_secret) = {
             let Some(email) = pending.email.as_ref() else {
                 self.restore_pending_registration(pending).await;
@@ -761,25 +778,25 @@ impl Core {
             };
             let Some(submit_url) = email.submit_url.clone() else {
                 self.restore_pending_registration(pending).await;
-                return Err(RpcError::Unavailable);
+                return Err(RpcCode::Unavailable.into());
             };
             let Some(sid) = email.sid.as_ref().map(ToString::to_string) else {
                 self.restore_pending_registration(pending).await;
-                return Err(RpcError::Unavailable);
+                return Err(RpcCode::Unavailable.into());
             };
             let Some(client_secret) = email.client_secret.as_ref().map(ToString::to_string) else {
                 self.restore_pending_registration(pending).await;
-                return Err(RpcError::Unavailable);
+                return Err(RpcCode::Unavailable.into());
             };
             (submit_url, sid, client_secret)
         };
         let Some(submit_url) = trusted_submit_url(&pending, &submit_url) else {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::EmailVerificationFailed);
+            return Err(RpcCode::EmailVerificationFailed.into());
         };
         if token.is_empty() || token.chars().count() > 255 {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::EmailVerificationFailed);
+            return Err(RpcCode::EmailVerificationFailed.into());
         }
 
         let Ok(payload) = serde_json::to_vec(&SubmitTokenOut {
@@ -788,7 +805,7 @@ impl Core {
             token,
         }) else {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::EmailVerificationFailed);
+            return Err(RpcCode::EmailVerificationFailed.into());
         };
         let builder = crate::tls::apply(matrix_sdk::reqwest::Client::builder());
         #[cfg(not(target_family = "wasm"))]
@@ -797,7 +814,7 @@ impl Core {
             .timeout(std::time::Duration::from_secs(15));
         let Ok(client) = builder.build() else {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::EmailVerificationFailed);
+            return Err(RpcCode::EmailVerificationFailed.into());
         };
         let Ok(response) = client
             .post(submit_url)
@@ -807,12 +824,12 @@ impl Core {
             .await
         else {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         };
         let response_success = response.status().is_success();
         let Ok(body) = response.bytes().await else {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::EmailVerificationFailed);
+            return Err(RpcCode::EmailVerificationFailed.into());
         };
         if !response_success {
             let error = map_email_submit_error(&body);
@@ -821,11 +838,11 @@ impl Core {
         }
         let Ok(verification) = serde_json::from_slice::<EmailSubmitResponse>(&body) else {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::EmailVerificationFailed);
+            return Err(RpcCode::EmailVerificationFailed.into());
         };
         if !verification.success {
             self.restore_pending_registration(pending).await;
-            return Err(RpcError::EmailVerificationFailed);
+            return Err(RpcCode::EmailVerificationFailed.into());
         }
         if let Some(email) = pending.email.as_mut() {
             email.verified = true;
@@ -863,7 +880,7 @@ impl Core {
                 )
             })?;
         let Some(info) = error.as_uiaa_response() else {
-            return Err(self.registration_error(error));
+            return Err(self.registration_error(&error));
         };
         if info.flows.is_empty() {
             return Err(self.failed(
@@ -965,7 +982,7 @@ mod tests {
 
     #[test]
     fn registration_request_contains_account_and_device_fields() {
-        let request = registration_request("alice", "correct horse", None);
+        let request = registration_request("alice", "correct horse", None, None);
 
         assert_eq!(request.username.as_deref(), Some("alice"));
         assert_eq!(request.password.as_deref(), Some("correct horse"));
@@ -978,7 +995,7 @@ mod tests {
 
     #[test]
     fn registration_does_not_ask_for_a_refresh_token() {
-        let request = registration_request("alice", "correct horse", None);
+        let request = registration_request("alice", "correct horse", None, None);
 
         assert!(!request.refresh_token);
     }
@@ -991,6 +1008,7 @@ mod tests {
         let request = registration_request(
             "alice",
             "correct horse",
+            None,
             Some(AuthData::RegistrationToken(token)),
         );
         let value = serde_json::to_value(request.auth)?;
@@ -1055,15 +1073,24 @@ mod tests {
     fn email_submit_errors_are_mapped_without_exposing_server_text() {
         assert!(matches!(
             map_email_submit_error(br#"{"errcode":"M_THREEPID_IN_USE"}"#),
-            RpcError::InvalidEmail
+            RpcError {
+                code: RpcCode::InvalidEmail,
+                ..
+            }
         ));
         assert!(matches!(
             map_email_submit_error(br#"{"errcode":"M_THREEPID_AUTH_FAILED"}"#),
-            RpcError::EmailVerificationFailed
+            RpcError {
+                code: RpcCode::EmailVerificationFailed,
+                ..
+            }
         ));
         assert!(matches!(
             map_email_submit_error(b"not json"),
-            RpcError::EmailVerificationFailed
+            RpcError {
+                code: RpcCode::EmailVerificationFailed,
+                ..
+            }
         ));
     }
 }

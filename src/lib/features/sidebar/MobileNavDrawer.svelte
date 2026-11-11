@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
-  import { goto } from '$app/navigation';
   import { untrack, type Snippet } from 'svelte';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
@@ -16,8 +14,12 @@
     updateSwipeGesture,
     type SwipeGesture,
   } from '#lib/ui/swipe-gesture.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
-  import { backToRoomList, goToPage, isRoomSwitch } from '#lib/features/room/room-navigation.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
+  import {
+    backToRoomList,
+    goToPage,
+    setMobileDrawerOpen,
+  } from '#lib/features/room/room-navigation.js';
   import CoreHealthBanner from '#lib/ui/CoreHealthBanner.svelte';
 
   interface Props {
@@ -37,7 +39,7 @@
   let inertOpen = $state<boolean | undefined>();
   let inertTimer: ReturnType<typeof setTimeout> | undefined;
   let focusContentOnSettle = false;
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   /** Routes whose own index is the room list. Anywhere else the list would
       hide the page that was asked for behind an inert panel. Keyed on the path
       so room-list hydration cannot flash the sidebar over a room. */
@@ -146,11 +148,7 @@
 
   function setOpen(next: boolean): void {
     if (next === open || (!next && pinnedOpen)) return;
-    void goto('', {
-      shallow: true,
-      replace: true,
-      state: { ...page.state, mobileDrawer: next ? 'open' : 'closed' },
-    });
+    setMobileDrawerOpen(next);
     if (!next) {
       focusContentOnSettle = true;
       return;
@@ -214,20 +212,21 @@
   }
 
   function revealCurrentPage(event: MouseEvent) {
-    if (appLayout.current || !(event.target instanceof Element)) return;
+    if (event.defaultPrevented || appLayout.current || !(event.target instanceof Element)) return;
     const link = event.target.closest('a[href]');
     if (!(link instanceof HTMLAnchorElement)) return;
+    const plain =
+      event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+    if (!plain || link.origin !== page.url.origin || link.target || link.hasAttribute('download')) {
+      return;
+    }
     if (link.pathname === pathname) {
       event.preventDefault();
       setOpen(false);
       return;
     }
-    const plain =
-      event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-    if (plain && isRoomSwitch(link.href)) {
-      event.preventDefault();
-      goToPage(link.href);
-    }
+    event.preventDefault();
+    goToPage(link.href);
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -371,6 +370,12 @@
     overflow: hidden;
   }
 
+  @media (prefers-reduced-motion: no-preference) {
+    .content {
+      view-transition-name: tab-page;
+    }
+  }
+
   .mobile-quick-tools {
     flex: 0 0 auto;
     height: 0;
@@ -387,7 +392,7 @@
     visibility: collapse;
   }
 
-  @media (width < 48rem) {
+  @media (--compact-layout) {
     .navigation-panel,
     .content-panel.with-quick-tools,
     .content-panel:has(> .content > :global([data-inset-owner~='bottom'])) {
@@ -406,7 +411,7 @@
     }
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .mobile-quick-tools {
       display: none;
     }

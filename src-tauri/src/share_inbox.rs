@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Response;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Runtime};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ShareItem {
+pub(crate) struct ShareItem {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -16,18 +16,31 @@ pub struct ShareItem {
     pub mime: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShareTarget {
+    pub user_id: String,
+    pub room_id: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShareBatch {
+pub(crate) struct ShareBatch {
     pub batch_id: String,
     pub items: Vec<ShareItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ShareTarget>,
 }
+
+/// Written by `MainActivity.kt` and the iOS `ShareViewController.swift`.
+const SHARE_MANIFEST_VERSION: u32 = 1;
 
 #[derive(Deserialize)]
 struct ShareManifest {
-    #[expect(dead_code, reason = "the manifest version is parsed but not read")]
     version: u32,
     items: Vec<ShareItem>,
+    #[serde(default)]
+    target: Option<ShareTarget>,
 }
 
 fn validate_component(value: &str) -> Result<(), String> {
@@ -37,12 +50,26 @@ fn validate_component(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_manifest(json: &str) -> Result<Vec<ShareItem>, String> {
+fn parse_manifest(json: &str) -> Result<ShareManifest, String> {
     let manifest: ShareManifest = serde_json::from_str(json).map_err(|err| err.to_string())?;
-    Ok(manifest.items)
+    if manifest.version != SHARE_MANIFEST_VERSION {
+        return Err(format!(
+            "unsupported share manifest version {}",
+            manifest.version
+        ));
+    }
+    Ok(manifest)
 }
 
+/// The share extension writes into the App Group container, the only directory both can reach.
+#[cfg(target_os = "ios")]
+fn inbox_root<R: Runtime>(_app: &AppHandle<R>) -> Result<PathBuf, String> {
+    Ok(crate::ios::shared_store_dir()?.join("share_inbox"))
+}
+
+#[cfg(not(target_os = "ios"))]
 fn inbox_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    use tauri::Manager as _;
     Ok(app
         .path()
         .app_data_dir()
@@ -51,7 +78,9 @@ fn inbox_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub async fn share_inbox_drain<R: Runtime>(app: AppHandle<R>) -> Result<Vec<ShareBatch>, String> {
+pub(crate) async fn share_inbox_drain<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<ShareBatch>, String> {
     let root = inbox_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let entries = match std::fs::read_dir(&root) {
@@ -73,9 +102,10 @@ pub async fn share_inbox_drain<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Shar
                 .map_err(|err| err.to_string())
                 .and_then(|json| parse_manifest(&json));
             match manifest {
-                Ok(items) => batches.push(ShareBatch {
+                Ok(manifest) => batches.push(ShareBatch {
                     batch_id: batch_id.to_owned(),
-                    items,
+                    items: manifest.items,
+                    target: manifest.target,
                 }),
                 Err(err) => {
                     log::warn!("dropping unreadable share batch {batch_id}: {err}");
@@ -91,7 +121,7 @@ pub async fn share_inbox_drain<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Shar
 }
 
 #[tauri::command]
-pub async fn share_inbox_read<R: Runtime>(
+pub(crate) async fn share_inbox_read<R: Runtime>(
     app: AppHandle<R>,
     batch_id: String,
     file_name: String,
@@ -123,7 +153,7 @@ async fn read_inbox_file(
 }
 
 #[tauri::command]
-pub async fn share_inbox_clear<R: Runtime>(
+pub(crate) async fn share_inbox_clear<R: Runtime>(
     app: AppHandle<R>,
     batch_id: String,
 ) -> Result<(), String> {
@@ -159,15 +189,27 @@ mod tests {
     #[test]
     fn parse_manifest_reads_items() {
         let json = r#"{"version":1,"items":[{"kind":"text","text":"hello"}]}"#;
-        let items = parse_manifest(json).unwrap();
+        let manifest = parse_manifest(json).unwrap();
+        assert!(manifest.target.is_none());
+        let items = manifest.items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, "text");
         assert_eq!(items[0].text.as_deref(), Some("hello"));
     }
 
     #[test]
-    fn parse_manifest_rejects_garbage() {
-        assert!(parse_manifest("not json").is_err());
+    fn parse_manifest_reads_the_picked_conversation() {
+        let json = r#"{"version":1,"items":[],"target":{"userId":"@a:b","roomId":"!r:b"}}"#;
+        let target = parse_manifest(json).unwrap().target.unwrap();
+        assert_eq!(
+            (target.user_id.as_str(), target.room_id.as_str()),
+            ("@a:b", "!r:b")
+        );
+    }
+
+    #[test]
+    fn parse_manifest_rejects_an_unknown_version() {
+        assert!(parse_manifest(r#"{"version":2,"items":[]}"#).is_err());
     }
 
     #[tokio::test]

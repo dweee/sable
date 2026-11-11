@@ -1,12 +1,14 @@
+use crate::errors::CoreResultExt as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use matrix_sdk::ruma::push::{Action, RuleKind};
 use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId};
 use matrix_sdk_ui::notification_client::NotificationProcessSetup;
 use serde::{Deserialize, Serialize};
 
-use super::Handler;
-use crate::protocol::{RpcError, DefaultNotificationModesView, EventNotificationView, EventNotificationsView, InboxItemView, KeywordNotificationView, MentionNotificationModeView, MentionNotificationsView, MentionRuleView, NotificationModeView, NotificationSettingsView, NotificationView, PushFetchView};
+use super::{Handler, Json};
+use crate::protocol::{RpcCode, RpcError, DefaultNotificationModesView, EventNotificationView, EventNotificationsView, InboxItemView, KeywordNotificationView, MentionNotificationModeView, MentionNotificationsView, MentionRuleView, NotificationModeView, NotificationSettingsView, NotificationView, PushFetchView};
 use crate::{Core, ResultExt, notifications, push_rules};
 
 domain! {
@@ -22,16 +24,19 @@ domain! {
     remove_keyword,
     set_keyword_mode,
     set_room_notification_mode,
+    set_rooms_notification_mode,
     set_default_mode,
     set_mention_notifications,
     set_event_notification,
     set_master_mute,
     inbox,
     backfill_inbox,
-    set_content,
-    set_sounds,
-    set_notify_once,
-    set_enabled,
+    set_options,
+    push_rules,
+    set_push_rule_enabled,
+    set_push_rule_actions,
+    add_push_rule,
+    delete_push_rule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -41,6 +46,7 @@ pub enum InboxFilter {
     All,
     Mentions,
     Direct,
+    Threads,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,7 +146,12 @@ impl Handler for NotificationParams {
             sync_service: core.sync_service().await?,
         };
 
-        Ok(notifications::notification(&client, setup, &self.room_id, &self.event_id).await)
+        let mut notification =
+            notifications::notification(&client, setup, &self.room_id, &self.event_id).await;
+        if let Some(notification) = notification.as_mut() {
+            core.nicknames().apply_notification(notification);
+        }
+        Ok(notification)
     }
 }
 
@@ -196,11 +207,11 @@ impl Handler for AddKeywordParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let rules = core.push_rules().await?;
         let writes = push_rules::plan_add_keyword(&rules.snapshot().await, &self.keyword)
-            .or_failed(core, "add_notification_keyword")?;
+            .or_report(core, "add_notification_keyword")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "add_notification_keyword")?;
+            .or_report(core, "add_notification_keyword")?;
 
         Ok(())
     }
@@ -223,7 +234,7 @@ impl Handler for RemoveKeywordParams {
                 &self.keyword,
             ))
             .await
-            .or_failed(core, "remove_notification_keyword")?;
+            .or_report(core, "remove_notification_keyword")?;
 
         Ok(())
     }
@@ -248,7 +259,7 @@ impl Handler for SetKeywordModeParams {
                 self.mode,
             ))
             .await
-            .or_failed(core, "set_notification_keyword_mode")?;
+            .or_report(core, "set_notification_keyword_mode")?;
 
         Ok(())
     }
@@ -268,15 +279,39 @@ impl Handler for SetRoomNotificationModeParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let room = core.room(&self.room_id).await?;
+        SetRoomsNotificationModeParams {
+            room_ids: vec![self.room_id],
+            mode: self.mode,
+        }
+        .run(core)
+        .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetRoomsNotificationModeParams {
+    #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
+    pub room_ids: Vec<OwnedRoomId>,
+    #[serde(default)]
+    pub mode: Option<NotificationModeView>,
+}
+
+impl Handler for SetRoomsNotificationModeParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let rules = core.push_rules().await?;
-        let direct = notifications::uses_direct_push_rules(&room);
-        let writes =
-            push_rules::plan_room_mode(&rules.snapshot().await, &self.room_id, direct, self.mode);
+        let mut writes = Vec::new();
+        for room_id in &self.room_ids {
+            let room = core.room(room_id).await?;
+            let direct = notifications::uses_direct_push_rules(&room);
+            writes.extend(push_rules::plan_room_mode(room_id, direct, self.mode));
+        }
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_room_notification_mode")?;
+            .or_report(core, "set_rooms_notification_mode")?;
 
         Ok(())
     }
@@ -294,14 +329,19 @@ impl Handler for SetDefaultModeParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let rules = core.push_rules().await?;
+        if self.direct {
+            return rules
+                .set_direct_default(self.mode)
+                .await
+                .or_report(core, "set_default_notification_mode");
+        }
         let before = rules.snapshot().await;
         let writes = push_rules::plan_default_mode(&before, self.direct, self.mode)
-            .or_failed(core, "set_default_notification_mode")?;
+            .or_report(core, "set_default_notification_mode")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_default_notification_mode")?;
-        core.align_notification_rules().await;
+            .or_report(core, "set_default_notification_mode")?;
 
         Ok(())
     }
@@ -320,11 +360,11 @@ impl Handler for SetMentionNotificationsParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let rules = core.push_rules().await?;
         let writes = push_rules::plan_mention(&rules.snapshot().await, self.rule, self.mode)
-            .or_failed(core, "set_mention_notifications")?;
+            .or_report(core, "set_mention_notifications")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_mention_notifications")?;
+            .or_report(core, "set_mention_notifications")?;
 
         Ok(())
     }
@@ -341,13 +381,16 @@ impl Handler for SetEventNotificationParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        let client = core.client().await?;
+        let user_id = client.user_id().ok_or(RpcCode::NotLoggedIn)?;
         let rules = core.push_rules().await?;
-        let writes = push_rules::plan_event(&rules.snapshot().await, self.event, self.enabled)
-            .or_failed(core, "set_event_notification")?;
+        let writes =
+            push_rules::plan_event(&rules.snapshot().await, self.event, self.enabled, user_id)
+                .or_report(core, "set_event_notification")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_event_notification")?;
+            .or_report(core, "set_event_notification")?;
 
         Ok(())
     }
@@ -367,7 +410,7 @@ impl Handler for SetMasterMuteParams {
             .await?
             .apply(push_rules::plan_master(self.muted))
             .await
-            .or_failed(core, "set_master_mute")?;
+            .or_report(core, "set_master_mute")?;
 
         Ok(())
     }
@@ -382,6 +425,11 @@ pub struct InboxParams {
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     #[serde(default)]
     pub before_ts: Option<u64>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
+    #[serde(default)]
+    pub room_id: Option<OwnedRoomId>,
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -396,8 +444,25 @@ impl Handler for InboxParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<InboxOk, RpcError> {
         let (items, has_more) = core
-            .inbox_notifications(self.filter, self.include_read, self.limit, self.before_ts)
+            .inbox_notifications(
+                self.filter,
+                self.include_read,
+                self.limit,
+                self.before_ts,
+                crate::inbox::InboxScope {
+                    room_id: self.room_id.as_deref(),
+                    query: self.query.as_deref(),
+                },
+            )
             .await?;
+        let nicknames = core.nicknames();
+        let items = items
+            .into_iter()
+            .map(|mut item| {
+                nicknames.apply_inbox(&mut item);
+                item
+            })
+            .collect();
         Ok(InboxOk { items, has_more })
     }
 }
@@ -406,6 +471,9 @@ impl Handler for InboxParams {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct BackfillInboxParams {
     pub include_read: bool,
+    #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
+    #[serde(default)]
+    pub room_id: Option<OwnedRoomId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -419,78 +487,152 @@ impl Handler for BackfillInboxParams {
     type Ok = BackfillInboxOk;
 
     async fn run(self, core: &Arc<Core>) -> Result<BackfillInboxOk, RpcError> {
-        let (recorded, has_more) = core.backfill_inbox(self.include_read).await?;
+        let (recorded, has_more) = core
+            .backfill_inbox(self.include_read, self.room_id.as_deref())
+            .await?;
         Ok(BackfillInboxOk { recorded, has_more })
     }
 }
 
-/// Mirrors the reader's choice so a native shell can apply it too.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct SetContentParams {
-    pub visible: bool,
-    pub encrypted: bool,
-}
-
-impl Handler for SetContentParams {
-    type Ok = ();
-
-    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
-        core.notification_content
-            .store(self.visible, Ordering::Relaxed);
-        core.notification_encrypted_content
-            .store(self.encrypted, Ordering::Relaxed);
-
-        std::future::ready(Ok(()))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct SetSoundsParams {
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "wire type mirroring the notification preferences"
+)]
+pub struct SetOptionsParams {
     pub enabled: bool,
+    pub content: bool,
+    pub encrypted_content: bool,
+    pub sounds: bool,
+    pub notify_once: bool,
 }
 
-impl Handler for SetSoundsParams {
-    type Ok = ();
-
-    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
-        core.notification_sounds
-            .store(self.enabled, Ordering::Relaxed);
-
-        std::future::ready(Ok(()))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct SetNotifyOnceParams {
-    pub enabled: bool,
-}
-
-impl Handler for SetNotifyOnceParams {
-    type Ok = ();
-
-    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
-        core.notify_once.store(self.enabled, Ordering::Relaxed);
-
-        std::future::ready(Ok(()))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct SetEnabledParams {
-    pub enabled: bool,
-}
-
-impl Handler for SetEnabledParams {
+impl Handler for SetOptionsParams {
     type Ok = ();
 
     fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
         core.notifications_enabled
             .store(self.enabled, Ordering::Relaxed);
+        core.notification_content
+            .store(self.content, Ordering::Relaxed);
+        core.notification_encrypted_content
+            .store(self.encrypted_content, Ordering::Relaxed);
+        core.notification_sounds
+            .store(self.sounds, Ordering::Relaxed);
+        core.notify_once.store(self.notify_once, Ordering::Relaxed);
 
         std::future::ready(Ok(()))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PushRulesParams {}
+
+impl Handler for PushRulesParams {
+    type Ok = Json;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Json, RpcError> {
+        let rules = core.push_rules().await?.snapshot().await;
+        serde_json::to_value(rules)
+            .map(Json)
+            .or_failed(core, "push_rules")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetPushRuleEnabledParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub kind: RuleKind,
+    pub rule_id: String,
+    pub enabled: bool,
+}
+
+impl Handler for SetPushRuleEnabledParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.push_rules()
+            .await?
+            .apply(vec![push_rules::RuleWrite::Enabled {
+                kind: self.kind,
+                rule_id: self.rule_id,
+                enabled: self.enabled,
+            }])
+            .await
+            .or_report(core, "set_push_rule_enabled")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetPushRuleActionsParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub kind: RuleKind,
+    pub rule_id: String,
+    #[cfg_attr(feature = "typegen", specta(type = Vec<specta_typescript::Unknown>))]
+    pub actions: Vec<Action>,
+}
+
+impl Handler for SetPushRuleActionsParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.push_rules()
+            .await?
+            .apply(vec![push_rules::RuleWrite::Actions {
+                kind: self.kind,
+                rule_id: self.rule_id,
+                actions: self.actions,
+            }])
+            .await
+            .or_report(core, "set_push_rule_actions")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct AddPushRuleParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub kind: RuleKind,
+    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Unknown))]
+    pub rule: serde_json::Value,
+}
+
+impl Handler for AddPushRuleParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        let rule = push_rules::new_rule(&self.kind, self.rule).or_failed(core, "add_push_rule")?;
+        core.push_rules()
+            .await?
+            .apply(vec![push_rules::RuleWrite::Put(rule)])
+            .await
+            .or_report(core, "add_push_rule")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct DeletePushRuleParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub kind: RuleKind,
+    pub rule_id: String,
+}
+
+impl Handler for DeletePushRuleParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.push_rules()
+            .await?
+            .apply(vec![push_rules::RuleWrite::Delete {
+                kind: self.kind,
+                rule_id: self.rule_id,
+            }])
+            .await
+            .or_report(core, "delete_push_rule")
     }
 }

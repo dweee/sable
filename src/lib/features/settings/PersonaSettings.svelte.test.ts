@@ -39,6 +39,8 @@ vi.mock('#lib/personas/personas.svelte.js', () => ({
   usePersonaStore: () => ({ personas: mocks.list, loading: false, error: null, ...mocks }),
 }));
 
+import { personaFromPluralkit } from '#lib/personas/pluralkit.js';
+
 import PersonaSettings from './PersonaSettings.svelte';
 
 const SYSTEM_LABEL = 'System ID';
@@ -83,7 +85,7 @@ test.each([
     );
   });
   if (failed) {
-    expect(await screen.findByText(/pictures could not be fetched/)).toBeInTheDocument();
+    expect(await screen.findByText(/picture could not be fetched/)).toBeInTheDocument();
   }
   if (native) {
     expect(mocks.invoke).toHaveBeenCalledWith('import_persona_avatar', { url: avatar });
@@ -112,13 +114,27 @@ test('imports the members of a PluralKit export file', async () => {
   await vi.waitFor(() => {
     expect(mocks.save).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'Member',
         triggers: [expect.objectContaining({ prefix: 'm:' })],
       }),
       null
     );
   });
-  expect(await screen.findByText('Imported 1 members.')).toBeInTheDocument();
+  expect(await screen.findByText('Imported 1 member.')).toBeInTheDocument();
+});
+
+test('a member sharing a name with another profile gets its own id', async () => {
+  mocks.save.mockResolvedValue();
+  mocks.load.mockResolvedValue();
+  mocks.list = [
+    { ...personaFromPluralkit('Member', { id: 'other', name: 'Member' }, null), pluralkit: null },
+  ];
+  render(PersonaSettings);
+  await choose(0, JSON.stringify({ members: [{ id: 'abcde', name: 'Member' }] }));
+
+  await vi.waitFor(() => {
+    expect(mocks.save).toHaveBeenCalledOnce();
+  });
+  expect(mocks.save.mock.calls[0]?.[0].id).not.toBe('Member');
 });
 
 test('reports an export file that holds no members', async () => {
@@ -186,4 +202,22 @@ test('offers no bulk delete without profiles', () => {
   render(PersonaSettings);
 
   expect(screen.getByRole('button', { name: 'Delete all profiles' })).toBeDisabled();
+});
+
+test('search filters profiles and hides reordering', async () => {
+  mocks.load.mockResolvedValue();
+  mocks.list = ['Kris', 'Wren', 'Rook'].map(
+    (name) => ({ id: name.toLowerCase(), display_name: name, pronouns: [], triggers: [] }) as never
+  );
+  const user = userEvent.setup();
+  render(PersonaSettings);
+
+  await user.type(screen.getByRole('searchbox', { name: 'Search profiles' }), 'wr');
+  expect(screen.getByRole('button', { name: 'Edit Wren' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Edit Kris' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Move Wren up' })).not.toBeInTheDocument();
+
+  await user.clear(screen.getByRole('searchbox', { name: 'Search profiles' }));
+  await user.type(screen.getByRole('searchbox', { name: 'Search profiles' }), 'zz');
+  expect(screen.getByText('No profiles match that search.')).toBeInTheDocument();
 });

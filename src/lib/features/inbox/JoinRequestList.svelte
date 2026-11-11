@@ -4,7 +4,8 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
-  import { roomLabel, useRoomList } from '#lib/rooms/room-list.svelte.js';
+  import { memberName } from '#lib/rooms/member-listing.js';
+  import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -43,29 +44,25 @@
     const current = ++run;
     loading = true;
     failed = false;
-    const rooms = roomList.rooms.filter(
-      (room) =>
-        room.state === 'joined' &&
-        (room.join_rule === 'knock' || room.join_rule === 'knock_restricted')
-    );
-    const results = await Promise.allSettled(
-      rooms.map(async (room): Promise<JoinRequest[]> => {
-        const permissions = await core.rpc.members.permissions({ room_id: room.room_id });
-        if (!permissions.can_invite && !permissions.can_kick) return [];
-        const members = await core.rpc.members.list({
-          room_id: room.room_id,
-          memberships: ['knock'],
-        });
-        return members
-          .filter((member) => member.membership === 'knock')
-          .map((member) => ({ room, member, permissions }));
-      })
-    );
-    if (current !== run) return;
-    requests = results
-      .flatMap((result) => (result.status === 'fulfilled' ? result.value : []))
-      .sort((left, right) => (right.member.member_ts ?? 0) - (left.member.member_ts ?? 0));
-    failed = results.some((result) => result.status === 'rejected');
+    const rooms = roomList.rooms;
+    try {
+      const result = await core.rpc.members.joinRequests({});
+      if (current !== run) return;
+      const groups = new Map(result.rooms.map((group) => [group.room_id, group]));
+      requests = rooms
+        .flatMap((room) => {
+          const group = groups.get(room.room_id);
+          return group
+            ? group.members.map((member) => ({ room, member, permissions: group.permissions }))
+            : [];
+        })
+        .sort((left, right) => (right.member.member_ts ?? 0) - (left.member.member_ts ?? 0));
+      failed = result.failed;
+    } catch {
+      if (current !== run) return;
+      requests = [];
+      failed = true;
+    }
     loading = false;
   }
 
@@ -108,11 +105,11 @@
     {#each pending as request (key(request))}
       {@const member = request.member}
       <li>
-        <Avatar id={member.user_id} name={member.display_name ?? member.user_id} size="small" />
+        <Avatar id={member.user_id} name={memberName(member)} size="small" />
         <div class="identity">
-          <span class="name">{member.display_name ?? member.user_id}</span>
+          <span class="name">{memberName(member)}</span>
           <span class="user-id">{member.user_id}</span>
-          <span class="room">{roomLabel(request.room)}</span>
+          <span class="room">{request.room.display_name}</span>
         </div>
         <div class="actions">
           {#if request.permissions.can_invite}

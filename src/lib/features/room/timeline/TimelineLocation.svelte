@@ -54,7 +54,7 @@
 </script>
 
 <div class="location">
-  <a class="summary" {href} aria-disabled={!valid || undefined}>
+  <a class="summary" {href} rel="external" aria-disabled={!valid || undefined}>
     <MapPinIcon class="pin" size={20} aria-hidden="true" />
     <span class="text">
       <span class="label">{label}</span>
@@ -72,7 +72,7 @@
         {loading ? i18n.t('common.loadingMap') : i18n.t('timeline.locationShowMap')}
       </button>
       {#if failed}
-        <p class="failed">{i18n.t('common.theMapCouldNotBeLoaded')}</p>
+        <p class="failed">{i18n.t('common.mapLoadFailed')}</p>
       {/if}
     {/if}
   {/if}

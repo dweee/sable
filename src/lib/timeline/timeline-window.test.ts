@@ -2,7 +2,14 @@
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-import { TimelineWindow, type TimelineRow, type TimelineWindowState } from './timeline-window';
+import {
+  TimelineWindow,
+  recallTimelineView,
+  rememberTimelineView,
+  type Measured,
+  type TimelineRow,
+  type TimelineWindowState,
+} from './timeline-window';
 
 const windows: TimelineWindow<number>[] = [];
 type Fixture = ReturnType<typeof fixture>;
@@ -21,7 +28,8 @@ function entries(count: number) {
 function fixture(
   heightForRow?: (value: number) => number,
   estimateForRow?: (value: number) => number | undefined,
-  canFollowLatest?: () => boolean
+  canFollowLatest?: () => boolean,
+  sizes?: Map<string, Measured>
 ) {
   let rowHeight = 50;
   let viewportHeight = 300;
@@ -93,6 +101,7 @@ function fixture(
     onScroll,
     estimateSize: estimateForRow,
     canFollowLatest,
+    sizes,
   });
   windows.push(window);
   return {
@@ -673,7 +682,7 @@ test.each([false, true])(
 test('renders a bounded latest window and jumps to a stable key', async () => {
   const { window, keys } = fixture();
   await window.update(entries(1000));
-  expect(keys()).toHaveLength(80);
+  expect(keys()).toHaveLength(20);
   expect(keys().at(-1)).toBe('999');
   expect(await window.jumpTo('20')).toBe(true);
   expect(keys()).toContain('20');
@@ -682,6 +691,38 @@ test('renders a bounded latest window and jumps to a stable key', async () => {
   await window.jumpTo(null);
   expect(keys().at(-1)).toBe('999');
   expect(window.state.pinned).toBe(true);
+});
+
+test('opens on the latest rows that fill two viewports', async () => {
+  const { window, keys, resizeViewport } = fixture();
+  resizeViewport(1000, false);
+  await window.update(entries(1000));
+  expect(keys()).toHaveLength(28);
+  expect(keys().at(-1)).toBe('999');
+});
+
+test('a window on a shared size map starts from the heights an earlier one measured', async () => {
+  const sizes = new Map<string, Measured>();
+  const first = fixture(undefined, undefined, undefined, sizes);
+  first.resizeViewport(1000, false);
+  await first.window.update(entries(1000));
+  first.window.destroy();
+  expect(sizes.size).toBe(28);
+
+  const second = fixture(undefined, undefined, undefined, sizes);
+  second.resizeViewport(1000, false);
+  await second.window.update(entries(1000));
+  expect(second.keys()).toHaveLength(40);
+});
+
+test('a new message keeps the row objects of rows that did not change', async () => {
+  const { window, render } = fixture();
+  await window.update(entries(100));
+  const before = render.mock.lastCall?.[0] ?? [];
+  await window.update(entries(101));
+  const after = render.mock.lastCall?.[0] ?? [];
+  expect(after[0]).toBe(before[0]);
+  expect(after.at(-2)).toBe(before.at(-1));
 });
 
 test('a message at latest keeps the rows a settled window already dropped', async () => {
@@ -1081,6 +1122,9 @@ test('repeated content height reads in one task measure the DOM once', async () 
 test('scrolling measures each rendered row once', async () => {
   const { window, viewport, content, render, onChange } = fixture();
   await window.update(entries(200));
+  viewport.scrollTop -= 50;
+  viewport.dispatchEvent(new Event('scroll'));
+  await vi.advanceTimersByTimeAsync(0);
   const bounds = vi.spyOn(viewport, 'getBoundingClientRect');
   const rows = Array.from(content.children).map((row) => vi.spyOn(row, 'getBoundingClientRect'));
   render.mockClear();
@@ -1196,4 +1240,50 @@ test('the fully visible boundary excludes a partially visible last row', async (
   viewport.dispatchEvent(new Event('scroll'));
   expect(window.state.lastVisible).toBe(26);
   expect(window.state.lastFullyVisible).toBe(25);
+});
+
+test('a reader scrolled up reports a view that a new window resumes at the same offset', async () => {
+  const first = fixture();
+  await first.window.update(entries(100));
+  await first.window.jumpTo('20', 'start');
+  first.viewport.scrollTop -= 17;
+  first.viewport.dispatchEvent(new Event('scroll'));
+  await vi.advanceTimersByTimeAsync(200);
+  const view = first.window.view;
+  if (!view) throw new Error('a scrolled-up reader has a view');
+  const row = first.content.querySelector(`[data-timeline-key="${view.key}"]`);
+  if (!row) throw new Error('missing anchored row');
+  const offset = row.getBoundingClientRect().top - first.viewport.getBoundingClientRect().top;
+  expect(offset).toBe(view.top);
+
+  const second = fixture();
+  await second.window.update(entries(100));
+  expect(await second.window.resume(view)).toBe(true);
+  const resumed = second.content.querySelector(`[data-timeline-key="${view.key}"]`);
+  if (!resumed) throw new Error('missing resumed row');
+  expect(resumed.getBoundingClientRect().top - second.viewport.getBoundingClientRect().top).toBe(
+    view.top
+  );
+  expect(second.window.state.pinned).toBe(false);
+});
+
+test('a reader at the latest message has no view to remember', async () => {
+  const { window } = fixture();
+  await window.update(entries(100));
+  expect(window.state.pinned).toBe(true);
+  expect(window.view).toBeNull();
+});
+
+test('a remembered view is replaced by a newer one and dropped when cleared', () => {
+  rememberTimelineView('!a:x:', { key: '1', top: 3 });
+  rememberTimelineView('!a:x:', { key: '2', top: 5 });
+  expect(recallTimelineView('!a:x:')).toEqual({ key: '2', top: 5 });
+  rememberTimelineView('!a:x:', null);
+  expect(recallTimelineView('!a:x:')).toBeUndefined();
+});
+
+test('resuming at a row the window no longer holds leaves the reader where they are', async () => {
+  const { window } = fixture();
+  await window.update(entries(10));
+  expect(await window.resume({ key: 'gone', top: 0 })).toBe(false);
 });

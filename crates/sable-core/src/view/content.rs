@@ -1,8 +1,14 @@
+use sable_model::text::visible_name;
+
 use std::collections::BTreeSet;
 
 use matrix_sdk::ruma::UInt;
+use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::poll::start::PollKind;
-use matrix_sdk::ruma::events::room::message::MessageType;
+use matrix_sdk::ruma::events::room::message::{
+    GalleryMessageEventContent, MessageType, RoomMessageEventContent,
+};
+use matrix_sdk::ruma::events::sticker::StickerEventContent;
 use matrix_sdk::ruma::{OwnedUserId, UserId};
 use matrix_sdk_base::crypto::types::events::UtdCause;
 use matrix_sdk_ui::timeline::{
@@ -10,60 +16,49 @@ use matrix_sdk_ui::timeline::{
 };
 use sable_model::jumbo;
 
-use crate::matrix_html::{
-    display_html, has_profile_fallback_html, strip_profile_fallback_body,
-    strip_profile_fallback_html,
-};
+use crate::matrix_html::{display_html, strip_profile_fallback_body, strip_profile_fallback_html};
 use crate::protocol::{
-    AvatarChangeView, DisplayNameChangeView, PerMessageProfileView, PollAnswerView, PollView,
-    TimelineItemContentView, UtdCauseView,
+    AvatarChangeView, DisplayNameChangeView, MessageKind, PerMessageProfileView, PollAnswerView,
+    PollView, TimelineItemContentView, UtdCauseView,
 };
 
 use super::media::{
     audio_duration_ms, audio_metadata, audio_waveform, caption_view, gallery_item, image_thumbnail,
-    media_source, spoiler_reason, video_playback, video_thumbnail,
+    media_source, video_playback, video_thumbnail,
 };
 use super::raw::RawFields;
-use super::state::{membership_change, membership_reason, state_change};
+use super::state::{membership_change, membership_reason, pinned_change, state_change};
 
 fn text_message(
-    message: &matrix_sdk_ui::timeline::Message,
+    msgtype: &MessageType,
+    edited: bool,
     profile: Option<&PerMessageProfileView>,
     raw: &RawFields,
 ) -> TimelineItemContentView {
-    let formatted = formatted_body(message.msgtype());
+    let formatted = formatted_body(msgtype);
     let formatted = formatted
         .as_ref()
         .and_then(|_| raw.formatted_body().map(ToOwned::to_owned))
         .or(formatted);
-    let known = formatted.as_deref().is_some_and(has_profile_fallback_html)
-        || profile.is_some_and(|profile| profile.has_fallback);
-    let body = strip_profile_fallback_body(
-        message.body(),
-        profile.and_then(|profile| profile.display_name.as_deref()),
-        known,
-    );
-    // Runs without a parsed profile too: the marker alone is enough, and
-    // skipping it leaves the html naming a sender the body no longer does.
-    let formatted = formatted.map(|formatted| {
-        strip_profile_fallback_html(
-            &formatted,
-            profile.and_then(|profile| profile.display_name.as_deref()),
-            known,
-        )
-    });
-
+    let fallback = profile
+        .filter(|profile| profile.has_fallback)
+        .and_then(|profile| profile.display_name.as_deref());
+    let body = strip_profile_fallback_body(msgtype.body(), fallback);
+    let formatted = formatted.map(|formatted| strip_profile_fallback_html(&formatted, fallback));
     let html = display_html(&body, formatted.as_deref());
-    let emote = matches!(message.msgtype(), MessageType::Emote(_));
-    let jumbo = (!emote)
+    let kind = match msgtype {
+        MessageType::Emote(_) => MessageKind::Emote,
+        MessageType::Notice(_) => MessageKind::Notice,
+        _ => MessageKind::Text,
+    };
+    let jumbo = (kind != MessageKind::Emote)
         .then(|| jumbo::emoji_level(&body).or_else(|| jumbo::emoticon_level(&html)))
         .flatten();
     TimelineItemContentView::Message {
         html,
         body,
-        emote,
-        notice: matches!(message.msgtype(), MessageType::Notice(_)),
-        edited: message.is_edited(),
+        msgtype: kind,
+        edited,
         jumbo,
     }
 }
@@ -150,7 +145,7 @@ const fn utd_cause(message: &EncryptedMessage) -> UtdCauseView {
             UtdCauseView::WithheldForUnverifiedOrInsecureDevice
         }
         UtdCause::WithheldBySender => UtdCauseView::WithheldBySender,
-        UtdCause::Unknown => UtdCauseView::Unknown,
+        UtdCause::Unknown | UtdCause::Malformed => UtdCauseView::Unknown,
     }
 }
 
@@ -159,9 +154,40 @@ fn message_content(
     profile: Option<&PerMessageProfileView>,
     raw: &RawFields,
 ) -> TimelineItemContentView {
+    message_type_content(message.msgtype(), message.is_edited(), profile, raw)
+}
+
+fn gallery_content(
+    gallery: &GalleryMessageEventContent,
+    raw: &RawFields,
+) -> TimelineItemContentView {
+    TimelineItemContentView::Gallery {
+        html: display_html(
+            &gallery.body,
+            gallery
+                .formatted
+                .as_ref()
+                .map(|formatted| formatted.body.as_str()),
+        ),
+        body: gallery.body.clone(),
+        items: gallery
+            .itemtypes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| gallery_item(item, raw.gallery_spoiler_reason(index)))
+            .collect(),
+    }
+}
+
+fn message_type_content(
+    msgtype: &MessageType,
+    edited: bool,
+    profile: Option<&PerMessageProfileView>,
+    raw: &RawFields,
+) -> TimelineItemContentView {
     let dimension = |value: Option<UInt>| value.map(u64::from);
 
-    match message.msgtype() {
+    match msgtype {
         MessageType::Image(image) => {
             let (caption, caption_html) =
                 caption_view(image.caption(), image.formatted_caption(), profile);
@@ -170,13 +196,14 @@ fn message_content(
                 caption,
                 html: caption_html,
                 source: media_source(&image.source),
+                external_url: raw.external_url(),
                 mime: image.info.as_ref().and_then(|info| info.mimetype.clone()),
                 width: dimension(image.info.as_ref().and_then(|info| info.width)),
                 height: dimension(image.info.as_ref().and_then(|info| info.height)),
                 size: dimension(image.info.as_ref().and_then(|info| info.size)),
                 blurhash: image.info.as_ref().and_then(|info| info.blurhash.clone()),
                 thumbnail: image.info.as_deref().and_then(image_thumbnail),
-                spoiler: spoiler_reason(raw.message()),
+                spoiler: raw.spoiler_reason(),
                 animated: image.info.as_ref().and_then(|info| info.is_animated),
             }
         }
@@ -188,12 +215,13 @@ fn message_content(
                 caption,
                 html: caption_html,
                 source: media_source(&video.source),
+                external_url: raw.external_url(),
                 mime: video.info.as_ref().and_then(|info| info.mimetype.clone()),
                 width: dimension(video.info.as_ref().and_then(|info| info.width)),
                 height: dimension(video.info.as_ref().and_then(|info| info.height)),
                 blurhash: video.info.as_ref().and_then(|info| info.blurhash.clone()),
                 thumbnail: video.info.as_deref().and_then(video_thumbnail),
-                spoiler: spoiler_reason(raw.message()),
+                spoiler: raw.spoiler_reason(),
                 playback: video_playback(raw.message()),
             }
         }
@@ -205,6 +233,7 @@ fn message_content(
                 caption,
                 html: caption_html,
                 source: media_source(&audio.source),
+                external_url: raw.external_url(),
                 mime: audio.info.as_ref().and_then(|info| info.mimetype.clone()),
                 duration_ms: audio_duration_ms(audio),
                 waveform: audio_waveform(audio),
@@ -220,6 +249,7 @@ fn message_content(
                 caption,
                 html: caption_html,
                 source: media_source(&file.source),
+                external_url: raw.external_url(),
                 mime: file.info.as_ref().and_then(|info| info.mimetype.clone()),
                 size: file.info.as_ref().and_then(|info| info.size).map(u64::from),
             }
@@ -233,32 +263,63 @@ fn message_content(
                 longitude: coordinates.map(|(_, longitude)| longitude),
             }
         }
-        MessageType::Gallery(gallery) => TimelineItemContentView::Gallery {
-            html: display_html(
-                &gallery.body,
-                gallery
-                    .formatted
-                    .as_ref()
-                    .map(|formatted| formatted.body.as_str()),
-            ),
-            body: gallery.body.clone(),
-            items: gallery
-                .itemtypes
-                .iter()
-                .enumerate()
-                .filter_map(|(index, item)| {
-                    let raw = raw
-                        .content
-                        .as_ref()
-                        .and_then(|content| content.get("itemtypes"))
-                        .and_then(|items| items.get(index));
-                    gallery_item(item, raw)
-                })
-                .collect(),
-        },
+        MessageType::Gallery(gallery) => gallery_content(gallery, raw),
         MessageType::VerificationRequest(_) => TimelineItemContentView::VerificationRequest,
-        msgtype => cute_event(msgtype).unwrap_or_else(|| text_message(message, profile, raw)),
+        msgtype => {
+            cute_event(msgtype).unwrap_or_else(|| text_message(msgtype, edited, profile, raw))
+        }
     }
+}
+
+fn forwarded_message_type(raw: &RawFields) -> Option<(MessageType, RawFields)> {
+    let event_content = raw.original_content.as_ref().or(raw.content.as_ref())?;
+    let original = event_content
+        .get(super::forward::FORWARDED)?
+        .get("content")?;
+    let message = serde_json::from_value::<RoomMessageEventContent>(original.clone()).ok()?;
+    let msgtype = message.msgtype;
+    let mut original = original.as_object()?.clone();
+    for key in ["m.relates_to", "m.mentions", "m.new_content"] {
+        original.remove(key);
+    }
+    let raw = RawFields {
+        content: Some(serde_json::Value::Object(original)),
+        ..RawFields::default()
+    };
+    Some((msgtype, raw))
+}
+
+fn forwarded_fallback_message_type(raw: &RawFields) -> Option<(MessageType, RawFields)> {
+    let original = raw.original_content.as_ref()?;
+    super::forward::forward_meta(original)?;
+    let message = serde_json::from_value::<RoomMessageEventContent>(original.clone()).ok()?;
+    let mut original = original.as_object()?.clone();
+    for key in ["m.relates_to", "m.mentions", "m.new_content"] {
+        original.remove(key);
+    }
+    let raw = RawFields {
+        content: Some(serde_json::Value::Object(original)),
+        ..RawFields::default()
+    };
+    Some((message.msgtype, raw))
+}
+
+fn forwarded_sticker(raw: &RawFields) -> Option<StickerEventContent> {
+    serde_json::from_value(
+        raw.original_content
+            .as_ref()
+            .or(raw.content.as_ref())?
+            .get(super::forward::FORWARDED)?
+            .get("content")?
+            .clone(),
+    )
+    .ok()
+}
+
+fn forwarded_fallback_sticker(raw: &RawFields) -> Option<StickerEventContent> {
+    let original = raw.original_content.as_ref()?;
+    super::forward::forward_meta(original)?;
+    serde_json::from_value(original.clone()).ok()
 }
 
 pub(crate) const CUTE_EVENT_MSGTYPE: &str = "im.fluffychat.cute_event";
@@ -296,11 +357,38 @@ fn unparsed(event_type: &str, raw: &RawFields) -> TimelineItemContentView {
     if raw.content_stripped() {
         TimelineItemContentView::Redacted {
             reason: raw.redaction_reason(),
+            redacted_by: raw.redacted_by(),
         }
     } else {
         TimelineItemContentView::Malformed {
             event_type: event_type.to_owned(),
         }
+    }
+}
+
+fn unparsed_message_like(event_type: &str, raw: &RawFields) -> TimelineItemContentView {
+    // MSC4075 withdraws an invite with a content that holds only its sticky key.
+    let withdrawal = matches!(
+        event_type,
+        "m.rtc.invite" | "m.rtc.notification" | "org.matrix.msc4075.rtc.notification"
+    ) && raw
+        .content
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|content| {
+            !content.is_empty()
+                && content
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "sticky_key" | "msc4354_sticky_key"))
+        });
+    if withdrawal {
+        TimelineItemContentView::HiddenEvent {
+            event_type: event_type.to_owned(),
+            content: raw.content.clone(),
+            redacts: None,
+        }
+    } else {
+        unparsed(event_type, raw)
     }
 }
 
@@ -312,9 +400,17 @@ pub(super) fn content(
 ) -> TimelineItemContentView {
     match content {
         TimelineItemContent::MsgLike(msg) => match &msg.kind {
-            MsgLikeKind::Message(message) => message_content(message, profile, raw),
+            MsgLikeKind::Message(message) => forwarded_message_type(raw)
+                .or_else(|| forwarded_fallback_message_type(raw))
+                .map_or_else(
+                    || message_content(message, profile, raw),
+                    |(msgtype, forwarded_raw)| {
+                        message_type_content(&msgtype, false, None, &forwarded_raw)
+                    },
+                ),
             MsgLikeKind::Redacted => TimelineItemContentView::Redacted {
                 reason: raw.redaction_reason(),
+                redacted_by: raw.redacted_by(),
             },
             MsgLikeKind::UnableToDecrypt(message) => TimelineItemContentView::UnableToDecrypt {
                 reason: utd_cause(message),
@@ -326,7 +422,8 @@ pub(super) fn content(
                 },
             },
             MsgLikeKind::Sticker(sticker) => {
-                let sticker = sticker.content();
+                let forwarded = forwarded_sticker(raw).or_else(|| forwarded_fallback_sticker(raw));
+                let sticker = forwarded.as_ref().unwrap_or_else(|| sticker.content());
                 TimelineItemContentView::Sticker {
                     body: sticker.body.clone(),
                     source: serde_json::to_string(&sticker.source).unwrap_or_default(),
@@ -349,7 +446,7 @@ pub(super) fn content(
         TimelineItemContent::MembershipChange(change) => TimelineItemContentView::Membership {
             user_id: change.user_id().to_owned(),
             change: membership_change(change.change()),
-            display_name: change.display_name(),
+            display_name: change.display_name().and_then(visible_name),
             reason: membership_reason(change.content()),
         },
 
@@ -358,8 +455,8 @@ pub(super) fn content(
             display_name: change
                 .displayname_change()
                 .map(|change| DisplayNameChangeView {
-                    old: change.old.clone(),
-                    new: change.new.clone(),
+                    old: change.old.clone().and_then(visible_name),
+                    new: change.new.clone().and_then(visible_name),
                 }),
             avatar: change.avatar_url_change().map(|change| AvatarChangeView {
                 old: change.old.as_ref().map(ToString::to_string),
@@ -378,19 +475,22 @@ pub(super) fn content(
             TimelineItemContentView::CallInvite
         }
         TimelineItemContent::FailedToParseMessageLike { event_type, .. } => {
-            unparsed(&event_type.to_string(), raw)
+            unparsed_message_like(&event_type.to_string(), raw)
         }
         TimelineItemContent::FailedToParseState {
             event_type,
             state_key,
             ..
-        } if raw.content_stripped() => TimelineItemContentView::StateEvent {
-            event_type: event_type.to_string(),
-            state_key: state_key.clone(),
-            change: None,
-            content: raw.content.clone(),
-            prev_content: raw.prev_content().cloned(),
-        },
+        } if raw.content_stripped() || *event_type == StateEventType::RoomPinnedEvents => {
+            TimelineItemContentView::StateEvent {
+                event_type: event_type.to_string(),
+                state_key: state_key.clone(),
+                change: (!raw.content_stripped())
+                    .then(|| pinned_change(raw.content.as_ref(), raw.prev_content())),
+                content: raw.content.clone(),
+                prev_content: raw.prev_content().cloned(),
+            }
+        }
         TimelineItemContent::FailedToParseState { event_type, .. } => {
             unparsed(&event_type.to_string(), raw)
         }
@@ -418,9 +518,57 @@ pub(super) fn raw_formatted_body(content: Option<&serde_json::Value>) -> Option<
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
     use serde_json::json;
 
+    use crate::protocol::TimelineVisibility;
     use crate::view::raw::RawFields;
+
+    #[test]
+    fn supported_forwards_render_the_nested_original_content() {
+        let raw = serde_json::from_value::<RawFields>(serde_json::json!({
+            "content": {
+                "msgtype": "m.text",
+                "body": "Forwarded message\\nfallback copy",
+                "org.matrix.msc4553.forwarded": {
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "original content",
+                        "format": "org.matrix.custom.html",
+                        "formatted_body": "<strong>original</strong> content"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let (msgtype, forwarded_raw) = forwarded_message_type(&raw).unwrap();
+        let view = message_type_content(&msgtype, false, None, &forwarded_raw);
+        let serialized = serde_json::to_value(view).unwrap();
+
+        assert_eq!(serialized["body"], "original content");
+        assert_eq!(serialized["html"], "<strong>original</strong> content");
+    }
+
+    #[test]
+    fn invalid_forward_content_uses_the_original_fallback_and_ignores_edits() {
+        let mut raw = serde_json::from_value::<RawFields>(serde_json::json!({
+            "content": { "msgtype": "m.text", "body": "edited body" }
+        }))
+        .unwrap();
+        raw.original_content = Some(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "Forwarded message\noriginal fallback",
+            "org.matrix.msc4553.forwarded": { "content": { "msgtype": "m.text" } }
+        }));
+
+        let (msgtype, original_raw) = forwarded_fallback_message_type(&raw).unwrap();
+        let view = message_type_content(&msgtype, false, None, &original_raw);
+        let serialized = serde_json::to_value(view).unwrap();
+
+        assert_eq!(serialized["body"], "Forwarded message\noriginal fallback");
+    }
 
     #[test]
     fn call_invites_have_a_dedicated_view() {
@@ -432,6 +580,23 @@ mod tests {
         );
         let serialized = serde_json::to_value(view).unwrap();
         assert_eq!(serialized["kind"], "call_invite");
+    }
+
+    #[test]
+    fn an_invite_withdrawal_is_hidden_but_a_broken_notification_is_malformed() {
+        let view = |content| {
+            let raw = serde_json::from_value::<RawFields>(json!({ "content": content })).unwrap();
+            let unparsed = TimelineItemContent::FailedToParseMessageLike {
+                event_type: "org.matrix.msc4075.rtc.notification".into(),
+                error: Arc::new(serde_json::from_str::<u8>("x").unwrap_err()),
+            };
+            super::content(&unparsed, None, &raw, None)
+        };
+
+        let withdrawal = view(json!({ "msc4354_sticky_key": "m.call#ROOM" }));
+        assert_eq!(withdrawal.visibility(), TimelineVisibility::Hidden);
+        let broken = view(json!({ "msc4354_sticky_key": "m.call#ROOM", "lifetime": "soon" }));
+        assert_eq!(serde_json::to_value(broken).unwrap()["kind"], "malformed");
     }
 
     #[test]
@@ -467,6 +632,22 @@ mod tests {
     }
 
     #[test]
+    fn a_deletion_names_the_redactor_only_when_it_is_not_the_author() {
+        let redacted = |redactor: &str| {
+            let raw = serde_json::from_value::<RawFields>(json!({
+                "sender": "@alice:x",
+                "content": {},
+                "unsigned": { "redacted_because": { "sender": redactor, "content": {} } },
+            }))
+            .unwrap();
+            serde_json::to_value(unparsed("m.room.message", &raw)).unwrap()
+        };
+
+        assert_eq!(redacted("@mod:x")["redacted_by"], "@mod:x");
+        assert_eq!(redacted("@alice:x")["redacted_by"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn an_edit_reads_the_spoiler_from_its_new_content() {
         let raw = serde_json::from_value::<RawFields>(json!({
             "content": {
@@ -480,7 +661,27 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(spoiler_reason(raw.message()).as_deref(), Some(""));
+        assert_eq!(raw.spoiler_reason().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn bridged_media_keeps_the_link_it_came_from() {
+        let content = json!({
+            "msgtype": "m.video",
+            "body": "https://www.instagram.com/reel/a/",
+            "filename": "reel.mp4",
+            "url": "mxc://example.org/reel",
+            "external_url": "https://www.instagram.com/reel/a/?id=1",
+        });
+        let raw = serde_json::from_value::<RawFields>(json!({ "content": content })).unwrap();
+        let msgtype = serde_json::from_value::<MessageType>(content).unwrap();
+        let serialized =
+            serde_json::to_value(message_type_content(&msgtype, false, None, &raw)).unwrap();
+
+        assert_eq!(
+            serialized["external_url"],
+            "https://www.instagram.com/reel/a/?id=1"
+        );
     }
 
     #[test]

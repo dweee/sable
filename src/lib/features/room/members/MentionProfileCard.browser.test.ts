@@ -34,12 +34,15 @@ declare module 'vitest/browser' {
 
 afterEach(async () => {
   await commands.emulateColorScheme('light');
+  document.documentElement.classList.remove('dark', 'light');
 });
 
 const baseProfile: ProfileView = {
   user_id: '@alice:example.test',
   display_name: 'Alice',
   avatar_url: null,
+  real_name: 'Alice',
+  real_avatar_url: null,
   bio: 'Hello <a href="https://example.org">link</a> <code>code</code>',
   hero_color: null,
   hero_brightness: null,
@@ -58,7 +61,7 @@ const baseProfile: ProfileView = {
 function mountCard(patch: Partial<ProfileView>) {
   Object.assign(core, {
     session: { user_id: '@me:example.test' },
-    userRelations: vi.fn().mockResolvedValue({ mutualRooms: [], ignored: false }),
+    userRelations: vi.fn().mockResolvedValue({ mutual_rooms: [], ignored: false }),
   });
   Object.assign(core.rpc.members, { list: vi.fn().mockResolvedValue([]) });
   return render(MentionProfileCard, {
@@ -117,6 +120,25 @@ for (const { scheme, hero, brightness } of CASES) {
   test(`a ${hero} profile card with ${brightness ?? 'automatic'} brightness keeps its text legible on the ${scheme} theme`, async () => {
     await commands.emulateColorScheme(scheme);
     const screen = await mountCard({ hero_color: hero, hero_brightness: brightness });
+    const card = document.querySelector('.profile-card');
+    if (!card) throw new Error('the profile card is not rendered');
+    await expect.element(screen.getByText('Show misc. data', { exact: false })).toBeVisible();
+
+    expect(illegibleText(card)).toEqual([]);
+  });
+}
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`a custom name colour stays legible on a light hero in the ${scheme} theme`, async () => {
+    await commands.emulateColorScheme(scheme);
+    document.documentElement.classList.toggle('dark', scheme === 'dark');
+    document.documentElement.classList.toggle('light', scheme === 'light');
+    const screen = await mountCard({
+      hero_color: '#dec1e3',
+      hero_brightness: 'light',
+      name_color_light: '#f1c7ef',
+      name_color_dark: '#f1c7ef',
+    });
     const card = document.querySelector('.profile-card');
     if (!card) throw new Error('the profile card is not rendered');
     await expect.element(screen.getByText('Show misc. data', { exact: false })).toBeVisible();

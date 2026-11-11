@@ -1,3 +1,4 @@
+import { readText, writeText, removeLocalValue } from '#lib/platform/local-json.js';
 import {
   type CoreEvent,
   type DeviceView,
@@ -6,35 +7,52 @@ import {
   type AuthIntent,
   type LoginFlowsView,
   type LoginIdentifier,
+  type OAuthMetadataView,
   type RegistrationFlowsView,
   type SessionInfo,
   type SyncStatus,
-  type MutualRoomView,
   type ProfilePropagationView,
   type ProfileView,
   type RegistrationResultView,
   type VerificationView,
   type Rpc,
+  type RpcResult,
   createRpc,
 } from '#src/generated/protocol';
 
 import { createMedia } from './media.svelte.js';
 import { invalidatePacks, isPackAccountDataEvent } from '#lib/emoji/load-packs.js';
-import { createTransport } from '../../transport/create';
+import { createTransport } from '#src/transport/create';
 import type { Transport } from '../../transport';
 import { CoreError } from '../../transport';
-import { V1MigrationError } from '#lib/migrations/v1/migration.js';
 import QuickLRU from 'quick-lru';
 import { on } from 'svelte/events';
+import { deviceDisplayName } from '#lib/deployment/policy.js';
+import {
+  activateAccountConfiguration,
+  removeAccountConfiguration,
+  prepareLoginConfiguration,
+  loginConfiguration,
+} from '#lib/deployment/deployment.js';
+import {
+  defaultE2eePolicy,
+  parseE2eePolicy,
+  type E2eePolicy,
+} from '#lib/deployment/e2ee-policy.js';
 import { onDebugLogCapture, recordDebugLog } from '#lib/observability/debug-log.svelte.js';
 import { clearRoomListSnapshot } from '#lib/rooms/room-list-snapshot.js';
+import { clearRoomTimelines } from '#lib/rooms/timeline.svelte.js';
+import { MemberPreviews } from '#lib/rooms/member-previews.svelte.js';
 import { clearRecentSearches } from '#lib/search/recent-searches.svelte.js';
+import { reportCoreFailure } from '#lib/observability/core-failure.js';
 import { reportSessionFailure } from '#lib/observability/session-telemetry.js';
 import {
   browserGatesCoreNetwork,
+  requestAndroidLocalNetwork,
   localNetworkDenied,
   LocalNetworkBlockedError,
 } from '#lib/platform/local-network.js';
+import { sleep } from '#lib/sleep.js';
 
 type WellKnownResponse = { 'm.homeserver'?: { base_url?: unknown } };
 export type { OutgoingMentions } from './api/messages.svelte.js';
@@ -43,6 +61,7 @@ export type { CreateRoomOptions } from './api/rooms.js';
 const profileCacheFreshMs = 2 * 60 * 1000;
 const profileFailureRetryMs = 60 * 1000;
 const relationsCacheFreshMs = 60 * 1000;
+const SLOW_START_MS = 15_000;
 const MAX_PROFILE_CACHE_ENTRIES = 256;
 const MAX_RELATIONS_CACHE_ENTRIES = 128;
 const MAX_PROFILE_LOOKUPS = 24;
@@ -71,8 +90,13 @@ function homeserverUrl(homeserver: string): URL {
 }
 
 async function grantLocalNetworkAccess(baseUrl: string): Promise<boolean> {
+  const probe = () =>
+    fetch(new URL('_matrix/client/versions', homeserverUrl(baseUrl)), { mode: 'cors' });
   try {
-    await fetch(new URL('_matrix/client/versions', homeserverUrl(baseUrl)), { mode: 'cors' });
+    await probe().catch(async (error: unknown) => {
+      if (!(await requestAndroidLocalNetwork())) throw error;
+      return probe();
+    });
     return true;
   } catch (error) {
     console.warn('[sable auth] homeserver unreachable from the page', {
@@ -118,7 +142,7 @@ async function resolveHomeserverInPage(
   return resolved;
 }
 
-export type UserRelations = { mutualRooms: MutualRoomView[]; ignored: boolean };
+export type UserRelations = RpcResult<Rpc['account']['userRelations']>;
 export type CoreStatus = 'idle' | 'starting' | 'signed-out' | 'authenticating' | 'ready' | 'error';
 export type CoreSession = SessionInfo;
 export type ActiveVerification = { userId: string; flowId: string; state: VerificationView };
@@ -129,7 +153,28 @@ function discardAccountStore(transport: Transport, accountId: string): void {
   });
 }
 
+function describeEvent(event: CoreEvent): string {
+  switch (event.type) {
+    case 'sync_status':
+      return event.state === 'error'
+        ? `sync_status error: ${event.message}`
+        : `sync_status ${event.state}`;
+    case 'qr_login': {
+      const side = event.grant ? 'grant' : 'login';
+      const { progress } = event;
+      return progress.stage === 'failed'
+        ? `qr_login ${side} failed: ${progress.reason}`
+        : `qr_login ${side} ${progress.stage}`;
+    }
+    case 'presence':
+      return `presence ${event.presence}`;
+    default:
+      return event.type;
+  }
+}
+
 export class CoreClient {
+  readonly memberPreviews = new MemberPreviews();
   status = $state<CoreStatus>('idle');
   session = $state<CoreSession | null>(null);
   private lockedAccountId = $state<string | null>(null);
@@ -143,8 +188,7 @@ export class CoreClient {
   storageInterrupted = $state(false);
   superseded = $state(false);
   restoreFailed = $state(false);
-  migrationFailed = $state(false);
-  migrationError = $state<string | null>(null);
+  slowStart = $state(false);
   sync = $state<SyncStatus | null>(null);
   /** This device's own verification and recovery state, pushed on change. */
   encryption = $state<EncryptionStatusView | null>(null);
@@ -152,6 +196,8 @@ export class CoreClient {
   searchCoverageUnavailable = $state(false);
   /** Every device on this account, replaced whole on change. */
   deviceList = $state.raw<DeviceView[]>([]);
+  /** The homeserver's OAuth metadata: `undefined` until known, `null` when it has no OAuth. */
+  oauthMetadata = $state.raw<OAuthMetadataView | null | undefined>(undefined);
   unresponsive = $state(false);
   localNetworkBlocked = $state<string | null>(null);
   accountRevision = $state(0);
@@ -161,6 +207,7 @@ export class CoreClient {
   private startPromise: Promise<void> | null = null;
   private generation = 0;
   private encryptionEvents = 0;
+  private deviceEvents = 0;
   private readonly accountChannel =
     typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('sable-active-account');
   /* Nothing renders from these, and a reactive map would make every mounted
@@ -197,6 +244,7 @@ export class CoreClient {
     { accountId: string | null; relations: UserRelations }
   >({ maxSize: MAX_RELATIONS_CACHE_ENTRIES, maxAge: relationsCacheFreshMs });
   private readonly resolvedHomeservers = new Map<string, string>();
+  private readonly e2eePolicies = new Map<string, Promise<E2eePolicy>>();
   /* eslint-enable svelte/prefer-svelte-reactivity */
 
   private stopAccountChannel: (() => void) | null = null;
@@ -238,6 +286,12 @@ export class CoreClient {
     }
   }
 
+  /** `start()` would otherwise join the stuck attempt. */
+  retryStart(): Promise<void> {
+    this.startPromise = null;
+    return this.start();
+  }
+
   async login(
     homeserver: string,
     identifier: LoginIdentifier,
@@ -267,6 +321,7 @@ export class CoreClient {
           homeserver: resolvedHomeserver,
           identifier,
           password,
+          device_display_name: deviceDisplayName(await prepareLoginConfiguration(homeserver)),
         })
         .catch((error: unknown) => blameLocalNetwork(error, resolvedHomeserver));
 
@@ -284,13 +339,17 @@ export class CoreClient {
 
   async loginFlows(homeserver: string): Promise<LoginFlowsView> {
     const transport = this.ensureTransport();
-    const resolvedHomeserver = await resolveHomeserverInPage(homeserver, this.resolvedHomeservers);
+    const [resolvedHomeserver] = await Promise.all([
+      resolveHomeserverInPage(homeserver, this.resolvedHomeservers),
+      prepareLoginConfiguration(homeserver),
+    ]);
     return this.#rpcOn(transport)
       .auth.loginFlows({ homeserver: resolvedHomeserver })
       .catch((error: unknown) => blameLocalNetwork(error, resolvedHomeserver));
   }
 
   async registrationFlows(homeserver: string): Promise<RegistrationFlowsView> {
+    await prepareLoginConfiguration(homeserver);
     const resolvedHomeserver = await resolveHomeserverInPage(homeserver, this.resolvedHomeservers);
     return this.rpc.auth.registrationFlows({ homeserver: resolvedHomeserver });
   }
@@ -356,6 +415,7 @@ export class CoreClient {
         password,
         registration_email: registrationEmail,
         registration_token: registrationToken,
+        device_display_name: deviceDisplayName(await prepareLoginConfiguration(homeserver)),
       });
       if (result.state === 'complete') {
         await this.finishAuthentication(result.user_id);
@@ -392,6 +452,7 @@ export class CoreClient {
       homeserver: resolvedHomeserver,
       redirect_uri: redirectUri,
       intent,
+      device_display_name: deviceDisplayName(await prepareLoginConfiguration(homeserver)),
     });
   }
 
@@ -471,6 +532,8 @@ export class CoreClient {
   ): Promise<string> {
     const transport = this.ensureTransport();
     const resolvedHomeserver = await resolveHomeserverInPage(homeserver, this.resolvedHomeservers);
+    await prepareLoginConfiguration(homeserver);
+    writeText('sable.sso-config-server', homeserver);
     return this.#rpcOn(transport).auth.startSsoLogin({
       reauth_account_id: reauthAccountId ?? null,
       homeserver: resolvedHomeserver,
@@ -494,13 +557,17 @@ export class CoreClient {
     this.status = 'authenticating';
 
     try {
+      const server = readText('sable.sso-config-server');
+      const config = server ? await prepareLoginConfiguration(server) : loginConfiguration();
       const userId = await this.#rpcOn(transport).auth.completeSsoLogin({
         callback_url: callbackUrl,
+        device_display_name: deviceDisplayName(config),
       });
 
       if (generation !== this.generation || transport !== this.transport) return;
 
       await this.finishAuthentication(userId, generation);
+      removeLocalValue('sable.sso-config-server');
     } catch (error) {
       if (generation === this.generation && transport === this.transport) {
         this.replaceSession(previousSession);
@@ -663,7 +730,7 @@ export class CoreClient {
           wait > 0;
           wait = this.profileResumeAt - Date.now()
         ) {
-          await new Promise((resolve) => setTimeout(resolve, wait));
+          await sleep(wait);
         }
       }
       try {
@@ -694,12 +761,23 @@ export class CoreClient {
     }
 
     const response = await this.rpc.account.userRelations({ user_id: userId });
-    const relations = {
-      mutualRooms: response.mutual_rooms,
-      ignored: response.ignored,
-    };
+    const relations = response;
     this.relationsCache.set(userId, { accountId, relations });
     return relations;
+  }
+
+  e2eePolicy(): Promise<E2eePolicy> {
+    const accountId = this.session?.account_id;
+    if (accountId === undefined) return Promise.resolve(defaultE2eePolicy);
+    let policy = this.e2eePolicies.get(accountId);
+    if (policy === undefined) {
+      policy = this.rpc.account.wellKnown().then(parseE2eePolicy, () => {
+        this.e2eePolicies.delete(accountId);
+        return defaultE2eePolicy;
+      });
+      this.e2eePolicies.set(accountId, policy);
+    }
+    return policy;
   }
 
   async setUserIgnored(userId: string, ignored: boolean): Promise<void> {
@@ -722,7 +800,7 @@ export class CoreClient {
       } catch (error) {
         if (generation !== this.generation) return;
         console.warn('[sable core] search coverage unavailable', error);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await sleep(1000);
       }
     }
 
@@ -732,9 +810,20 @@ export class CoreClient {
   async switchAccount(accountId: string): Promise<void> {
     const generation = this.generation;
     const transport = this.ensureTransport();
-    const session = await this.#rpcOn(transport).session.switchAccount({
-      account_id: accountId,
-    });
+    const slow = setTimeout(() => {
+      reportSessionFailure('switch_slow');
+    }, SLOW_START_MS);
+    let session: CoreSession;
+    try {
+      session = await this.#rpcOn(transport).session.switchAccount({
+        account_id: accountId,
+      });
+    } catch (error) {
+      reportSessionFailure('switch', error);
+      throw error;
+    } finally {
+      clearTimeout(slow);
+    }
     if (generation !== this.generation || transport !== this.transport) return;
     await this.refreshAccounts();
     if (generation !== this.generation || transport !== this.transport) return;
@@ -761,6 +850,7 @@ export class CoreClient {
     await this.#rpcOn(transport).session.removeAccount({ account_id: accountId });
     await this.refreshAccounts();
     discardAccountStore(transport, accountId);
+    removeAccountConfiguration(accountId);
     clearRoomListSnapshot(accountId);
     if (userId !== undefined) clearRecentSearches(userId);
   }
@@ -776,6 +866,7 @@ export class CoreClient {
     this.status = 'authenticating';
     if (accountId !== null) {
       discardAccountStore(transport, accountId);
+      removeAccountConfiguration(accountId);
       clearRoomListSnapshot(accountId);
     }
     if (userId !== null) clearRecentSearches(userId);
@@ -852,6 +943,10 @@ export class CoreClient {
     return uri;
   }
 
+  rtcData(sessionId: string, frame: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+    return this.ensureTransport().rtcData(sessionId, frame);
+  }
+
   subscribeEvents(onEvent: (event: CoreEvent) => void): () => void {
     return this.ensureTransport().subscribe((event) => {
       if (event.type === 'verification') {
@@ -883,6 +978,8 @@ export class CoreClient {
   }
 
   private resetCachedState(): void {
+    clearRoomTimelines(this);
+    this.memberPreviews.clear();
     this.profileCache.clear();
     this.profileRequests.clear();
     this.profileFailures.clear();
@@ -895,6 +992,7 @@ export class CoreClient {
     this.unresponsive = false;
     this.encryption = null;
     this.deviceList = [];
+    this.oauthMetadata = undefined;
     this.searchCoverage = null;
     this.searchCoverageUnavailable = false;
     this.localNetworkBlocked = null;
@@ -905,6 +1003,7 @@ export class CoreClient {
   private async primeEncryptionStatus(): Promise<void> {
     const revision = this.accountRevision;
     const reported = this.encryptionEvents;
+    const reportedDevices = this.deviceEvents;
     try {
       const [status, devices] = await Promise.all([
         this.rpc.encryption.status(),
@@ -912,7 +1011,7 @@ export class CoreClient {
       ]);
       if (revision !== this.accountRevision) return;
       if (reported === this.encryptionEvents) this.encryption = status;
-      this.deviceList = devices.devices;
+      if (reportedDevices === this.deviceEvents) this.deviceList = devices.devices;
     } catch (error) {
       console.debug('[sable core] encryption status unavailable', error);
     }
@@ -925,10 +1024,12 @@ export class CoreClient {
       this.resetCachedState();
     }
     this.session = session;
+    if (changed) activateAccountConfiguration(session);
     if (session) this.reauthenticationAccountId = null;
     if (changed && session) {
       void this.primeEncryptionStatus();
       void this.primeSyncStatus();
+      void this.primeOAuthMetadata();
       void this.primeOwnProfile(session.user_id);
       if (browserGatesCoreNetwork()) void grantLocalNetworkAccess(session.homeserver);
     }
@@ -956,8 +1057,12 @@ export class CoreClient {
   private async startTransport(): Promise<void> {
     const generation = ++this.generation;
     this.status = 'starting';
-    this.migrationFailed = false;
-    this.migrationError = null;
+    this.slowStart = false;
+    const slow = setTimeout(() => {
+      if (generation !== this.generation || this.status !== 'starting') return;
+      this.slowStart = true;
+      reportSessionFailure('restore_slow');
+    }, SLOW_START_MS);
 
     try {
       const transport = this.ensureTransport();
@@ -989,7 +1094,7 @@ export class CoreClient {
     } catch (error) {
       if (generation !== this.generation) return;
 
-      console.error('[sable core] restore failed', error);
+      console.debug('[sable core] restore failed', error);
       reportSessionFailure('restore', error);
       if (error instanceof CoreError) {
         try {
@@ -1001,10 +1106,11 @@ export class CoreClient {
         if (generation !== this.generation) return;
       }
       this.restoreFailed = true;
-      this.migrationFailed = error instanceof V1MigrationError;
-      this.migrationError = error instanceof V1MigrationError ? error.message : null;
       this.status = 'error';
       this.cleanupTransport();
+    } finally {
+      clearTimeout(slow);
+      if (generation === this.generation) this.slowStart = false;
     }
   }
 
@@ -1084,6 +1190,17 @@ export class CoreClient {
     }
   }
 
+  private async primeOAuthMetadata(): Promise<void> {
+    const revision = this.accountRevision;
+    try {
+      const metadata = await this.rpc.session.oauthMetadata();
+      if (revision !== this.accountRevision || this.oauthMetadata !== undefined) return;
+      this.oauthMetadata = metadata;
+    } catch (error) {
+      console.debug('[sable core] OAuth metadata unavailable', error);
+    }
+  }
+
   private applySyncStatus(status: SyncStatus): void {
     this.sync = status;
     if (status.state !== 'offline') {
@@ -1105,7 +1222,12 @@ export class CoreClient {
   }
 
   private readonly handleEvent = (event: CoreEvent): void => {
-    recordDebugLog('debug', event.type === 'sync_status' ? 'sync' : 'general', 'core', event.type);
+    recordDebugLog(
+      'debug',
+      event.type === 'sync_status' ? 'sync' : 'general',
+      'core',
+      describeEvent(event)
+    );
     switch (event.type) {
       case 'account_lock_changed':
         if (event.locked) this.lockedAccountId = event.account_id;
@@ -1119,10 +1241,17 @@ export class CoreClient {
         this.encryption = event.status;
         return;
       case 'devices_changed':
+        this.deviceEvents += 1;
         this.deviceList = event.devices;
+        return;
+      case 'oauth_metadata':
+        this.oauthMetadata = event.metadata;
         return;
       case 'profile_changed':
         this.invalidateProfile(event.user_id);
+        return;
+      case 'nicknames_changed':
+        for (const userId of event.user_ids) this.invalidateProfile(userId);
         return;
       case 'search_coverage':
         this.searchCoverage = event.coverage;
@@ -1133,6 +1262,9 @@ export class CoreClient {
         return;
       case 'image_packs_changed':
         invalidatePacks(this.rpc);
+        return;
+      case 'failure':
+        reportCoreFailure(event);
         return;
       case 'session_ended':
         reportSessionFailure('session_ended', undefined, event.reason);

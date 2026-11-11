@@ -15,6 +15,7 @@ domain! {
     reorder,
     set_selection,
     disable_room,
+    account_room,
     backup,
     check_backup,
     restore_backup,
@@ -36,6 +37,7 @@ impl Handler for ListParams {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct SaveParams {
     pub persona: PersonaView,
+    pub base_persona: PersonaView,
     #[serde(default)]
     pub previous_id: Option<String>,
 }
@@ -83,6 +85,9 @@ pub struct SetSelectionParams {
     #[serde(default)]
     pub room_id: Option<OwnedRoomId>,
     pub persona_id: Option<String>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
+    #[serde(default)]
+    pub alternate_avatar_id: Option<String>,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     #[serde(default)]
     pub valid_until: Option<u64>,
@@ -109,6 +114,21 @@ impl Handler for DisableRoomParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         core.disable_room_personas(self).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct AccountRoomParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+}
+
+impl Handler for AccountRoomParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.account_room_personas(self).await
     }
 }
 

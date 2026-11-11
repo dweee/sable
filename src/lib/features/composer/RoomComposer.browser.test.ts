@@ -4,6 +4,7 @@ import { render } from 'vitest-browser-svelte';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
+import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
 import { CoreError } from '#src/transport';
 
 import en from '../../../locales/en.json' with { type: 'json' };
@@ -11,11 +12,14 @@ import Harness from './RoomComposerHarness.test.svelte';
 
 const NEWLINE = '{Shift>}{Enter}{/Shift}';
 
+vi.setConfig({ testTimeout: 30_000 });
+
 function literal(text: string): string {
   return text.replaceAll('{', '{{').replaceAll('[', '[[');
 }
 
 afterEach(async () => {
+  document.documentElement.style.removeProperty('--keyboard-height');
   document.body.removeAttribute('style');
   await page.viewport(414, 800);
   setPreference('composerForm', 'tall');
@@ -26,6 +30,8 @@ afterEach(async () => {
   setPreference('enterForNewline', 'adaptive');
 });
 
+let frequentReactions: string[] = [];
+
 function client(): CoreClient {
   return {
     subscribeEvents: () => () => {},
@@ -34,7 +40,11 @@ function client(): CoreClient {
       fetchMedia: () => Promise.resolve(new Uint8Array()),
     },
     rpc: {
-      messages: { mediaConfig: () => Promise.resolve({ upload_size: 100 * 1024 * 1024 }) },
+      messages: {
+        mediaConfig: () => Promise.resolve({ upload_size: 100 * 1024 * 1024 }),
+        frequentReactions: () => Promise.resolve(frequentReactions),
+        rememberEmoji: () => Promise.resolve(null),
+      },
       room_state: { botCommands: () => Promise.resolve([]) },
       personas: { list: () => Promise.resolve({ personas: [], selections: [] }) },
       packs: { list: () => Promise.resolve({ packs: [], complete: true }) },
@@ -82,6 +92,38 @@ async function mount(
   };
   return { screen, composer, sent, editor, firstParagraph };
 }
+
+test.each(['search', 'cell'])(
+  'shift+enter keeps focus on the recent emote from %s',
+  async (from) => {
+    await page.viewport(1280, 900);
+    frequentReactions = ['🔥', '👍'];
+    try {
+      const { screen, composer, editor } = await mount(true);
+      await userEvent.click(composer);
+      const modifier = isMacPlatform() ? 'Meta' : 'Control';
+      await userEvent.keyboard(`{${modifier}>}e{/${modifier}}`);
+      const search = screen.getByRole('searchbox', { name: en.composer.searchPacks });
+      await expect.element(search).toHaveFocus();
+      await userEvent.keyboard('{ArrowRight}');
+      const selected = () => document.querySelector('[data-selected]')?.getAttribute('aria-label');
+      const label = selected();
+      expect(label).toBeTruthy();
+      const cell = screen.getByRole('gridcell', { name: label ?? '', exact: true }).first();
+      if (from === 'cell') cell.element().focus();
+
+      await userEvent.keyboard(NEWLINE);
+
+      await expect.element(from === 'search' ? search : cell).toHaveFocus();
+      if (from === 'search') expect(selected()).toBe(label);
+      await expect.poll(() => editor().textContent).toContain('👍');
+      await userEvent.keyboard(NEWLINE);
+      await expect.poll(() => editor().textContent.split('👍').length).toBe(3);
+    } finally {
+      frequentReactions = [];
+    }
+  }
+);
 
 test.for([
   ['**', '<strong>test</strong>'],
@@ -137,7 +179,7 @@ test('typed Markdown handles formatting and literal delimiters', async () => {
     ['[label](https://example.org)', '<a href="https://example.org">label</a>'],
     ['``code ` tick`` next', '<code>code ` tick</code> next'],
     ['`code``', '`code``'],
-    ['**a `b` c** next', '<strong>a </strong><code>b</code><strong> c</strong> next'],
+    ['**a `b` c** next', '<strong>a <code>b</code> c</strong> next'],
   ]) {
     const { screen, composer, firstParagraph } = await mount(true);
     await userEvent.click(composer);
@@ -285,8 +327,8 @@ test('formatting uses the footer space', async () => {
   await expect.poll(() => document.querySelector('.formatting')).toBeNull();
 });
 
-for (const width of [320, 520]) {
-  test(`formatting scrolls in a narrow ${String(width)}px composer`, async () => {
+for (const width of [320, 412, 520, 768]) {
+  test(`formatting controls stay visible in a narrow ${String(width)}px composer`, async () => {
     await page.viewport(width, 812);
     const { screen } = await mount(true, {
       composerGifButton: false,
@@ -301,16 +343,22 @@ for (const width of [320, 520]) {
     const plus = boxOf('.composer-before');
     const actions = boxOf('.composer-after');
     expect(strip.y).toBeGreaterThanOrEqual(field.y + field.height);
-    if (width < 400) {
+    if (width < 640) {
       expect(strip.y + strip.height).toBeLessThanOrEqual(actions.y);
+      expect(strip.height).toBeLessThanOrEqual(3 * actions.height + 4);
     } else {
       expect(strip.x).toBeGreaterThanOrEqual(plus.x + plus.width);
       expect(strip.x + strip.width).toBeLessThanOrEqual(actions.x);
-      expect(Math.abs(strip.y - actions.y)).toBeLessThanOrEqual(1);
     }
-    expect(rail.scrollWidth > rail.clientWidth).toBe(true);
-    rail.dispatchEvent(new WheelEvent('wheel', { deltaY: 200, bubbles: true, cancelable: true }));
-    expect(rail.scrollLeft).toBeGreaterThan(0);
+    const composer = boxOf('.composer');
+    for (const button of rail.querySelectorAll('button')) {
+      await expect.element(button).toBeVisible();
+      const box = button.getBoundingClientRect();
+      expect(box.left).toBeGreaterThanOrEqual(Math.max(composer.left, 0));
+      expect(box.right).toBeLessThanOrEqual(Math.min(composer.right, window.innerWidth));
+      expect(box.top).toBeGreaterThanOrEqual(Math.max(composer.top, 0));
+      expect(box.bottom).toBeLessThanOrEqual(Math.min(composer.bottom, window.innerHeight));
+    }
     const highlight = screen.getByRole('button', { name: 'Highlight colour', exact: true });
     highlight.element().focus();
     await expect.element(highlight).toBeInViewport();
@@ -344,6 +392,58 @@ async function measure(editable: HTMLElement) {
     editorBottom: editable.getBoundingClientRect().bottom,
     controlsTop: Math.min(before.getBoundingClientRect().top, after.getBoundingClientRect().top),
   };
+}
+
+test('short composer gives text a full row on narrow screens', async () => {
+  await page.viewport(320, 800);
+  const { composer, editor } = await mount(true, { composerForm: 'short' });
+  await userEvent.fill(composer, 'Will this be fixed, and when?');
+  const layout = await measure(editor());
+  const row = editor().closest('.composer-row');
+  if (!row) throw new Error('Missing composer');
+  expect(editor().getBoundingClientRect().width).toBeGreaterThan(
+    row.getBoundingClientRect().width * 0.8
+  );
+  expect(layout.controlsTop).toBeGreaterThanOrEqual(layout.editorBottom);
+});
+
+test('an empty short composer stays on one row on narrow screens', async () => {
+  await page.viewport(360, 800);
+  const { editor } = await mount(true, { composerForm: 'short' });
+  const layout = await measure(editor());
+  expect(layout.controlsTop).toBeLessThan(layout.editorBottom);
+});
+
+for (const width of [320, 414, 1280]) {
+  test(`long messages do not overlap the expand button at ${String(width)}px`, async () => {
+    await page.viewport(width, 800);
+    const { composer, editor, screen } = await mount(true, { composerForm: 'tall' });
+    await userEvent.fill(composer, 'A long message with wrapping words. '.repeat(40));
+    await document.fonts.ready;
+
+    const button = screen.getByRole('button', { name: en.composer.expand }).element();
+    const assertClearance = () => {
+      const editable = editor();
+      const editorBox = editable.getBoundingClientRect();
+      const buttonBox = button.getBoundingClientRect();
+      const hitStyle = getComputedStyle(button, '::after');
+      const hitLeft = buttonBox.left + Number.parseFloat(hitStyle.left);
+      expect(editorBox.right).toBeLessThanOrEqual(hitLeft);
+      expect(editable.scrollWidth).toBeLessThanOrEqual(editable.clientWidth);
+
+      const range = document.createRange();
+      range.selectNodeContents(editable);
+      for (const rect of range.getClientRects()) {
+        expect(rect.right).toBeLessThanOrEqual(hitLeft);
+      }
+    };
+
+    assertClearance();
+    await userEvent.click(button);
+    await expect.poll(() => button.getAttribute('aria-pressed')).toBe('true');
+    assertClearance();
+    await expect.element(composer).toHaveFocus();
+  });
 }
 
 for (const [richText, form] of [

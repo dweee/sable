@@ -1,3 +1,6 @@
+use sable_model::color::is_hex_color;
+use sable_model::text::visible_name;
+
 use matrix_sdk::ruma::OwnedUserId;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 
@@ -73,9 +76,7 @@ pub(crate) fn profile_hex_color(value: Option<&serde_json::Value>) -> Option<Str
 }
 
 fn hex_color(color: String) -> Option<String> {
-    let digits = color.strip_prefix('#').unwrap_or_default();
-    (matches!(digits.len(), 3 | 6) && digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
-        .then_some(color)
+    is_hex_color(&color, &[3, 6]).then_some(color)
 }
 
 /// A structured field reads as its default unless it is an object.
@@ -292,14 +293,22 @@ fn profile_extra(response: &ProfileResponse) -> Vec<ProfileFieldView> {
 pub(crate) fn profile_view(user_id: OwnedUserId, response: &ProfileResponse) -> ProfileView {
     let (name_color_light, name_color_dark) = profile_name_colors(response);
 
+    let real_name = response
+        .get_static::<DisplayName>()
+        .ok()
+        .flatten()
+        .and_then(visible_name);
+    let real_avatar_url = response
+        .get_static::<AvatarUrl>()
+        .ok()
+        .flatten()
+        .map(|url| url.to_string());
     ProfileView {
         user_id,
-        display_name: response.get_static::<DisplayName>().ok().flatten(),
-        avatar_url: response
-            .get_static::<AvatarUrl>()
-            .ok()
-            .flatten()
-            .map(|url| url.to_string()),
+        display_name: real_name.clone(),
+        avatar_url: real_avatar_url.clone(),
+        real_name,
+        real_avatar_url,
         bio: profile_bio(response),
         hero_color: profile_hero_color(response),
         hero_brightness: profile_hero_brightness(response),
@@ -334,6 +343,19 @@ mod tests {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<ProfileResponse>();
         profile_view("@me:example.org".try_into().unwrap(), &response)
+    }
+
+    #[test]
+    fn hidden_names_have_no_profile_name() {
+        for name in ["", "   ", "\u{200b}\u{2800}\u{feff}"] {
+            assert_eq!(view(&json!({ "displayname": name })).display_name, None);
+        }
+        assert_eq!(
+            view(&json!({ "displayname": " Élodie " }))
+                .display_name
+                .as_deref(),
+            Some(" Élodie ")
+        );
     }
 
     #[test]

@@ -1,45 +1,18 @@
 // These shapes must track TimelineItemContentView in src/generated/protocol.ts; the app
 // reads content.html, so a body-only override renders the previous text.
 import type { TimelineItemView } from '#src/generated/protocol';
+import { timelineItem as makeTimelineItem } from '../../../src/lib/features/room/timeline/test-items';
 
 import { withRowFields } from '../../../src/lib/features/room/timeline/row-fixtures';
 
 export { withRowFields };
 
-export function timelineItem(id: string, body: string): TimelineItemView {
-  return withRowFields({
-    id,
-    event_id: `$${id}:example.test`,
-    transaction_id: null,
-    send_state: null,
+export const timelineItem = (id: string, body: string): TimelineItemView =>
+  makeTimelineItem(id, body, {
+    eventId: `$${id}:example.test`,
     sender: '@alice:example.test',
-    sender_name: 'Alice',
-    sender_avatar: null,
     timestamp: 1_700_000_000_000,
-    content: {
-      kind: 'message',
-      body,
-      html: body,
-      emote: false,
-      notice: false,
-      edited: false,
-      jumbo: null,
-    },
-    in_reply_to: null,
-    thread_root: null,
-    thread_summary: null,
-    reactions: [],
-    is_own: false,
-    read_by: [],
-    read_timestamps: {},
-    per_message_profile: null,
-    bundled_link_previews: [],
-    link_previews_removed: null,
-    mention: 'none',
-    forwarded: null,
-    forum_title: null,
   });
-}
 
 export function readMarkerItem(id: string): TimelineItemView {
   return withRowFields({
@@ -69,6 +42,7 @@ export function timelineImage(id: string): TimelineItemView {
       caption: null,
       html: null,
       source: 'mxc://example.test/history-image',
+      external_url: null,
       mime: 'image/png',
       size: null,
       blurhash: null,
@@ -111,6 +85,7 @@ export function timelineWideImageWithoutDimensions(id: string): TimelineItemView
       caption: null,
       html: null,
       source: JSON.stringify({ Plain: 'mxc://example.test/wide-history-image' }),
+      external_url: null,
       mime: 'image/png',
       size: null,
       blurhash: null,

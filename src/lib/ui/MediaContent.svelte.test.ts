@@ -93,9 +93,8 @@ test('renders the extension badge and human-readable size for a file attachment'
 
   await settle();
 
-  expect(screen.getByText('zip')).toHaveClass('media-file-ext');
   expect(screen.getByText('1.5 MB')).toHaveClass('media-file-size');
-  expect(screen.getByText('Download (1.5 MB)')).toBeInTheDocument();
+  expect(screen.getByText('Download')).toBeInTheDocument();
 });
 
 test('offers a PDF as a file plus a preview that opens the viewer', async () => {
@@ -193,6 +192,36 @@ test('falls back to the plain audio player when there is no waveform', async () 
 
   expect(document.querySelector('.voice-message-player')).toBeNull();
   expect(document.querySelector('.audio-container')).not.toBeNull();
+  expect(screen.getByRole('button', { name: 'Play clip.ogg' })).toBeInTheDocument();
+  expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute(
+    'aria-valuetext',
+    '00:00 / XX:XX'
+  );
+});
+
+test('audio file volume popover sets and remembers the volume', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
+  const props = {
+    kind: 'audio' as const,
+    source: 'mxc://example.org/audio-volume',
+    mime: 'audio/ogg',
+    filename: 'clip.ogg',
+    waveform: null,
+  };
+  const first = render(MediaContent, { props });
+  await settle();
+
+  await userEvent.click(screen.getByRole('button', { name: 'Volume' }));
+  const slider = await screen.findByRole('slider', { name: 'Volume' });
+  slider.focus();
+  await userEvent.keyboard('{ArrowLeft}');
+  expect(document.querySelector('audio')?.volume).toBe(0.95);
+
+  first.unmount();
+  render(MediaContent, { props: { ...props, source: 'mxc://example.org/audio-volume-2' } });
+  await settle();
+
+  expect(document.querySelector('audio')?.volume).toBe(0.95);
 });
 
 test('labels unavailable attachments', async () => {
@@ -290,6 +319,29 @@ test.each([
   }
 );
 
+test('a video the platform cannot decode offers a download instead', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
+  render(MediaContent, {
+    props: {
+      kind: 'video',
+      source: 'mxc://example.org/hevc',
+      mime: 'video/mp4',
+      filename: 'clip.mp4',
+    },
+  });
+
+  await settle();
+  await userEvent.click(screen.getByRole('button', { name: /^Play / }));
+  await settle();
+
+  document.querySelector('video')?.dispatchEvent(new Event('error'));
+  await settle();
+
+  expect(document.querySelector('video')).toBeNull();
+  expect(screen.getByText(/can't be played on this device/)).toBeTruthy();
+  expect(document.querySelector('a[download="clip.mp4"]')).not.toBeNull();
+});
+
 test('voice message speed button cycles the playback rate', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
   render(MediaContent, {
@@ -310,21 +362,4 @@ test('voice message speed button cycles the playback rate', async () => {
   await userEvent.click(button);
   expect(button).toHaveTextContent('1.25×');
   expect(audio?.playbackRate).toBe(1.25);
-});
-
-test('badges an office document by its file extension, not its long MIME subtype', async () => {
-  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
-  render(MediaContent, {
-    props: {
-      kind: 'file',
-      source: 'mxc://example.org/doc',
-      mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      filename: 'test-file.docx',
-      size: 17_000,
-    },
-  });
-
-  await settle();
-
-  expect(screen.getByText('docx')).toHaveClass('media-file-ext');
 });

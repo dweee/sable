@@ -1,12 +1,18 @@
+import { attachmentBytes } from '../transport/attachment-bytes';
+import { transportFailure } from '../transport';
 import { createRpc } from '#src/generated/protocol';
 import type { RpcError, RpcResult, CoreEvent, SubscriptionId, Rpc } from '#src/generated/protocol';
-import type { WorkerMessage, WorkerRequest } from './protocol';
+import type { WasmDebugImage, WorkerMessage, WorkerRequest } from './protocol';
 import { TimelineEventRouter } from './timeline-event-router';
+import { readCoreLine } from '../lib/observability/wasm-log';
 
 const logFlushMs = 250;
 const logBufferLimit = 500;
-const syncStopDelayMs = 3_000;
 const logLevelPrefix = /^\s*(TRACE|DEBUG|INFO|WARN|ERROR)\s/;
+
+function startsLogEntry(line: string): boolean {
+  return readCoreLine(line).reported || logLevelPrefix.test(line);
+}
 
 export type WorkerCore = {
   call(method: string, params: string): Promise<string>;
@@ -18,8 +24,9 @@ export type WorkerCore = {
   ): Promise<Uint8Array>;
   forgetMedia(source: string): Promise<void>;
   sendAttachment(request: string, bytes: Uint8Array<ArrayBuffer>): Promise<void>;
-  sendGallery(request: string, items: string): Promise<void>;
+  sendGallery(request: string, bytes: Uint8Array<ArrayBuffer>): Promise<void>;
   uploadMedia(mime: string, bytes: Uint8Array<ArrayBuffer>): Promise<string>;
+  rtcData(sessionId: string, frame: Uint8Array<ArrayBuffer>): Promise<Uint8Array>;
   setActive(active: boolean): Promise<void>;
 };
 
@@ -30,42 +37,76 @@ export type WorkerPort = {
   start(): void;
 };
 
+/** The core rejects with the protocol payload: a bare string from the wasm build, an Error carrying it from the native one. */
+function rejectionPayload(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  return typeof cause === 'string' ? cause : '';
+}
+
 /** Owns page ports and enforces timeline subscription ownership at the worker boundary. */
 export function createCoreWorkerBoundary(
   core: Promise<WorkerCore>,
   setLogCapture: (enabled: boolean) => void = () => {},
   terminate: () => void = () => {},
   setLogFilter: (filter: string) => void = () => {},
-  stop: () => Promise<void> = () => Promise.resolve()
+  stop: () => Promise<void> = () => Promise.resolve(),
+  onCall: (method: string, elapsedMs: number) => void = () => {}
 ) {
+  async function timedCall(instance: WorkerCore, method: string, params: string): Promise<string> {
+    const started = performance.now();
+    try {
+      return await instance.call(method, params);
+    } finally {
+      onCall(method, performance.now() - started);
+    }
+  }
+
   const ports = new Set<WorkerPort>();
-  const hiddenPorts = new Set<WorkerPort>();
+  const visibility = new Map<WorkerPort, boolean>();
+  let foreground: boolean | undefined;
+  let foregroundTask = Promise.resolve();
   const timelineEvents = new TimelineEventRouter<WorkerPort>();
   let panic: string | null = null;
   let logs: string[] = [];
   let droppedLogs = 0;
   let flushLogsTimer: ReturnType<typeof setTimeout> | undefined;
-  let stopSyncTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function applyActivity(): void {
-    const active = ports.size > hiddenPorts.size;
-    if (stopSyncTimer !== undefined) clearTimeout(stopSyncTimer);
-    stopSyncTimer = undefined;
-    const apply = (): void => {
-      void core
-        .then((instance) => instance.setActive(active))
-        .catch((error: unknown) => {
-          console.debug('[sable worker] sync activity not applied', error);
-        });
-    };
-    if (active) apply();
-    else stopSyncTimer = setTimeout(apply, syncStopDelayMs);
+  // Hiding never stops sync: background tabs must keep notifying (#1142).
+  function resumeSync(): void {
+    void core
+      .then((instance) => instance.setActive(true))
+      .catch((error: unknown) => {
+        console.debug('[sable worker] sync activity not applied', error);
+      });
+  }
+
+  function anyVisible(): boolean {
+    return [...visibility.values()].some(Boolean);
+  }
+
+  function updateForeground(): void {
+    const visible = anyVisible();
+    if (foreground === visible || (foreground === undefined && visibility.size === 0)) return;
+    foreground = visible;
+    foregroundTask = foregroundTask
+      .then(async () => {
+        const instance = await core;
+        await instance.call(
+          'session.set_app_in_foreground',
+          JSON.stringify({ foreground: visible })
+        );
+      })
+      .catch((error: unknown) => {
+        console.debug('[sable worker] foreground not applied', error);
+      });
   }
 
   function closePort(port: WorkerPort): void {
-    ports.delete(port);
-    hiddenPorts.delete(port);
-    if (ports.size > 0) applyActivity();
+    if (!ports.delete(port)) return;
+    visibility.delete(port);
+    port.onmessage = null;
+    port.onmessageerror = null;
+    updateForeground();
     const subscriptions = timelineEvents.removeOwner(port);
     if (subscriptions.length === 0) return;
 
@@ -93,10 +134,10 @@ export function createCoreWorkerBoundary(
     }
   }
 
-  function handlePanic(message: string, stack?: string): void {
+  function handlePanic(message: string, stack?: string, wasm?: WasmDebugImage): void {
     panic ??= message;
     broadcast({
-      panic: stack === undefined ? { message } : { message, stack },
+      panic: { message, stack, wasm },
     });
   }
 
@@ -117,12 +158,16 @@ export function createCoreWorkerBoundary(
     });
   }
 
+  function handleSpan(name: string, startMs: number, durationMs: number): void {
+    broadcast({ span: { name, startMs, durationMs } });
+  }
+
   function handleLog(text: string): void {
     const entries: string[] = [];
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       const last = entries.length - 1;
-      if (last >= 0 && !logLevelPrefix.test(line)) entries[last] += `\n${line.trimEnd()}`;
+      if (last >= 0 && !startsLogEntry(line)) entries[last] += `\n${line.trimEnd()}`;
       else entries.push(line.trimEnd());
     }
     for (const entry of entries) {
@@ -147,6 +192,15 @@ export function createCoreWorkerBoundary(
         const batch = routed.get(owner);
         if (batch) batch.push(event);
         else routed.set(owner, [event]);
+        continue;
+      }
+      // Every page reports what it receives, so a failure goes to one of them.
+      if (event.type === 'failure') {
+        const reporter = ports.values().next().value;
+        if (!reporter) continue;
+        const batch = routed.get(reporter);
+        if (batch) batch.push(event);
+        else routed.set(reporter, [event]);
         continue;
       }
       shared.push(event);
@@ -176,15 +230,13 @@ export function createCoreWorkerBoundary(
         if (ports.size !== 1) {
           port.postMessage({
             id: request.id,
-            err: {
-              code: 'failed',
-              log_id: 'close other Sable tabs before resetting the cache',
-            },
+            err: transportFailure('close other Sable tabs before resetting the cache'),
           });
           return;
         }
         closePort(port);
         // The page clears the stores once answered, so nothing may still write to them.
+        await foregroundTask;
         await stop();
         port.postMessage({ id: request.id, uri: null });
         terminate();
@@ -201,9 +253,9 @@ export function createCoreWorkerBoundary(
         return;
       }
       if ('visible' in request) {
-        if (request.visible) hiddenPorts.delete(port);
-        else hiddenPorts.add(port);
-        applyActivity();
+        visibility.set(port, request.visible);
+        updateForeground();
+        if (request.visible) resumeSync();
         return;
       }
       if ('logFilter' in request) {
@@ -220,7 +272,7 @@ export function createCoreWorkerBoundary(
       if (panic !== null) {
         port.postMessage({
           id,
-          err: { code: 'failed', log_id: `core panicked: ${panic}` },
+          err: transportFailure(`core panicked: ${panic}`),
         });
         return;
       }
@@ -251,6 +303,7 @@ export function createCoreWorkerBoundary(
             filename,
             mime,
             bytes,
+            thumbnail,
             caption,
             inReplyTo,
             silentReply,
@@ -278,7 +331,7 @@ export function createCoreWorkerBoundary(
               persona,
               spoiler,
             }),
-            bytes
+            attachmentBytes([{ bytes, thumbnail }])
           );
           port.postMessage({ id, uri: null } satisfies WorkerMessage);
           return;
@@ -294,14 +347,16 @@ export function createCoreWorkerBoundary(
             formattedCaption,
             mentions,
             mentionsRoom,
+            persona,
           } = request.gallery;
           await instance.sendGallery(
             JSON.stringify({
               room_id: roomId,
-              attachments: attachments.map(({ filename, mime, info = null }) => ({
+              attachments: attachments.map(({ filename, mime, info = null, spoiler = false }) => ({
                 filename,
                 mime,
                 info,
+                spoiler,
               })),
               caption,
               in_reply_to: inReplyTo,
@@ -310,16 +365,9 @@ export function createCoreWorkerBoundary(
               formatted_caption: formattedCaption,
               mentions,
               mentions_room: mentionsRoom,
-              persona: null,
+              persona: persona ?? null,
             }),
-            JSON.stringify(
-              attachments.map(({ filename, mime, bytes, info = null }) => ({
-                filename,
-                mime,
-                bytes: Array.from(bytes),
-                info,
-              }))
-            )
+            attachmentBytes(attachments)
           );
           port.postMessage({ id, uri: null } satisfies WorkerMessage);
           return;
@@ -330,8 +378,19 @@ export function createCoreWorkerBoundary(
           port.postMessage({ id, uri } satisfies WorkerMessage);
           return;
         }
+        if ('rtc' in request) {
+          const { sessionId, frame } = request.rtc;
+          const bytes = (await instance.rtcData(sessionId, frame)) as Uint8Array<ArrayBuffer>;
+          port.postMessage({ id, bytes } satisfies WorkerMessage, [bytes.buffer]);
+          return;
+        }
         if ('call' in request) {
           const { method } = request.call;
+          // Pages report visibility on connect; the worker owns the aggregate across tabs.
+          if (method === 'session.set_app_in_foreground') {
+            port.postMessage({ id, ok: null } satisfies WorkerMessage);
+            return;
+          }
           const params = JSON.stringify(request.call.params);
           if (method === 'timeline.paginate' || method === 'timeline.unsubscribe') {
             const { subscription } = request.call.params as {
@@ -351,7 +410,7 @@ export function createCoreWorkerBoundary(
               if (!ports.has(port)) return;
               timelineEvents.begin(port);
               pendingTimeline = true;
-              const ok = JSON.parse(await instance.call(method, params)) as RpcResult<
+              const ok = JSON.parse(await timedCall(instance, method, params)) as RpcResult<
                 Rpc['timeline']['subscribe']
               >;
               if (typeof ok.subscription !== 'number')
@@ -372,7 +431,7 @@ export function createCoreWorkerBoundary(
             }
             throw new Error('Timeline startup overflowed; retry opening the room');
           }
-          const ok: unknown = JSON.parse(await instance.call(method, params));
+          const ok: unknown = JSON.parse(await timedCall(instance, method, params));
           if (method === 'timeline.unsubscribe') {
             timelineEvents.release(
               (request.call.params as { subscription: SubscriptionId }).subscription
@@ -385,23 +444,27 @@ export function createCoreWorkerBoundary(
         if (pendingTimeline) {
           timelineEvents.cancelPending(port);
         }
-        let err: RpcError = { code: 'failed', log_id: String(cause) };
-        if (typeof cause === 'string') {
+        const payload = rejectionPayload(cause);
+        let err = transportFailure(payload || String(cause));
+        if (payload) {
           try {
-            err = JSON.parse(cause) as RpcError;
+            err = JSON.parse(payload) as RpcError;
           } catch {
             console.error('[sable worker] core rejected with a non-protocol error', cause);
           }
         }
-        port.postMessage({ id, err });
+        if (ports.has(port)) port.postMessage({ id, err });
       }
     };
     port.start();
   }
 
-  function handleOnline(): void {
-    if (ports.size > hiddenPorts.size) applyActivity();
-  }
-
-  return { connect, handleEvent, handleLog, handlePanic, handleSuperseded, handleOnline };
+  return {
+    connect,
+    handleEvent,
+    handleLog,
+    handleSpan,
+    handlePanic,
+    handleSuperseded,
+  };
 }

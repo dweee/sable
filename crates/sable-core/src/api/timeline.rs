@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use matrix_sdk::room::{ListThreadsOptions, Receipts};
 use matrix_sdk::ruma::api::Direction;
@@ -6,13 +7,16 @@ use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::api::client::room::get_event_by_timestamp;
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId, UInt};
+use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, UInt};
 use matrix_sdk_base::read_receipts::ReadReceipts;
 use matrix_sdk_ui::timeline::{RoomExt, TimelineFocus};
 use serde::{Deserialize, Serialize};
 
 use super::{Handler, Json};
-use crate::protocol::{RpcError, EditVersionView, PaginationDirection, PinReadStateView, RelationsView, RoomListItemView, SubscriptionId, TimelineItemView};
+use crate::protocol::{
+    EditVersionView, PaginationDirection, PinReadStateView, RelationsView, RoomListItemView,
+    RoomListOptionsView, RpcCode, RpcError, SubscriptionId, TimelineItemView,
+};
 use crate::thread_receipts::thread_receipts;
 use crate::timelines::receipt_thread_root;
 use crate::widgets::RelationsFilter;
@@ -20,6 +24,7 @@ use crate::{Core, ResultExt, SubscriptionKind, view};
 
 domain! {
     subscribe_room_list,
+    set_room_list_options,
     subscribe,
     unsubscribe,
     warm_rooms,
@@ -36,7 +41,6 @@ domain! {
     mark_unread,
     read_marker,
     unread_diagnostics,
-    retry_decryption,
     room_event_relations,
     pinned_events,
     set_pinned,
@@ -60,9 +64,12 @@ pub enum TimelineFocusView {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct SubscribeRoomListParams {}
+pub struct SubscribeRoomListParams {
+    #[serde(default)]
+    pub options: RoomListOptionsView,
+}
 
 /// The snapshot. Everything after it carries the same `subscription`.
 #[derive(Debug, Serialize)]
@@ -76,7 +83,22 @@ impl Handler for SubscribeRoomListParams {
     type Ok = SubscribeRoomListOk;
 
     async fn run(self, core: &Arc<Core>) -> Result<SubscribeRoomListOk, RpcError> {
-        core.subscribe_room_list().await
+        core.subscribe_room_list(self.options).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetRoomListOptionsParams {
+    pub options: RoomListOptionsView,
+}
+
+impl Handler for SetRoomListOptionsParams {
+    type Ok = ();
+
+    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
+        core.room_list_options.send_replace(self.options);
+        std::future::ready(Ok(()))
     }
 }
 
@@ -122,7 +144,7 @@ impl Handler for UnsubscribeParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let mut subscribed = core.room_subscriptions.lock().await;
         let Some(removed) = core.subscriptions.lock().await.remove(&self.subscription) else {
-            return Err(RpcError::UnknownSubscription);
+            return Err(RpcCode::UnknownSubscription.into());
         };
         let has_room = !matches!(removed.kind, SubscriptionKind::Other);
         drop(removed);
@@ -186,9 +208,9 @@ impl Handler for PaginateParams {
                     )
                 })
             })
-            .ok_or(RpcError::UnknownSubscription)?;
+            .ok_or(RpcCode::UnknownSubscription)?;
         if matches!(direction, PaginationDirection::Forward) && !focused {
-            return Err(RpcError::InvalidPaginationDirection);
+            return Err(RpcCode::InvalidPaginationDirection.into());
         }
         if matches!(direction, PaginationDirection::Forward) && thread {
             return Ok(PaginateOk {
@@ -309,7 +331,7 @@ impl Handler for TimestampToEventParams {
         match core.client().await?.send(request).await {
             Ok(response) => Ok(Some(response.event_id.to_string())),
             Err(error) if error.client_api_error_kind() == Some(&ErrorKind::NotFound) => Ok(None),
-            Err(error) => Err(core.homeserver_http_error("timestamp_to_event", error)),
+            Err(error) => Err(core.rpc_error("timestamp_to_event", &error)),
         }
     }
 }
@@ -342,14 +364,14 @@ impl Handler for ListThreadsParams {
         let threads = room
             .list_threads(options)
             .await
-            .map_err(|error| core.room_error("list_threads", error))?;
+            .or_failed(core, "list_threads")?;
 
         let push = room.push_context().await.ok().flatten();
         let roots = futures_util::future::join_all(
             threads
                 .chunk
                 .into_iter()
-                .map(|event| view::standalone_item(&room, event, None, push.as_ref())),
+                .map(|event| view::standalone_item(core, &room, event, None, push.as_ref())),
         )
         .await
         .into_iter()
@@ -379,19 +401,21 @@ pub struct EventSourceOk {
     pub source: String,
     pub encrypted: bool,
     pub original: Option<String>,
+    pub encryption: Option<String>,
 }
 
 impl Handler for EventSourceParams {
     type Ok = EventSourceOk;
 
     async fn run(self, core: &Arc<Core>) -> Result<EventSourceOk, RpcError> {
-        let (source, encrypted, original) = core
+        let (source, encrypted, original, encryption) = core
             .event_source(&self.room_id, &self.event_id, self.include_original)
             .await?;
         Ok(EventSourceOk {
             source,
             encrypted,
             original,
+            encryption,
         })
     }
 }
@@ -422,8 +446,6 @@ pub struct MarkReadParams {
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub event_id: Option<OwnedEventId>,
     #[serde(default)]
-    pub private_receipt: bool,
-    #[serde(default)]
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub thread_root: Option<OwnedEventId>,
     #[serde(default)]
@@ -432,11 +454,27 @@ pub struct MarkReadParams {
     pub fully_read: bool,
 }
 
+fn receipt_sent<T>(core: &Core, result: matrix_sdk::Result<T>) -> Result<(), RpcError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.client_api_error_kind(),
+                Some(ErrorKind::NotFound | ErrorKind::InvalidParam)
+            ) =>
+        {
+            tracing::info!(context = "mark_read", "the receipt target is gone");
+            Ok(())
+        }
+        Err(error) => Err(core.failed_with("mark_read", &error)),
+    }
+}
+
 impl Handler for MarkReadParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let receipt_type = if self.private_receipt {
+        let receipt_type = if core.private_receipts.load(Ordering::Relaxed) {
             ReceiptType::ReadPrivate
         } else {
             ReceiptType::Read
@@ -452,10 +490,8 @@ impl Handler for MarkReadParams {
                 .build()
                 .await
                 .or_failed(core, "build_mark_read_timeline")?;
-            timeline
-                .mark_as_read(receipt_type.clone())
-                .await
-                .or_failed(core, "mark_read")?;
+            receipt_sent(core, timeline
+                .mark_as_read(receipt_type.clone()).await)?;
             let main = room
                 .timeline_builder()
                 .with_focus(TimelineFocus::Live {
@@ -464,13 +500,11 @@ impl Handler for MarkReadParams {
                 .build()
                 .await
                 .or_failed(core, "build_mark_read_timeline")?;
-            main.mark_as_read(receipt_type)
-                .await
-                .or_failed(core, "mark_read")?;
-            timeline
-                .mark_as_read(ReceiptType::FullyRead)
-                .await
-                .or_failed(core, "mark_read")?;
+            receipt_sent(core, main.mark_as_read(receipt_type).await)?;
+            if self.fully_read {
+                receipt_sent(core, timeline
+                    .mark_as_read(ReceiptType::FullyRead).await)?;
+            }
             return Ok(());
         };
 
@@ -483,15 +517,11 @@ impl Handler for MarkReadParams {
             core.timeline_for(&self.room_id, thread_root.as_ref())
                 .await?
         };
-        timeline
-            .send_single_receipt(receipt_type, event_id.clone())
-            .await
-            .or_failed(core, "mark_read")?;
+        receipt_sent(core, timeline
+            .send_single_receipt(receipt_type, event_id.clone()).await)?;
         if self.fully_read && thread_root.is_none() {
-            timeline
-                .send_multiple_receipts(Receipts::new().fully_read_marker(event_id))
-                .await
-                .or_failed(core, "mark_read")?;
+            receipt_sent(core, timeline
+                .send_multiple_receipts(Receipts::new().fully_read_marker(event_id)).await)?;
         }
         Ok(())
     }
@@ -514,7 +544,7 @@ impl Handler for SetFullyReadParams {
             .await?
             .send_multiple_receipts(Receipts::new().fully_read_marker(self.event_id))
             .await
-            .map_err(|error| core.room_error("set_fully_read", error))
+            .or_failed(core, "set_fully_read")
     }
 }
 
@@ -537,12 +567,12 @@ impl Handler for MarkUnreadParams {
         if let Some(event_id) = self.read_marker {
             room.send_multiple_receipts(Receipts::new().fully_read_marker(event_id))
                 .await
-                .map_err(|error| core.room_error("mark_unread_marker", error))?;
+                .or_failed(core, "mark_unread_marker")?;
         }
 
         room.set_unread_flag(true)
             .await
-            .map_err(|error| core.room_error("mark_unread", error))
+            .or_failed(core, "mark_unread")
     }
 }
 
@@ -558,10 +588,10 @@ impl Handler for ReadMarkerParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<Option<String>, RpcError> {
         let room = core.room(&self.room_id).await?;
-        let fully_read = room
-            .account_data_static::<FullyReadEventContent>()
+        let fully_read = core
+            .with_open_stores(async || room.account_data_static::<FullyReadEventContent>().await)
             .await
-            .map_err(|error| core.room_error("read_marker", error))?
+            .or_failed(core, "read_marker")?
             .and_then(|raw| raw.deserialize().ok())
             .map(|event| event.content.event_id);
         let event_id = fully_read.or_else(|| {
@@ -576,6 +606,9 @@ impl Handler for ReadMarkerParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct UnreadDiagnosticsParams {
+    #[serde(default)]
+    #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
+    pub thread_roots: Vec<OwnedEventId>,
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub room_id: OwnedRoomId,
 }
@@ -628,12 +661,22 @@ impl Handler for UnreadDiagnosticsParams {
     async fn run(self, core: &Arc<Core>) -> Result<UnreadDiagnosticsView, RpcError> {
         let room = core.room(&self.room_id).await?;
         let server = room.unread_notification_counts();
+        let mut threads = thread_receipts(&room)
+            .await
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if let Some(cache) = room.client().event_cache() {
+            for root in self.thread_roots {
+                if let Ok(Some(info)) = cache.thread_info(room.room_id(), &root).await {
+                    threads.insert(root, info.read_receipts);
+                }
+            }
+        }
         Ok(UnreadDiagnosticsView {
             main: read_diagnostics(&room.read_receipts()),
             server_notifications: count(server.notification_count),
             server_highlights: count(server.highlight_count),
-            threads: thread_receipts(&room)
-                .await
+            threads: threads
                 .into_iter()
                 .map(|(root, receipts)| ThreadReadDiagnostics {
                     root_event_id: root.to_string(),
@@ -641,41 +684,6 @@ impl Handler for UnreadDiagnosticsParams {
                 })
                 .collect(),
         })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct RetryDecryptionParams {
-    #[cfg_attr(feature = "typegen", specta(type = String))]
-    pub room_id: OwnedRoomId,
-    pub session_id: String,
-    #[cfg_attr(feature = "typegen", specta(type = String))]
-    pub sender: OwnedUserId,
-    #[serde(default)]
-    #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
-    pub thread_root: Option<OwnedEventId>,
-}
-
-impl Handler for RetryDecryptionParams {
-    type Ok = ();
-
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let sender = self.sender;
-        let timeline = core
-            .timeline_for(&self.room_id, self.thread_root.as_ref())
-            .await?;
-        if let Err(error) = core
-            .client()
-            .await?
-            .encryption()
-            .request_user_identity(&sender)
-            .await
-        {
-            tracing::warn!(%error, %sender, "refreshing sender identity before decryption retry failed");
-        }
-        timeline.retry_decryption([self.session_id]).await;
-        Ok(())
     }
 }
 

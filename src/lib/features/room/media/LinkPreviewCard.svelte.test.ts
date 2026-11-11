@@ -9,7 +9,11 @@ import type { UrlPreviewView } from '#src/generated/protocol';
 
 vi.mock('#lib/core/context.js');
 vi.mock('#lib/config/runtime-config.js', () => ({
-  runtimeConfig: () => Promise.resolve({ embeds: { serviceUrl: 'https://embeds.test' } }),
+  runtimeConfig: () =>
+    Promise.resolve({
+      embeds: { serviceUrl: 'https://embeds.test' },
+      gifs: { klipyApiKey: null },
+    }),
 }));
 
 import { core as baseCore } from '#lib/core/__mocks__/context.js';
@@ -22,9 +26,11 @@ Object.assign(core.rpc.messages, {
 
 import LinkPreviewCard from './LinkPreviewCard.svelte';
 import LinkPreviewCardMediaHarness from './LinkPreviewCardMediaHarness.test.svelte';
-import type { StandaloneMedia } from './media-viewer-opener.svelte.js';
+import LinkPreviewCardTooltipHarness from './LinkPreviewCardTooltipHarness.test.svelte';
+import { previewWhitelistEntry } from './link-preview.js';
 import { mediaPreviewSettings } from '#lib/settings/media-previews.svelte.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
 
 function preview(overrides: Partial<UrlPreviewView> = {}): UrlPreviewView {
   return {
@@ -40,6 +46,7 @@ function preview(overrides: Partial<UrlPreviewView> = {}): UrlPreviewView {
     theme_color: null,
     card: null,
     author_name: null,
+    post: null,
     ...overrides,
   };
 }
@@ -50,7 +57,9 @@ afterEach(() => {
   preferences.encryptedUrlPreviews = false;
   preferences.clientEmbeds = false;
   preferences.encryptedClientEmbeds = false;
+  preferences.autoplayGifs = true;
   vi.restoreAllMocks();
+  mediaViewerState.close();
 });
 
 test('renders the resolved preview as a link', async () => {
@@ -125,6 +134,44 @@ test('renders no bundled preview while url previews are disabled', () => {
   expect(screen.queryByRole('link')).not.toBeInTheDocument();
 });
 
+test.each([false, true])(
+  'bundled previews render with encrypted server lookups=%s',
+  async (server) => {
+    preferences.urlPreviews = !server;
+    preferences.encryptedUrlPreviews = server;
+    render(LinkPreviewCard, {
+      url: 'https://example.org/bundled-encrypted',
+      encrypted: true,
+      bundled: preview({ url: 'https://example.org/bundled-encrypted' }),
+    });
+    await tick();
+
+    expect(screen.getByRole('link', { name: 'Example' })).toBeInTheDocument();
+    expect(core.rpc.messages.urlPreview).not.toHaveBeenCalled();
+  }
+);
+
+test('a whitelist-only preview fetches metadata', async () => {
+  preferences.urlPreviews = true;
+  const url = 'https://example.org/whitelisted';
+  core.rpc.messages.urlPreview.mockResolvedValue(preview({ url }));
+  render(LinkPreviewCard, { url, encrypted: false, bundled: previewWhitelistEntry(url) });
+  await vi.waitFor(() => {
+    expect(screen.getByRole('link', { name: 'Example' })).toBeInTheDocument();
+  });
+  expect(core.rpc.messages.urlPreview).toHaveBeenCalledWith({ url, service: null });
+});
+
+test('a whitelist-only preview in an encrypted room still requires consent', async () => {
+  preferences.urlPreviews = true;
+  const url = 'https://example.org/whitelisted-private';
+  render(LinkPreviewCard, { url, encrypted: true, bundled: previewWhitelistEntry(url) });
+  await tick();
+
+  expect(core.rpc.messages.urlPreview).not.toHaveBeenCalled();
+  expect(screen.queryByRole('link')).not.toBeInTheDocument();
+});
+
 test('does nothing while url previews are disabled', async () => {
   preferences.urlPreviews = false;
   core.rpc.messages.urlPreview.mockResolvedValue(preview());
@@ -187,7 +234,9 @@ test('client-side embeds alone preview without asking the homeserver', async () 
   expect(core.rpc.messages.urlPreview).toHaveBeenCalledTimes(1);
   expect(core.rpc.messages.urlPreview).toHaveBeenCalledWith({
     url: 'https://example.org/c1',
+    client: true,
     service: 'https://embeds.test',
+    klipy_api_key: null,
   });
   expect(screen.getByRole('link', { name: /Example/ })).toBeInTheDocument();
 });
@@ -195,14 +244,21 @@ test('client-side embeds alone preview without asking the homeserver', async () 
 test('the homeserver is asked only when the client side has no answer', async () => {
   preferences.clientEmbeds = true;
   preferences.urlPreviews = true;
-  core.rpc.messages.urlPreview.mockImplementation(({ service }) =>
-    Promise.resolve(service !== null ? null : preview({ url: 'https://example.org/c2' }))
+  core.rpc.messages.urlPreview.mockImplementation(({ client }) =>
+    Promise.resolve(client ? null : preview({ url: 'https://example.org/c2' }))
   );
   render(LinkPreviewCard, { url: 'https://example.org/c2', encrypted: false });
   await settle();
 
   expect(core.rpc.messages.urlPreview.mock.calls).toEqual([
-    [{ url: 'https://example.org/c2', service: 'https://embeds.test' }],
+    [
+      {
+        url: 'https://example.org/c2',
+        client: true,
+        service: 'https://embeds.test',
+        klipy_api_key: null,
+      },
+    ],
     [{ url: 'https://example.org/c2', service: null }],
   ]);
   expect(screen.getByRole('link', { name: /Example/ })).toBeInTheDocument();
@@ -249,10 +305,55 @@ test('an image-only preview renders inline instead of as a card', async () => {
   await Promise.resolve();
   await tick();
 
-  const link = screen.getByRole('link');
-  expect(link).not.toHaveClass('link-preview');
-  expect(link).toHaveAttribute('href', 'https://media.example/anim.gif');
-  expect(link.closest('.link-preview-inline')).toBeInTheDocument();
+  const button = screen.getByRole('button', { name: 'Open anim.gif' });
+  expect(button.parentElement?.parentElement).toHaveClass('link-preview-inline');
+  expect(button.closest('.link-preview')).not.toBeInTheDocument();
+});
+
+test('an image-only preview stays mounted while its url is resolved again', async () => {
+  preferences.urlPreviews = true;
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url: 'https://media.example/anim.gif',
+      title: null,
+      description: 'anim.gif',
+      image: 'mxc://example.org/anim',
+      image_mime: 'image/gif',
+    })
+  );
+  const { rerender } = render(LinkPreviewCard, {
+    url: 'https://media.example/anim.gif',
+    encrypted: false,
+  });
+  const shown = await screen.findByRole('button', { name: 'Open anim.gif' });
+
+  await rerender({
+    url: 'https://media.example/anim.gif',
+    encrypted: false,
+    bundled: preview({ url: 'https://media.example/anim.gif', title: null }),
+  });
+
+  await tick();
+  expect(screen.getByRole('button', { name: 'Open anim.gif' })).toBe(shown);
+});
+
+test('an image-only preview unmounts cleanly when its preview is cleared', async () => {
+  preferences.urlPreviews = true;
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url: 'https://media.example/clear.gif',
+      title: null,
+      description: 'clear.gif',
+      image: 'mxc://example.org/clear',
+    })
+  );
+  render(LinkPreviewCardTooltipHarness, { url: 'https://media.example/clear.gif' });
+  await screen.findByRole('button', { name: 'Open clear.gif' });
+
+  preferences.urlPreviews = false;
+  await tick();
+
+  expect(screen.queryByRole('button', { name: 'Open clear.gif' })).not.toBeInTheDocument();
 });
 
 test('an image-only preview opens the media viewer instead of the url', async () => {
@@ -268,11 +369,9 @@ test('an image-only preview opens the media viewer instead of the url', async ()
       image_height: 240,
     })
   );
-  const opener = vi.fn<(item: StandaloneMedia) => void>();
   render(LinkPreviewCardMediaHarness, {
     url: 'https://media.example/anim.gif',
     joinRule: 'invite',
-    opener,
   });
 
   await tick();
@@ -281,22 +380,7 @@ test('an image-only preview opens the media viewer instead of the url', async ()
 
   expect(screen.queryByRole('link')).toBeNull();
   await userEvent.click(screen.getByRole('button', { name: /Open/ }));
-  expect(opener).toHaveBeenCalledWith({
-    kind: 'image',
-    filename: 'https://media.example/anim.gif',
-    caption: null,
-    html: null,
-    source: 'mxc://example.org/anim',
-    mime: 'image/gif',
-    width: 320,
-    height: 240,
-    size: null,
-    blurhash: null,
-    thumbnail: null,
-    spoiler: null,
-    animated: null,
-    sender: 'https://media.example/anim.gif',
-  });
+  expect(mediaViewerState.eventId).toBe('standalone-1');
 });
 
 test('a preview carrying a title stays a card even with an image', async () => {
@@ -401,6 +485,7 @@ test('a video-only preview plays inline without the card', async () => {
         mime: 'video/mp4',
         width: 1280,
         height: 720,
+        gif: false,
       },
     })
   );
@@ -417,6 +502,34 @@ test('a video-only preview plays inline without the card', async () => {
   expect(container.querySelector('.link-preview')).toBeNull();
 });
 
+test('a GIF poster on a video preview stays still while GIF autoplay is off', async () => {
+  preferences.urlPreviews = true;
+  preferences.autoplayGifs = false;
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url: 'https://tenor.example/view/clip',
+      image: 'mxc://example.org/poster',
+      image_mime: 'image/gif',
+      video: {
+        source: 'mxc://example.org/clip',
+        mime: 'video/mp4',
+        width: 480,
+        height: 362,
+        gif: false,
+      },
+    })
+  );
+  const { container } = render(LinkPreviewCard, {
+    url: 'https://tenor.example/view/clip',
+    encrypted: false,
+  });
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('.media-poster .gif-preview-source')).not.toBeNull();
+  });
+});
+
 test('a page with a video keeps its text under the player', async () => {
   preferences.urlPreviews = true;
   core.rpc.messages.urlPreview.mockResolvedValue(
@@ -425,10 +538,11 @@ test('a page with a video keeps its text under the player', async () => {
       title: 'A clip',
       author_name: 'someone',
       video: {
-        source: 'mxc://example.org/clip',
+        source: 'mxc://example.org/watch',
         mime: 'video/mp4',
         width: null,
         height: null,
+        gif: false,
       },
     })
   );
@@ -471,3 +585,115 @@ test('the theme colour becomes the card accent and a summary card is compact', a
   expect(card).toHaveClass('accented', 'compact');
   expect((card as HTMLElement).style.getPropertyValue('--link-preview-accent')).toBe('#ff4500');
 });
+
+test.each([
+  ['image/gif', 'https://site.example/cat.gif'],
+  ['image/webp', 'https://klipy.com/gifs/goatplaybanjo-chat-4'],
+])('a square %s GIF preview fills the card instead of a side thumbnail', async (mime, url) => {
+  preferences.clientEmbeds = true;
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url,
+      image: 'mxc://example.org/gif',
+      image_mime: mime,
+      image_width: 220,
+      image_height: 229,
+    })
+  );
+  const { container } = render(LinkPreviewCard, { url, encrypted: false });
+
+  await tick();
+  await Promise.resolve();
+  await tick();
+
+  expect(container.querySelector('.link-preview')).not.toHaveClass('compact');
+});
+
+test('a GIF card image is treated as a GIF, so it follows the autoplay setting', async () => {
+  preferences.clientEmbeds = true;
+  preferences.autoplayGifs = false;
+  const url = 'https://klipy.com/gifs/goatplaybanjo-chat-4';
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url,
+      title: 'Chatty Cat',
+      image: 'mxc://example.org/gif',
+      image_mime: 'image/webp',
+      image_width: 220,
+      image_height: 229,
+    })
+  );
+  const { container } = render(LinkPreviewCard, { url, encrypted: false });
+
+  await tick();
+  await Promise.resolve();
+  await tick();
+
+  expect(container.querySelector('.link-preview .gif-preview-source')).not.toBeNull();
+  preferences.autoplayGifs = true;
+});
+
+test('a GIF video preview loops muted without controls or a play button', async () => {
+  preferences.urlPreviews = true;
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url: 'https://giphy.example/gifs/cat',
+      image: 'mxc://example.org/poster',
+      image_mime: 'image/webp',
+      video: {
+        source: 'mxc://example.org/clip',
+        mime: 'video/mp4',
+        width: 480,
+        height: 480,
+        gif: true,
+      },
+    })
+  );
+  const { container } = render(LinkPreviewCard, {
+    url: 'https://giphy.example/gifs/cat',
+    encrypted: false,
+  });
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('video')).not.toBeNull();
+  });
+  const video = container.querySelector('video');
+  expect(video).toHaveAttribute('loop');
+  expect(video).not.toHaveAttribute('controls');
+  expect(screen.queryByRole('button', { name: /Play/ })).toBeNull();
+});
+
+test.each([
+  'https://tenor.com/view/anime-nichijou-sigh-gif-12179345',
+  'https://giphy.com/gifs/cat',
+])(
+  'a GIF host video preview autoplays muted without controls or a play button: %s',
+  async (url) => {
+    preferences.urlPreviews = true;
+    core.rpc.messages.urlPreview.mockResolvedValue(
+      preview({
+        url,
+        title: 'A gif',
+        site_name: 'Tenor',
+        image: 'mxc://example.org/poster',
+        image_mime: 'image/webp',
+        video: {
+          source: 'mxc://example.org/clip',
+          mime: 'video/mp4',
+          width: 480,
+          height: 480,
+          gif: false,
+        },
+      })
+    );
+    const { container } = render(LinkPreviewCard, { url, encrypted: false });
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('video')).not.toBeNull();
+    });
+    const video = container.querySelector('video');
+    expect(video).toHaveAttribute('loop');
+    expect(video).not.toHaveAttribute('controls');
+    expect(screen.queryByRole('button', { name: /Play/ })).toBeNull();
+  }
+);

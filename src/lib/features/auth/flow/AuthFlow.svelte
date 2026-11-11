@@ -1,10 +1,13 @@
 <script lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
+  import Button from '#lib/ui/primitives/Button.svelte';
   import QrLinkDialog from '#lib/features/qr-login/QrLinkDialog.svelte';
   import '#lib/features/auth/shared/auth-card.css';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { onMount, untrack } from 'svelte';
+  import { SvelteURLSearchParams } from 'svelte/reactivity';
   import { i18n } from '#lib/i18n.js';
   import { shouldReduceMotion } from '#lib/ui/motion.js';
   import { useCoreClient } from '#lib/core/context.js';
@@ -30,21 +33,29 @@
   import { homeservers } from '../shared/homeservers.svelte.js';
   import { takeAfterLogin } from '#lib/auth/after-login.js';
   import { readText, writeJson, writeText } from '#lib/platform/local-json.js';
+  import { afterOverlayPops } from '#lib/platform/overlay-back.svelte.js';
+  import { registrationEnabled, ssoRedirect } from '#lib/deployment/policy.js';
+  import { loginConfiguration, clearLoginConfiguration } from '#lib/deployment/deployment.js';
+  import { passwordFields } from '../shared/password-fields.svelte.js';
+  import { shouldAutoRedirect } from './auto-redirect';
 
   const core = useCoreClient();
   const isAddingAccount = page.url.searchParams.has('addAccount');
-  const stageRegistry = [
+  const canRegister = $derived(registrationEnabled(loginConfiguration()));
+  const stageRegistry = $derived([
     {
       route: resolve('login'),
       completed: true,
-      accessibilityLabel: 'auth.stageSignInLabel',
     },
-    {
-      route: resolve('register'),
-      completed: false,
-      accessibilityLabel: 'auth.stageCreateAccountLabel',
-    },
-  ];
+    ...(canRegister
+      ? [
+          {
+            route: resolve('register'),
+            completed: false,
+          },
+        ]
+      : []),
+  ]);
 
   function reauthAccountId(): string | undefined {
     const explicit = page.url.searchParams.get('reauth');
@@ -66,7 +77,9 @@
   let enteringStage = $state<number | null>(null);
   let retiringAfter = $state<number | null>(null);
   let furthestReached = $state(
-    Math.min(stageIndexForPath(page.url.pathname, stageRegistry), core.status === 'ready' ? 1 : 0)
+    untrack(() =>
+      Math.min(stageIndexForPath(page.url.pathname, stageRegistry), core.status === 'ready' ? 1 : 0)
+    )
   );
   let lastUrlPrefill = '';
   let loginPending = $state(false);
@@ -150,7 +163,7 @@
 
   let activeIndex = $derived(furthestReachableStage(requestedStage, stages));
   let hasSecondaryStage = $derived(
-    furthestReached >= 1 || core.status === 'signed-out' || isAddingAccount
+    canRegister && (furthestReached >= 1 || core.status === 'signed-out' || isAddingAccount)
   );
   let visibleFurthestStage = $derived(
     hasSecondaryStage ? Math.max(furthestReached, 1) : furthestReached
@@ -169,10 +182,38 @@
   );
   let isLaunchingLogin = $derived(redirect.pendingIntent === 'login' && redirect.isLaunching);
   let canForward = $derived(
-    displayedStage < furthestReached ||
-      (displayedStage === 0 && hasSecondaryStage) ||
+    (displayedStage === 0 && hasSecondaryStage && flow.loginProviderReady) ||
       (displayedStage === 1 && signedIn)
   );
+
+  $effect(() => {
+    if (!canRegister && page.url.pathname.startsWith(resolve('register'))) {
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- stageRoute() extends a resolved stage route
+      void goto(stageRoute(0), { replaceState: true });
+    }
+  });
+
+  let autoRedirectTried = false;
+  $effect(() => {
+    if (core.status !== 'signed-out' && !isAddingAccount) return;
+    if (!flow.loginProviderReady || redirect.isCallbackWindow) return;
+    if (redirect.isLaunching || redirect.isCompleting) return;
+    const flows =
+      flow.loginFlows && passwordFields.hidden
+        ? { ...flow.loginFlows, password: false }
+        : flow.loginFlows;
+    const target = shouldAutoRedirect(
+      ssoRedirect(loginConfiguration()),
+      flows,
+      displayedStage === 0 ? 'login' : 'registration',
+      autoRedirectTried
+    );
+    if (!target) return;
+    autoRedirectTried = true;
+    void untrack(() =>
+      redirect.launch(target.type, target.type === 'sso' ? target.id : undefined, 'login')
+    );
+  });
 
   $effect(() => {
     if (flow.shouldValidateRegistration(displayedStage, hasCompletedInitialHomeserverCheck)) {
@@ -191,6 +232,7 @@
       flow.homeserver = urlHomeserver;
       registration.registrationToken = urlToken;
       if (homeserverChanged) {
+        redirect.cleanup();
         flow.resetValidation();
         login.resetForHomeserverChange();
         registration.error = null;
@@ -222,9 +264,10 @@
   $effect(() => {
     if (core.status !== 'ready' || !userId || pendingOnboardingTransition || isAddingAccount)
       return;
-    if (isSetupRoute || loginPending) return;
+    if (isSetupRoute || loginPending || qrLoginOpen) return;
     if (redirect.pendingIntent === 'login' && redirect.isCompleting) return;
     if (readText(profileOnboardingMarker(userId))) void openSetup();
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- takeAfterLogin() returns a resolved path
     else void goto(takeAfterLogin(resolve('/(app)/rooms')));
   });
 
@@ -242,6 +285,7 @@
   onMount(() => {
     hasLoggedInBefore = readReturningUser();
     return () => {
+      clearLoginConfiguration();
       redirect.cleanup();
       if (!redirect.isCallbackWindow)
         void core.rpc.auth.cancelRegistration().catch((error: unknown) => {
@@ -256,9 +300,9 @@
   }
 
   function forward(): void {
-    if (displayedStage < furthestReached) activateStage(displayedStage + 1);
-    else if (displayedStage === 0 && hasSecondaryStage) activateStage(1);
-    else if (displayedStage === 1 && signedIn) void openSetup();
+    if (!canForward) return;
+    if (displayedStage === 0) activateStage(1);
+    else void openSetup();
   }
 
   function activateStage(index: number): void {
@@ -270,6 +314,7 @@
       if (shouldReduceMotion()) enteringStage = null;
     }
     pendingStage = index;
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- stageRoute() extends a resolved stage route
     void goto(stageRoute(index), { reset: false }).finally(() => {
       pendingStage = null;
     });
@@ -286,8 +331,15 @@
       !server.includes('#')
         ? `${base}/${encodeURIComponent(server)}`
         : base;
-    if (index !== 1 || !registration.registrationToken?.trim()) return route;
-    return `${route}?registration_token=${encodeURIComponent(registration.registrationToken.trim())}`;
+    const query = new SvelteURLSearchParams();
+    for (const key of ['addAccount', 'reauth']) {
+      const value = page.url.searchParams.get(key);
+      if (value !== null) query.set(key, value);
+    }
+    const token = registration.registrationToken?.trim();
+    if (index === 1 && token) query.set('registration_token', token);
+    const search = query.toString();
+    return search ? `${route}?${search}` : route;
   }
 
   function invalidateAfter(index: number): void {
@@ -308,17 +360,11 @@
   }
 </script>
 
-<svelte:head>
-  <title>
-    {i18n.t(
-      isSetupRoute
-        ? 'setup.title'
-        : displayedStage === 0
-          ? 'auth.signInTitle'
-          : 'auth.createAccount'
-    )} - Sable
-  </title>
-</svelte:head>
+<PageTitle
+  title={i18n.t(
+    isSetupRoute ? 'setup.title' : displayedStage === 0 ? 'auth.signInTitle' : 'auth.createAccount'
+  )}
+/>
 
 {#snippet loginStageContent(showCreateAccount: boolean)}
   <LoginForm
@@ -332,6 +378,7 @@
     isCheckingHomeserver={flow.isCheckingHomeserver}
     {isLaunchingLogin}
     onClearHomeserverValidation={() => {
+      redirect.cleanup();
       invalidateAfter(0);
       login.clearHomeserverValidation();
     }}
@@ -353,6 +400,22 @@
     onCancel={isAddingAccount ? () => goto(resolve('home')) : undefined}
     followUserServer={!reauthAccountId()}
   />
+  {#if redirect.pendingIntent === 'login'}
+    {@render browserFallback()}
+  {/if}
+{/snippet}
+
+{#snippet browserFallback()}
+  {#if redirect.systemBrowserUrl}
+    <p class="browser-fallback">{i18n.t('auth.continueInBrowserHint')}</p>
+    <Button
+      block
+      loading={redirect.isOpeningSystemBrowser}
+      onclick={() => void redirect.openInBrowser()}
+    >
+      {i18n.t('auth.openInBrowser')}
+    </Button>
+  {/if}
 {/snippet}
 
 <AuthRedirectBridge
@@ -395,22 +458,20 @@
       <AuthStageCard
         active={displayedStage === 0}
         before={displayedStage > 0}
-        accessibilityLabel={i18n.t(stages[0].accessibilityLabel)}
         onActivate={() => {
           activateStage(0);
         }}
       >
         <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -->
-        {@render loginStageContent(true)}
+        {@render loginStageContent(canRegister)}
       </AuthStageCard>
 
-      {#if visibleFurthestStage >= 1}
+      {#if canRegister && visibleFurthestStage >= 1}
         <AuthStageCard
           active={displayedStage === 1}
           after={displayedStage < 1}
           entering={enteringStage === 1}
           removing={retiringAfter === 0}
-          accessibilityLabel={i18n.t(stages[1].accessibilityLabel)}
           onActivate={() => {
             activateStage(1);
           }}
@@ -443,6 +504,7 @@
               invalidRegistrationField={registration.invalidField}
               registrationFieldError={registration.fieldError}
               onHomeserverInput={(value: string) => {
+                redirect.cleanup();
                 flow.homeserverInput(value);
                 login.resetForHomeserverChange();
                 registration.resetForHomeserverChange();
@@ -481,6 +543,9 @@
                 registration.setConfirmPassword(value);
               }}
             />
+            {#if redirect.pendingIntent === 'register'}
+              {@render browserFallback()}
+            {/if}
           {/if}
         </AuthStageCard>
       {/if}
@@ -497,9 +562,20 @@
     homeserver: () => flow.homeserver.trim() || null,
     redirectUri: () => redirect.qrRedirectUri(),
   }}
-  onSignedIn={() => {
+  onSignedIn={async () => {
+    loginPending = true;
     qrLoginOpen = false;
     markLoggedIn();
-    void openSetup();
+    await afterOverlayPops();
+    await openSetup();
+    loginPending = false;
   }}
 />
+
+<style>
+  .browser-fallback {
+    color: var(--sec-main);
+    font-size: var(--font-size-small);
+    margin: var(--space-300) 0 var(--space-200);
+  }
+</style>

@@ -10,17 +10,25 @@
 	root * /app
 
 	encode zstd gzip
+	import /app/csp.caddy
 
-	try_files {path} {path}.html {path}/index.html /index.html
+	# A hashed asset from a replaced build must 404, not come back as index.html.
+	handle /_app/* {
+		file_server
+	}
 
-	file_server
+	handle {
+		try_files {path} {path}.html {path}/index.html /index.html
+		file_server
+	}
 
 	# Content-hashed assets can be cached indefinitely — the filename changes on every build.
-	header /_app/immutable/* Cache-Control "public, max-age=31536000, immutable"
-	header /index.html Cache-Control "no-cache"
-
-	# Mounted over by a deployment, so an edit must not wait out a cache.
-	header /config.json Cache-Control "no-cache"
+	@immutable {
+		path /_app/immutable/*
+		file
+	}
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+	header ?Cache-Control "no-cache"
 
 	header /manifest.webmanifest Content-Type "application/manifest+json"
 }

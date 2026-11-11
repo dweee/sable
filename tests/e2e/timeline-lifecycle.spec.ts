@@ -3,6 +3,20 @@ import { historyItems, timelineItem } from './fixtures/timeline-items';
 
 test.use({ storageState: SIGNED_OUT, hasTouch: true });
 
+test('shows cached messages while the timeline loads', async ({
+  app,
+  timeline,
+  installRoomCore,
+}) => {
+  await installRoomCore('delayed_snapshot');
+  await app.openRoom('!room:example.test');
+  await app.openRoomFromList('Random');
+  await expect(timeline.message('Random message 19')).toBeVisible();
+  await app.openRoomFromList('General');
+  await expect(timeline.message('General message 19')).toBeVisible({ timeout: 500 });
+  await expect(timeline.skeleton).toHaveCount(0);
+});
+
 test('backgrounding an interrupted touch settles queued history without moving the reader', async ({
   app,
   timeline,
@@ -28,9 +42,7 @@ test('backgrounding an interrupted touch settles queued history without moving t
   await timeline.scrollAboveBottomAndNotify(2_000);
   await timeline.waitForScrollSettled();
   const anchor = await timeline.fullyVisibleAnchor({ skip: 1 });
-  const indexAttribute = await timeline.itemById(anchor.itemId).getAttribute('data-index');
-  if (indexAttribute === null) throw new Error(`missing data-index for ${anchor.itemId}`);
-  const index = Number(indexAttribute);
+  const index = await core.indexOfTimelineItem(subscription, anchor.itemId);
 
   await timeline.viewport.dispatchEvent('touchstart', {
     touches: [{ identifier: 1, clientX: 100, clientY: 100 }],

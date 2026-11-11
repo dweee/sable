@@ -39,7 +39,13 @@ function fakeCore(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-const folder: SidebarItem = { kind: 'folder', id: 'f', name: 'Work', content: ['!a:example.org'] };
+const folder: SidebarItem = {
+  kind: 'folder',
+  id: 'f',
+  name: 'Work',
+  icon: null,
+  content: ['!a:example.org'],
+};
 const lifted: SidebarItem[] = [{ kind: 'space', room_id: '!a:example.org' }];
 
 test('loads the stored layout', async () => {
@@ -59,6 +65,50 @@ test('takes a layout another device wrote', async () => {
   harness.emit({ type: 'space_sidebar_changed', items: [folder] });
 
   expect(sidebar.items).toEqual([folder]);
+});
+
+test('keeps a sync layout when an older initial read finishes', async () => {
+  const read = Promise.withResolvers<SidebarItem[]>();
+  const harness = fakeCore({ sidebar: vi.fn(() => read.promise) });
+  const sidebar = new SpaceSidebar();
+  const starting = sidebar.start(harness.core);
+
+  harness.emit({ type: 'space_sidebar_changed', items: [folder] });
+  read.resolve([]);
+  await starting;
+
+  expect(sidebar.items).toEqual([folder]);
+  expect(harness.calls.setSidebar).not.toHaveBeenCalled();
+});
+
+test('does not save a layout before the initial read finishes', async () => {
+  const read = Promise.withResolvers<SidebarItem[]>();
+  const harness = fakeCore({ sidebar: vi.fn(() => read.promise) });
+  const sidebar = new SpaceSidebar();
+  const starting = sidebar.start(harness.core);
+
+  sidebar.write(lifted);
+
+  expect(harness.calls.setSidebar).not.toHaveBeenCalled();
+  read.resolve([folder]);
+  await starting;
+  expect(sidebar.items).toEqual([folder]);
+});
+
+test('does not save a fallback layout after a failed read', async () => {
+  const harness = fakeCore({ sidebar: vi.fn(() => Promise.reject(new Error('store closed'))) });
+  const sidebar = new SpaceSidebar();
+  vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+  await sidebar.start(harness.core);
+
+  sidebar.write(lifted);
+
+  expect(harness.calls.setSidebar).not.toHaveBeenCalled();
+  expect(sidebar.items).toEqual([]);
+
+  harness.emit({ type: 'space_sidebar_changed', items: [folder] });
+  sidebar.write(lifted);
+  expect(harness.calls.setSidebar).toHaveBeenCalledWith({ items: lifted });
 });
 
 test('shows a write before it is stored', async () => {
@@ -167,6 +217,17 @@ test('persists which folders are open and forgets ones that are gone', async () 
   expect(localStorage.getItem('sable-open-space-folders')).toBe('[]');
 });
 
+test('collapses every open folder at once', () => {
+  const sidebar = new SpaceSidebar();
+  sidebar.toggleFolder('f');
+  sidebar.toggleFolder('g');
+
+  sidebar.collapseAllFolders();
+
+  expect(sidebar.openFolders.size).toBe(0);
+  expect(localStorage.getItem('sable-open-space-folders')).toBe('[]');
+});
+
 test('drops its subscription and layout on stop', async () => {
   const harness = fakeCore({ sidebar: vi.fn(() => Promise.resolve([folder])) });
   const sidebar = new SpaceSidebar();
@@ -199,4 +260,49 @@ test('a late read from a previous session does not overwrite the current one', a
   await pending;
 
   expect(sidebar.items).toEqual([]);
+});
+
+test('room links open under the space the sidebar shows first', async () => {
+  const { roomSectionPath, setSidebarSpaceOrder } = await import('#lib/rooms/permalink.js');
+  const space = (roomId: string) =>
+    ({
+      room_id: roomId,
+      room_kind: 'space',
+      state: 'joined',
+      is_tombstoned: false,
+      is_direct: false,
+      canonical_alias: null,
+      space_children: [
+        {
+          room_id: '!room:example.org',
+          via: [],
+          order: null,
+          origin_server_ts: 0,
+          suggested: false,
+        },
+      ],
+    }) as never;
+  const rooms = [
+    space('!archive:example.org'),
+    space('!main:example.org'),
+    {
+      room_id: '!room:example.org',
+      room_kind: 'text',
+      is_direct: false,
+      canonical_alias: null,
+    } as never,
+  ];
+  const { core } = fakeCore({
+    sidebar: vi.fn(() =>
+      Promise.resolve<SidebarItem[]>([
+        { kind: 'space', room_id: '!main:example.org' },
+        { kind: 'space', room_id: '!archive:example.org' },
+      ])
+    ),
+  });
+
+  await new SpaceSidebar().start(core);
+
+  expect(roomSectionPath(rooms, '!room:example.org')).toContain('!main%3Aexample.org');
+  setSidebarSpaceOrder([]);
 });

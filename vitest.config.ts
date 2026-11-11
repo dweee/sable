@@ -6,6 +6,13 @@ import viteConfig from './vite.config.ts';
 
 const COVERAGE_MINIMUM = 46;
 
+// Disabling CDP touch emulation loses headless Linux Chromium's fine pointer.
+const TOUCH_BROWSER_TESTS = [
+  'src/lib/features/composer/RoomComposerTouch.browser.test.ts',
+  'src/lib/features/sidebar/AppShell.browser.test.ts',
+  'src/lib/ui/primitives/BottomSheet.browser.test.ts',
+];
+
 const HAPPY_DOM_TESTS = [
   'src/lib/features/composer/VoiceRecorder.svelte.test.ts',
   'src/lib/features/composer/voice-recorder-encoder.test.ts',
@@ -16,12 +23,14 @@ const HAPPY_DOM_TESTS = [
   'src/lib/core/attachment-info.test.ts',
   'src/lib/ui/shortcuts/binding.test.ts',
   'src/lib/ui/shortcuts/global-shortcuts.test.ts',
+  'src/lib/ui/shortcuts/focus-regions.test.ts',
   'src/lib/ui/swipe-gesture.test.ts',
   'src/lib/ui/swipe-back.svelte.test.ts',
   'src/lib/ui/double-tap.test.ts',
   'src/lib/ui/trailing-click.test.ts',
-  'src/lib/ui/video-support.test.ts',
   'src/lib/platform/devtools.test.ts',
+  'src/lib/settings/account-sync.svelte.test.ts',
+  'src/lib/features/composer/account-isolation.svelte.test.ts',
   'src/lib/platform/keyboard.test.ts',
   'src/lib/settings/theme-styles.test.ts',
   'src/lib/features/room/messages/reply-preview.test.ts',
@@ -65,8 +74,12 @@ export default mergeConfig(
           test: {
             name: 'node',
             environment: 'node',
-            include: ['src/**/*.test.ts', 'electron/src/**/*.test.ts'],
-            exclude: ['src/**/*.browser.test.ts', ...HAPPY_DOM_TESTS],
+            include: [
+              'src/**/*.test.ts',
+              'electron/src/**/*.test.ts',
+              'tests/e2e/fixtures/*.test.ts',
+            ],
+            exclude: ['**/*.browser.test.ts', ...HAPPY_DOM_TESTS],
           },
         },
         {
@@ -83,17 +96,36 @@ export default mergeConfig(
               optimizeDeps: { include: ['katex'] },
               test: {
                 name: 'browser',
+                maxWorkers: 4,
                 include: ['src/**/*.browser.test.ts', 'tests/e2e/fixtures/*.browser.test.ts'],
                 setupFiles: ['./tests/vitest-browser-setup.ts'],
                 expect: { poll: { timeout: 5000 } },
                 browser: {
                   enabled: true,
                   headless: true,
-                  provider: playwright({ contextOptions: { reducedMotion: 'reduce' } }),
-                  instances: [{ browser: 'chromium' }],
+                  provider: playwright({
+                    contextOptions: { reducedMotion: 'reduce' },
+                    launchOptions: {
+                      args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+                    },
+                  }),
+                  instances: [
+                    { browser: 'chromium', name: 'browser', exclude: TOUCH_BROWSER_TESTS },
+                    {
+                      browser: 'chromium',
+                      name: 'browser-touch',
+                      include: TOUCH_BROWSER_TESTS,
+                      provider: playwright({
+                        contextOptions: { reducedMotion: 'reduce', hasTouch: true },
+                      }),
+                    },
+                  ],
                   commands: {
                     emulateColorScheme: async (context, scheme: 'light' | 'dark') => {
                       await context.page.emulateMedia({ colorScheme: scheme });
+                    },
+                    emulateReducedMotion: async (context, motion: 'reduce' | 'no-preference') => {
+                      await context.page.emulateMedia({ reducedMotion: motion });
                     },
                   },
                 },

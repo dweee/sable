@@ -2,82 +2,14 @@ import { isCatalogReference, readThemes, type StoredThemes } from './custom-them
 import { fingerprint } from './fingerprint.js';
 import { migrateSettings, SETTINGS_SCHEMA } from './migrations.js';
 import { compressCss, decompressCss } from './theme-compression.js';
-import { PREFERENCE_KEYS, sanitize } from './preferences.svelte.js';
-import type { Preferences } from './preferences.svelte.js';
+import { NON_SYNCABLE_KEYS, PREFERENCE_KEYS, sanitize } from './definitions.js';
+import type { Preferences } from './definitions.js';
 
 export const SETTINGS_ACCOUNT_DATA_TYPE = 'moe.sable.next.settings';
 export const SETTINGS_SYNC_VERSION = 1;
 
 const MAX_SYNCED_THEME_CSS_BYTES = 10 * 1024 * 1024;
 export const SYNCED_THEME_LIMIT_MIB = MAX_SYNCED_THEME_CSS_BYTES / (1024 * 1024);
-
-export const NON_SYNCABLE_KEYS = new Set<keyof Preferences>([
-  'settingsSync',
-  'syncDrafts',
-  'enterForNewline',
-  'composerSpellcheck',
-  'composerAutocapitalize',
-  'reducedMotion',
-  'pageZoom',
-  'zoomShortcuts',
-  'textScale',
-  'fontFamily',
-  'fontFamilyMono',
-  'timeZone',
-  'roomBannerHeight',
-  'searchIndexLimit',
-  'coreLogLevel',
-  'searchUnmeteredOnly',
-  'audioInputDevice',
-  'audioOutputDevice',
-  'videoInputDevice',
-  'layout',
-  'threadPresentation',
-  'messageSpacing',
-  'mediaAutoLoad',
-  'callMicrophoneMuted',
-  'noiseSuppression',
-  'echoCancellation',
-  'autoGainControl',
-  'voiceIsolation',
-  'incomingVoiceIsolation',
-  'systemNotifications',
-  'notificationContent',
-  'notificationEncryptedContent',
-  'richPushPayloads',
-  'notificationSounds',
-  'backgroundNotificationSounds',
-  'pushGatewayUrl',
-  'pushVapidKey',
-  'pushAppId',
-  'errorReporting',
-  'sessionReplay',
-  'telemetryAsked',
-  'autoUpdateCheck',
-  'updateChannel',
-  'closeToTray',
-  'minimizeToTray',
-  'showSystemTrayIcon',
-  'useCustomTitleBar',
-  'hardwareAcceleration',
-  'hardwareVideoAcceleration',
-  'smoothScrolling',
-  'webRtcIpPolicy',
-  'developerTools',
-  'soundsNotificationVolume',
-  'soundsCameraOnVolume',
-  'soundsCameraOffVolume',
-  'soundsMicOnVolume',
-  'soundsMicOffVolume',
-  'soundsDeafenOnVolume',
-  'soundsDeafenOffVolume',
-  'soundsScreenshareStartVolume',
-  'soundsScreenshareStopVolume',
-  'soundsCallJoinVolume',
-  'soundsCallLeaveVolume',
-  'soundsIncomingCallVolume',
-  'soundsOutgoingCallVolume',
-]);
 
 export interface SettingsSyncContent {
   v: number;
@@ -237,8 +169,8 @@ function mergeThemes(
   return {
     themes,
     tweaks,
-    lightThemeId: keepId(remote.lightThemeId ?? current.lightThemeId, held),
-    darkThemeId: keepId(remote.darkThemeId ?? current.darkThemeId, held),
+    lightThemeId: keepId(remote.lightThemeId ?? keepId(current.lightThemeId, excluded), held),
+    darkThemeId: keepId(remote.darkThemeId ?? keepId(current.darkThemeId, excluded), held),
     enabledTweakIds: [
       ...remote.enabledTweakIds,
       ...current.enabledTweakIds.filter((id) => excluded.has(id) && !remoteTweakIds.has(id)),

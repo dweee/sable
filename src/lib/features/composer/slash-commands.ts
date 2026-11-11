@@ -1,7 +1,15 @@
-import type { MemberView, MessageKind, SlashInvocation, Rpc } from '#src/generated/protocol';
+import type {
+  MemberView,
+  MessageKind,
+  PerMessageProfileView,
+  PersonaView,
+  SlashInvocation,
+  Rpc,
+} from '#src/generated/protocol';
 import { CoreError } from '#src/transport';
 
-import { knockRoom } from '#lib/core/api/rooms.js';
+import { knockRoom, openDirectMessage } from '#lib/core/api/rooms.js';
+import type { E2eePolicy } from '#lib/deployment/e2ee-policy.js';
 import { setMemberLook } from '#lib/core/api/members.js';
 import { joinOrOfferKnock } from '#lib/rooms/join-or-knock.js';
 import { parseSlash } from '#lib/model/model.js';
@@ -10,6 +18,7 @@ import { preferences } from '#lib/settings/preferences.svelte.js';
 
 import { geoUriFor } from './composer-location.js';
 import { rainbowFormatted, rainbowHtml } from './rainbow.js';
+import { isRecord } from '#lib/guards.js';
 
 export { parseSlash, pronounSets, slashCommandNames } from '#lib/model/model.js';
 
@@ -22,7 +31,7 @@ export type SlashRpc = {
   members: Rpc['members'];
   rooms: Rpc['rooms'];
   account: SlashAccountApi;
-  encryption: Pick<Rpc['encryption'], 'discardRoomKey'>;
+  encryption: Pick<Rpc['encryption'], 'discardRoomKey' | 'shareHistory'>;
   messages: Pick<Rpc['messages'], 'bulkRedact' | 'sendGesture' | 'sendLocation' | 'sendRawEvent'>;
   room_state: Pick<
     Rpc['room_state'],
@@ -37,6 +46,8 @@ export type SlashContext = {
   formatted?: string | null;
   developerTools?: boolean;
   rpc: SlashRpc;
+  e2eePolicy: () => Promise<E2eePolicy>;
+  persona?: () => PerMessageProfileView | null;
 };
 
 export type SlashOutcome =
@@ -155,9 +166,7 @@ async function eachUser(
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+  return isRecord(value) ? value : {};
 }
 
 function locationParams(roomId: string, geoUri: string) {
@@ -175,12 +184,15 @@ async function sendLocation(
   name: string,
   latitude: number,
   longitude: number,
-  { roomId, rpc }: SlashContext
+  { roomId, rpc, persona }: SlashContext
 ): Promise<SlashOutcome> {
   const geoUri = geoUriFor(latitude, longitude);
   if (geoUri === null) return usageError(name);
 
-  await rpc.messages.sendLocation(locationParams(roomId, geoUri));
+  await rpc.messages.sendLocation({
+    ...locationParams(roomId, geoUri),
+    ...(persona ? { persona: persona() } : {}),
+  });
   return DONE;
 }
 
@@ -191,7 +203,10 @@ async function shareMyLocation(context: SlashContext): Promise<SlashOutcome> {
   const geoUri = geoUriFor(result.fix.latitude, result.fix.longitude);
   if (geoUri === null) return { kind: 'error', key: 'composer.slashFix.unavailable' };
 
-  await context.rpc.messages.sendLocation(locationParams(context.roomId, geoUri));
+  await context.rpc.messages.sendLocation({
+    ...locationParams(context.roomId, geoUri),
+    ...(context.persona ? { persona: context.persona() } : {}),
+  });
   return DONE;
 }
 
@@ -222,18 +237,27 @@ async function addPersona(
   const avatar = persona.avatar ?? existing?.avatar_url ?? null;
   if (avatar !== null && !MXC_URI.test(avatar)) return usageError(name);
 
+  const next = {
+    id,
+    display_name: persona.name ?? existing?.display_name ?? id,
+    avatar_url: avatar,
+    pronouns: existing?.pronouns ?? [],
+    color_on_light: existing?.color_on_light ?? null,
+    color_on_dark: existing?.color_on_dark ?? null,
+    triggers: existing?.triggers ?? [],
+    pluralkit: existing?.pluralkit ?? null,
+    last_used: existing?.last_used ?? null,
+    alternate_avatars: existing?.alternate_avatars ?? null,
+    biography: existing?.biography ?? null,
+    banner_url: existing?.banner_url ?? null,
+    is_animal: existing?.is_animal ?? null,
+    has_animal: existing?.has_animal ?? null,
+    animal_need: existing?.animal_need ?? null,
+    sort_flags: existing?.sort_flags ?? null,
+  } satisfies PersonaView;
   await rpc.personas.save({
-    persona: {
-      id,
-      display_name: persona.name ?? existing?.display_name ?? id,
-      avatar_url: avatar,
-      pronouns: existing?.pronouns ?? [],
-      color_on_light: existing?.color_on_light ?? null,
-      color_on_dark: existing?.color_on_dark ?? null,
-      triggers: existing?.triggers ?? [],
-      pluralkit: existing?.pluralkit ?? null,
-      last_used: existing?.last_used ?? null,
-    },
+    persona: next,
+    base_persona: existing ?? next,
     previous_id: existing ? id : null,
   });
   return DONE;
@@ -252,9 +276,15 @@ async function addPersonaProxy(
       ...persona,
       triggers: [
         ...persona.triggers,
-        { prefix: proxy.prefix, suffix: proxy.suffix, keep_trigger: false },
+        {
+          prefix: proxy.prefix,
+          suffix: proxy.suffix,
+          keep_trigger: false,
+          alternate_avatar_id: null,
+        },
       ],
     },
+    base_persona: persona,
     previous_id: proxy.id,
   });
   return DONE;
@@ -298,7 +328,7 @@ async function run(
   invocation: SlashInvocation,
   context: SlashContext
 ): Promise<SlashOutcome> {
-  const { roomId, userId, rpc } = context;
+  const { roomId, userId, rpc, e2eePolicy } = context;
   switch (invocation.command) {
     case 'bug_report':
       return { kind: 'bugReport' };
@@ -309,6 +339,7 @@ async function run(
         room_id: roomId,
         gesture: invocation.gesture,
         target: invocation.target,
+        ...(context.persona ? { persona: context.persona() } : {}),
       });
       return DONE;
     case 'message': {
@@ -340,6 +371,15 @@ async function run(
     case 'invite':
       await rpc.rooms.invite({ room_id: roomId, user_id: invocation.user_id });
       return DONE;
+    case 'share_history': {
+      const outcome = await rpc.encryption.shareHistory({
+        room_id: roomId,
+        user_id: invocation.user_id,
+      });
+      return outcome === 'shared'
+        ? DONE
+        : { kind: 'error', key: `composer.slashShareHistory.${outcome}` };
+    }
     case 'kick':
       return moderate(name, invocation, 'kick', true, context);
     case 'ban':
@@ -387,7 +427,7 @@ async function run(
       );
     case 'start_dm':
       return eachUser(invocation.user_ids, (target) =>
-        rpc.rooms.createDm({ user_id: target, encrypted: null })
+        openDirectMessage({ rpc, e2eePolicy }, target)
       );
     case 'convert_to_dm':
       await rpc.account.setDirect({
@@ -446,6 +486,7 @@ async function run(
         room_id: roomId,
         event_type: 'm.room.message',
         content: invocation.content,
+        ...(context.persona ? { persona: context.persona() } : {}),
       });
       return DONE;
     case 'raw_event':
@@ -454,6 +495,7 @@ async function run(
           room_id: roomId,
           event_type: invocation.event_type,
           content: invocation.content,
+          ...(context.persona ? { persona: context.persona() } : {}),
         });
       } else {
         await rpc.room_state.sendEvent({
@@ -513,8 +555,27 @@ function plainTextFrom(html: string): string {
   return textFrom(new DOMParser().parseFromString(html, 'text/html').body).trim();
 }
 
+const MENTION_USER_ID = /#\/(@[^?]+)/;
+
+/** A mention pill reads as its display name in the body; commands take the id. */
+function spellMentions(body: string, formatted: string | null | undefined): string {
+  if (!formatted) return body;
+  const links = new DOMParser().parseFromString(formatted, 'text/html').querySelectorAll('a[href]');
+  let spelled = body;
+  for (const link of links) {
+    const userId = MENTION_USER_ID.exec(link.getAttribute('href') ?? '')?.[1];
+    const label = link.textContent;
+    if (userId && label) spelled = spelled.replace(label, () => decodeURIComponent(userId));
+  }
+  return spelled;
+}
+
 export async function runSlash(body: string, context: SlashContext): Promise<SlashResult> {
-  const parsed = parseSlash(body, context.formatted ?? null);
+  let parsed = parseSlash(body, context.formatted ?? null);
+  if (parsed.kind === 'usage') {
+    const retried = parseSlash(spellMentions(body, context.formatted), context.formatted ?? null);
+    if (retried.kind !== 'usage') parsed = retried;
+  }
 
   switch (parsed.kind) {
     case 'none':

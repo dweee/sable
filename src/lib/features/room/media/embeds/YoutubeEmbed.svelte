@@ -44,19 +44,21 @@
 
 {#if video && details}
   <div class="youtube-embed">
-    <a class="youtube-header" href={url} target="_blank" rel="noopener noreferrer">
+    <a class="youtube-header" href={url} target="_blank" rel="external noopener noreferrer">
       <span class="youtube-site">{details.author ?? 'YouTube'}</span>
       <span class="youtube-title" title={details.title}>{details.title}</span>
     </a>
     <div class="youtube-player">
       {#if playing}
-        <iframe
-          src={youtubePlayerUrl(video)}
-          title={details.title}
-          allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-          referrerpolicy="strict-origin-when-cross-origin"
-          allowfullscreen
-        ></iframe>
+        {#await youtubePlayerUrl(video) then src}
+          <iframe
+            {src}
+            title={details.title}
+            allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+            referrerpolicy="strict-origin-when-cross-origin"
+            allowfullscreen
+          ></iframe>
+        {/await}
       {:else}
         <button
           type="button"

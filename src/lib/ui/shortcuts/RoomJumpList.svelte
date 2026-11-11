@@ -9,12 +9,7 @@
   import '#lib/ui/primitives/menu.css';
 
   import { fuzzyMatchParts } from './fuzzy.js';
-  import {
-    filterRoomsByQuery,
-    parentSpaceNames,
-    parseJumpQuery,
-    roomDisplayName,
-  } from './room-jump.js';
+  import { filterRoomsByQuery, parentSpaceNames, parseJumpQuery } from './room-jump.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
 
   interface Props {
@@ -89,7 +84,8 @@
       {@attach scrollHint}
     >
       {#each results as room, index (room.room_id)}
-        {@const name = roomDisplayName(room)}
+        {@const name = room.display_name}
+        {@const avatar = room.display_avatar_url}
         {@const parent = parents.get(room.room_id)}
         <li role="presentation">
           <button
@@ -103,10 +99,10 @@
             onclick={() => onSelect(room)}
           >
             <Avatar
-              class={['jump-avatar', { glyph: !room.avatar_url }]}
+              class={['jump-avatar', { glyph: !avatar }]}
               size="small"
-              id={room.avatar_url ? room.room_id : null}
-              src={room.avatar_url}
+              id={avatar ? room.room_id : null}
+              src={avatar}
               {name}
               uniform
             >
@@ -151,6 +147,10 @@
   .option {
     --menu-item-height: var(--control-height-500);
     --menu-item-gap: var(--space-300);
+  }
+
+  .option[aria-selected='true'] {
+    background: var(--surface-container-active);
   }
 
   .jump-list :global(.jump-avatar.glyph) {

@@ -1,4 +1,4 @@
-import type { TimelineItemView } from '#src/generated/protocol';
+import type { MessageKind, TimelineItemView } from '#src/generated/protocol';
 import { expect, SIGNED_OUT, test } from './fixtures/test';
 import { timelineImage, timelineItem, withRowFields } from './fixtures/timeline-items';
 
@@ -12,21 +12,20 @@ const message = (html: string): TimelineItemView => ({
     kind: 'message',
     body: long,
     html,
-    emote: false,
-    notice: false,
+    msgtype: 'text',
     edited: false,
     jumbo: null,
   },
 });
-const alteredMessage = (flags: { emote?: boolean; notice?: boolean; edited?: boolean }) => {
+const alteredMessage = (flags: { msgtype?: MessageKind; edited?: boolean }) => {
   const item = message(`<p>${long}</p>`);
   if (item.content.kind === 'message') Object.assign(item.content, flags);
   return item;
 };
 const cases: Record<string, TimelineItemView> = {
   text: message(`<p>${long}</p>`),
-  emote: alteredMessage({ emote: true }),
-  notice: alteredMessage({ notice: true }),
+  emote: alteredMessage({ msgtype: 'emote' }),
+  notice: alteredMessage({ msgtype: 'notice' }),
   edited: alteredMessage({ edited: true }),
   url: message(`<a href="https://example.test/${long}">https://example.test/${long}</a>`),
   'inline code': message(`<p><code>${long}</code></p>`),
@@ -37,7 +36,7 @@ const cases: Record<string, TimelineItemView> = {
   maths: message(`<div data-mx-maths="${'x+'.repeat(100)}x"></div>`),
   'inline maths': message(`<span data-mx-maths="\\mathrm{${long}}"></span>`),
   persona: {
-    ...alteredMessage({ emote: true }),
+    ...alteredMessage({ msgtype: 'emote' }),
     per_message_profile: {
       id: 'persona',
       display_name: long,
@@ -46,6 +45,11 @@ const cases: Record<string, TimelineItemView> = {
       color_on_light: null,
       color_on_dark: null,
       has_fallback: false,
+      biography: null,
+      banner_url: null,
+      is_animal: null,
+      has_animal: null,
+      animal_need: null,
     },
   },
   'link preview': {
@@ -64,6 +68,7 @@ const cases: Record<string, TimelineItemView> = {
         theme_color: null,
         card: null,
         author_name: null,
+        post: null,
       },
     ],
   },
@@ -91,6 +96,7 @@ const cases: Record<string, TimelineItemView> = {
       caption: long,
       html: null,
       source,
+      external_url: null,
       mime: 'video/mp4',
       width: 6000,
       height: 100,
@@ -108,6 +114,7 @@ const cases: Record<string, TimelineItemView> = {
       caption: long,
       html: null,
       source: JSON.stringify({ Plain: 'mxc://example.test/overflow-audio' }),
+      external_url: null,
       mime: 'audio/wav',
       duration_ms: 1000,
       waveform: [0.2, 0.8],
@@ -150,6 +157,7 @@ const cases: Record<string, TimelineItemView> = {
       caption: long,
       html: null,
       source,
+      external_url: null,
       mime: null,
       size: 123,
     },
@@ -220,7 +228,7 @@ const cases: Record<string, TimelineItemView> = {
       change: { kind: 'room_topic', topic: long },
     },
   },
-  redaction: { ...message(''), content: { kind: 'redacted', reason: long } },
+  redaction: { ...message(''), content: { kind: 'redacted', reason: long, redacted_by: null } },
   'raw state': {
     ...message(''),
     content: {

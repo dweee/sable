@@ -3,7 +3,12 @@ import type { MemberView, PerMessageProfileView, ProfileView } from '#src/genera
 import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 import type { SenderCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
-import { nameColorOnDark, nameColorOnLight } from '#lib/ui/primitives/readable-color.js';
+import {
+  nameColorOnDark,
+  nameColorOnLight,
+  roleColorOnDark,
+  roleColorOnLight,
+} from '#lib/ui/primitives/readable-color.js';
 
 import { senderColor } from '../timeline/timeline-format';
 
@@ -24,7 +29,7 @@ export function senderDisplayColors(
 ): SenderDisplayColors {
   const override = profileOverrides.colors(userId);
   if (override === null) {
-    const nameColor = isOwn ? 'var(--primary-on-container)' : senderColor(userId);
+    const nameColor = isOwn ? 'var(--surface-on-container)' : senderColor(userId);
     return { nameColor, nameColorLight: null, nameColorDark: null, tinted: false };
   }
   const personaTint = personaWithColor(persona);
@@ -36,8 +41,7 @@ export function senderDisplayColors(
     room?.colorOnLight ??
     colored?.name_color_light ??
     colored?.name_color_dark ??
-    roleColor ??
-    null;
+    roleColorOnLight(roleColor);
   const nameColorDark =
     override?.dark ??
     override?.light ??
@@ -45,10 +49,9 @@ export function senderDisplayColors(
     room?.colorOnDark ??
     colored?.name_color_dark ??
     colored?.name_color_light ??
-    roleColor ??
-    null;
+    roleColorOnDark(roleColor);
   const tinted = nameColorLight !== null || nameColorDark !== null;
-  const nameColor = isOwn ? 'var(--primary-on-container)' : senderColor(userId);
+  const nameColor = isOwn ? 'var(--surface-on-container)' : senderColor(userId);
 
   return {
     nameColor,
@@ -75,11 +78,11 @@ export function findMember(
 }
 
 export function memberName(members: readonly MemberView[], userId: string): string {
-  return profileOverrides.name(userId, findMember(members, userId)?.display_name ?? userId);
+  return findMember(members, userId)?.display_name ?? userId;
 }
 
 export function memberAvatar(members: readonly MemberView[], userId: string): string | null {
-  return profileOverrides.avatar(userId, findMember(members, userId)?.avatar_url ?? null);
+  return findMember(members, userId)?.avatar_url ?? null;
 }
 
 export interface MemberIdentity {
@@ -89,9 +92,7 @@ export interface MemberIdentity {
 }
 
 export function memberIdentity(members: readonly MemberView[], userId: string): MemberIdentity {
-  const member = findMember(members, userId);
-
-  return { userId, name: member?.display_name ?? userId, avatar: member?.avatar_url ?? null };
+  return { userId, name: memberName(members, userId), avatar: memberAvatar(members, userId) };
 }
 
 export function personaWithColor(

@@ -1,8 +1,10 @@
+import { openDB, type IDBPDatabase } from 'idb';
+
 const DATABASE_NAME = 'sable-next-session';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'session';
 const SESSION_KEY = 'current';
-const V1_MIGRATION_KEY = 'v1-migrated';
+const SEALING_KEY = 'sealing-key';
 
 const APP_DATABASE_PREFIX = 'sable-next';
 const ACCOUNT_STORE_INFIX = '-account-';
@@ -17,60 +19,80 @@ const CRYPTO_META_DATABASE_SUFFIX = '::matrix-sdk-crypto-meta';
 const CRYPTO_CORE_STORE = 'core';
 const SLIDING_SYNC_KEY_PREFIX = 'sliding_sync_store::';
 
-let databasePromise: Promise<IDBDatabase> | undefined;
+let databasePromise: Promise<IDBPDatabase> | undefined;
 
-function openDatabase(): Promise<IDBDatabase> {
-  databasePromise ??= new Promise((resolve, reject) => {
-    const request = globalThis.indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-
-    request.onupgradeneeded = () => {
-      const database = request.result;
-      if (!database.objectStoreNames.contains(STORE_NAME)) {
-        database.createObjectStore(STORE_NAME);
-      }
-    };
-
-    request.onsuccess = () => {
-      const database = request.result;
-      database.onversionchange = () => {
+function openDatabase(): Promise<IDBPDatabase> {
+  databasePromise ??= openDB(DATABASE_NAME, DATABASE_VERSION, {
+    upgrade(database) {
+      if (!database.objectStoreNames.contains(STORE_NAME)) database.createObjectStore(STORE_NAME);
+    },
+    blocking() {
+      const closing = databasePromise;
+      databasePromise = undefined;
+      void closing?.then((database) => {
         database.close();
-        databasePromise = undefined;
-      };
-      resolve(database);
-    };
-
-    request.onerror = () => {
-      reject(request.error ?? new Error('Could not open the session database'));
-    };
+      });
+    },
   });
-
   return databasePromise;
 }
 
-function transaction(
-  mode: IDBTransactionMode,
-  operation: (store: IDBObjectStore) => IDBRequest
-): Promise<void> {
-  return openDatabase().then(
-    (database) =>
-      new Promise((resolve, reject) => {
-        const tx = database.transaction(STORE_NAME, mode);
-        const request = operation(tx.objectStore(STORE_NAME));
+async function readRecord(key: string): Promise<unknown> {
+  return (await openDatabase()).get(STORE_NAME, key);
+}
 
-        request.onerror = () => {
-          reject(request.error ?? new Error('Session database request failed'));
-        };
-        tx.oncomplete = () => {
-          resolve();
-        };
-        tx.onerror = () => {
-          reject(tx.error ?? new Error('Session database transaction failed'));
-        };
-        tx.onabort = () => {
-          reject(tx.error ?? new Error('Session database transaction aborted'));
-        };
-      })
+interface Sealed {
+  iv: Uint8Array<ArrayBuffer>;
+  data: ArrayBuffer;
+}
+
+function isSealed(value: unknown): value is Sealed {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Sealed).iv instanceof Uint8Array &&
+    (value as Sealed).data instanceof ArrayBuffer
   );
+}
+
+let sealingKey: Promise<CryptoKey | null> | undefined;
+
+// Only keeps the raw key from being exported. Same-origin scripts can still use it, and the
+// browser keeps it beside the data it seals, so anyone holding the profile can read both.
+// Null when WebKit's shared worker cannot store a CryptoKey: Safari keeps the session unsealed.
+function loadSealingKey(): Promise<CryptoKey | null> {
+  sealingKey ??= (async () => {
+    const saved = await readRecord(SEALING_KEY);
+    if (saved instanceof CryptoKey) return saved;
+    const key = await globalThis.crypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+    // Another context may have saved its key first: theirs wins.
+    try {
+      await (await openDatabase()).add(STORE_NAME, key, SEALING_KEY);
+    } catch (error) {
+      if (!(error instanceof DOMException)) throw error;
+      if (error.name === 'DataCloneError') return null;
+      if (error.name !== 'ConstraintError') throw error;
+    }
+    const kept = await readRecord(SEALING_KEY);
+    if (!(kept instanceof CryptoKey)) throw new Error('Could not keep the session sealing key');
+    return kept;
+  })().catch((error: unknown) => {
+    sealingKey = undefined;
+    throw asError(error);
+  });
+  return sealingKey;
+}
+
+async function seal(bytes: Uint8Array<ArrayBuffer>): Promise<Sealed | Uint8Array> {
+  const key = await loadSealingKey();
+  if (!key) return bytes;
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const data = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes);
+  return { iv, data };
 }
 
 function toBytes(value: unknown): Uint8Array | null {
@@ -84,73 +106,39 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-export function loadSession(): Promise<Uint8Array | null> {
-  return openDatabase().then(
-    (database) =>
-      new Promise((resolve, reject) => {
-        const tx = database.transaction(STORE_NAME, 'readonly');
-        const request = tx.objectStore(STORE_NAME).get(SESSION_KEY);
-
-        request.onsuccess = () => {
-          try {
-            resolve(toBytes(request.result));
-          } catch (error) {
-            reject(asError(error));
-          }
-        };
-        request.onerror = () => {
-          reject(request.error ?? new Error('Could not load the session'));
-        };
-        tx.onerror = () => {
-          reject(tx.error ?? new Error('Could not read the session database'));
-        };
-      })
-  );
+export async function loadSession(): Promise<Uint8Array | null> {
+  const value = await readRecord(SESSION_KEY);
+  if (isSealed(value)) {
+    try {
+      const key = await loadSealingKey();
+      if (!key) {
+        console.warn('The saved session can no longer be opened; signing out');
+        return null;
+      }
+      return new Uint8Array(
+        await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv: value.iv }, key, value.data)
+      );
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'OperationError') {
+        console.warn('The saved session can no longer be opened; signing out');
+        return null;
+      }
+      throw asError(error);
+    }
+  }
+  const bytes = toBytes(value);
+  if (bytes) await saveSession(bytes);
+  return bytes;
 }
 
-export function saveSession(bytes: Uint8Array): Promise<void> {
-  // Copy the WASM-owned bytes before IndexedDB takes ownership of the value.
-  const value = Uint8Array.from(bytes).buffer;
-  return transaction('readwrite', (store) => store.put(value, SESSION_KEY));
+export async function saveSession(bytes: Uint8Array): Promise<void> {
+  // Copy the WASM-owned bytes before sealing yields to the event loop.
+  const value = await seal(Uint8Array.from(bytes));
+  await (await openDatabase()).put(STORE_NAME, value, SESSION_KEY);
 }
 
-export function clearSession(): Promise<void> {
-  return transaction('readwrite', (store) => store.delete(SESSION_KEY));
-}
-
-export async function v1MigrationComplete(): Promise<boolean> {
-  const database = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = database.transaction(STORE_NAME, 'readonly');
-    const request = tx.objectStore(STORE_NAME).get(V1_MIGRATION_KEY);
-    tx.oncomplete = () => {
-      resolve(request.result === true);
-    };
-    tx.onabort = tx.onerror = () => {
-      reject(tx.error ?? new Error('Could not read migration status'));
-    };
-  });
-}
-
-export function markV1MigrationComplete(): Promise<void> {
-  return transaction('readwrite', (store) => store.put(true, V1_MIGRATION_KEY));
-}
-
-export async function saveV1Session(bytes: Uint8Array): Promise<void> {
-  const database = await openDatabase();
-  const value = Uint8Array.from(bytes).buffer;
-  return new Promise((resolve, reject) => {
-    const tx = database.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    store.put(value, SESSION_KEY);
-    store.put(true, V1_MIGRATION_KEY);
-    tx.oncomplete = () => {
-      resolve();
-    };
-    tx.onabort = tx.onerror = () => {
-      reject(tx.error ?? new Error('Could not save the migrated accounts'));
-    };
-  });
+export async function clearSession(): Promise<void> {
+  await (await openDatabase()).delete(STORE_NAME, SESSION_KEY);
 }
 
 function deleteDatabase(name: string): Promise<void> {

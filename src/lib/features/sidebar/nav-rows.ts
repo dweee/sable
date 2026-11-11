@@ -1,8 +1,6 @@
 import type { RoomListItemView } from '#src/generated/protocol';
 
-import type { RoomSort } from '#lib/rooms/room-sort.js';
-
-import type { SpaceTreeNode, Thread } from './space-tree.js';
+import type { Thread } from './space-tree.js';
 
 export type RoomNavRow = {
   room?: RoomListItemView;
@@ -28,37 +26,4 @@ export function roomRow(room: RoomListItemView): RoomNavRow {
   };
   roomRows.set(room, row);
   return row;
-}
-
-export function byRecency(left: RoomNavRow, right: RoomNavRow): number {
-  return (right.room?.latest_event?.timestamp ?? 0) - (left.room?.latest_event?.timestamp ?? 0);
-}
-
-function byName(left: RoomNavRow, right: RoomNavRow): number {
-  return (left.room?.name ?? '').localeCompare(right.room?.name ?? '', undefined, {
-    sensitivity: 'base',
-  });
-}
-
-export function roomComparator(sort: RoomSort): (left: RoomNavRow, right: RoomNavRow) => number {
-  if (sort === 'name-asc') return byName;
-  if (sort === 'name-desc') return (left, right) => byName(right, left);
-  return byRecency;
-}
-
-export function isFavourite(row: RoomNavRow): boolean {
-  return row.room?.tags.includes('favourite') ?? false;
-}
-
-export function treeRows(items: SpaceTreeNode[]): RoomNavRow[] {
-  return items.flatMap((item) => (item.kind === 'room' ? [item] : treeRows(item.children)));
-}
-
-export function withoutFavourites(items: SpaceTreeNode[]): SpaceTreeNode[] {
-  return items.flatMap<SpaceTreeNode>((item) => {
-    if (item.kind === 'room') return isFavourite(item) ? [] : [item];
-    if (item.kind === 'link') return [item];
-    const children = withoutFavourites(item.children);
-    return children.length === 0 ? [] : [{ ...item, children }];
-  });
 }

@@ -7,10 +7,7 @@ use matrix_sdk::ruma::events::room::{ImageInfo, MediaSource};
 use serde::Deserialize as _;
 use serde_with::{DefaultOnError, serde_as};
 
-use crate::matrix_html::{
-    display_html, has_profile_fallback_html, strip_profile_fallback_body,
-    strip_profile_fallback_html,
-};
+use crate::matrix_html::{display_html, strip_profile_fallback_body, strip_profile_fallback_html};
 use crate::protocol::{
     AudioMetadataView, GalleryItemView, PerMessageProfileView, VideoPlaybackView,
 };
@@ -38,7 +35,7 @@ pub(crate) fn video_thumbnail(info: &VideoInfo) -> Option<String> {
 
 pub(super) fn gallery_item(
     item: &GalleryItemType,
-    raw: Option<&serde_json::Value>,
+    spoiler: Option<String>,
 ) -> Option<GalleryItemView> {
     let dimension = |value: Option<UInt>| value.map(u64::from);
     let caption = |caption: Option<&str>| caption.map(ToOwned::to_owned);
@@ -54,7 +51,7 @@ pub(super) fn gallery_item(
             size: dimension(image.info.as_ref().and_then(|info| info.size)),
             blurhash: image.info.as_ref().and_then(|info| info.blurhash.clone()),
             thumbnail: image.info.as_deref().and_then(image_thumbnail),
-            spoiler: spoiler_reason(raw),
+            spoiler,
         },
         GalleryItemType::Video(video) => GalleryItemView::Video {
             filename: video.filename().to_owned(),
@@ -65,7 +62,7 @@ pub(super) fn gallery_item(
             height: dimension(video.info.as_ref().and_then(|info| info.height)),
             blurhash: video.info.as_ref().and_then(|info| info.blurhash.clone()),
             thumbnail: video.info.as_deref().and_then(video_thumbnail),
-            spoiler: spoiler_reason(raw),
+            spoiler,
         },
         GalleryItemType::Audio(audio) => GalleryItemView::Audio {
             filename: audio.filename().to_owned(),
@@ -219,16 +216,14 @@ pub(super) fn caption_view(
     formatted: Option<&matrix_sdk::ruma::events::room::message::FormattedBody>,
     profile: Option<&PerMessageProfileView>,
 ) -> (Option<String>, Option<String>) {
-    let known = formatted
-        .map(|formatted| formatted.body.as_str())
-        .is_some_and(has_profile_fallback_html)
-        || profile.is_some_and(|profile| profile.has_fallback);
-    let name = profile.and_then(|profile| profile.display_name.as_deref());
+    let name = profile
+        .filter(|profile| profile.has_fallback)
+        .and_then(|profile| profile.display_name.as_deref());
 
-    let caption = caption.map(|caption| strip_profile_fallback_body(caption, name, known));
+    let caption = caption.map(|caption| strip_profile_fallback_body(caption, name));
     let html = match (formatted, caption.as_deref()) {
         (Some(formatted), caption) => {
-            let html = strip_profile_fallback_html(&formatted.body, name, known);
+            let html = strip_profile_fallback_html(&formatted.body, name);
             Some(display_html(caption.unwrap_or_default(), Some(&html)))
         }
         (None, Some(caption)) => Some(display_html(caption, None)),
