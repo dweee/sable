@@ -206,3 +206,16 @@ test('adding a widget goes through the core and reloads the list', async () => {
   });
   expect(session.widgets).toHaveLength(1);
 });
+
+test('a cold direct room retries details once when sync discovers it', async () => {
+  const { rooms, session } = fixture();
+  rooms.open.mockRejectedValueOnce(new Error('rooms.open: unknown_room'));
+  session.sync('!cold', false, 0, false);
+  await settle();
+  expect(session.permissions).toBeNull();
+  session.sync('!cold', false, 0, true);
+  await settle();
+  expect(session.permissions).toEqual(opened('$new').permissions);
+  session.sync('!cold', false, 0, true);
+  expect(rooms.open).toHaveBeenCalledTimes(2);
+});

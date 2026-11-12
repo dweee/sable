@@ -114,6 +114,15 @@
         {#if presence && presence !== 'offline'}
           <PresenceDot {presence} label={i18n.t(`presence.${presence}`)} size="medium" />
         {/if}
+        {#if encryptionLabel !== null}
+          <Tooltip label={encryptionLabel}>
+            {#snippet trigger({ props })}
+              <span {...props} class="encryption-state" role="img" aria-label={encryptionLabel}>
+                {#if encrypted}<LockSimpleIcon />{:else}<LockSimpleOpenIcon />{/if}
+              </span>
+            {/snippet}
+          </Tooltip>
+        {/if}
       </div>
       {#if topicShown}
         <button class="room-topic" type="button" onclick={onTopic}>{topic}</button>
@@ -149,15 +158,6 @@
   {/snippet}
 
   {#snippet suffix()}
-    {#if encryptionLabel !== null}
-      <Tooltip label={encryptionLabel}>
-        {#snippet trigger({ props })}
-          <span {...props} class="encryption-state" role="img" aria-label={encryptionLabel}>
-            {#if encrypted}<LockSimpleIcon />{:else}<LockSimpleOpenIcon />{/if}
-          </span>
-        {/snippet}
-      </Tooltip>
-    {/if}
     <PanelHeaderButton
       class="search-button"
       label={i18n.t('common.searchMessages')}

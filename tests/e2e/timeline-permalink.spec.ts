@@ -1,4 +1,5 @@
-import { expect, test } from './fixtures/test';
+import { expect, test, SIGNED_OUT } from './fixtures/test';
+import { historyItems, timelineItem } from './fixtures/timeline-items';
 
 test('jumps to an event outside the loaded range', async ({
   page,
@@ -116,4 +117,70 @@ test('a repeated reply jump centres the target again', async ({
 
   await reply.click();
   await expect.poll(offsetFromCentre, { timeout: 10_000 }).toBeLessThan(120);
+});
+
+test.describe('a repeated permalink whose live target was evicted', () => {
+  test.use({ storageState: SIGNED_OUT });
+  test('centres the replacement focused subscription for the same URL', async ({
+    page,
+    app,
+    timeline,
+    core,
+    installRoomCore,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await installRoomCore('ready');
+    await app.openRoom('!room:example.test');
+    const target = '$general-10:example.test';
+    const reply = {
+      ...timelineItem('same-target-reply', 'Reply to the retained permalink'),
+      in_reply_to: {
+        event_id: target,
+        sender: '@alice:example.test',
+        sender_name: 'Alice',
+        sender_mentioned: false,
+        body: 'General message 10',
+        fallback: null,
+      },
+    };
+    const subscription = await core.subscription();
+    await core.emitTimelineDiff(subscription, [{ op: 'push_back', value: reply }]);
+    const preview = timeline.itemById(reply.id).locator('.reply-preview');
+    await expect(preview).toBeVisible();
+    const offset = () =>
+      timeline.itemByEventId(target).evaluate((node) => {
+        const viewport = node.closest('.viewport');
+        if (!viewport) throw new Error('missing reader viewport');
+        const row = node.getBoundingClientRect(),
+          bounds = viewport.getBoundingClientRect();
+        return Math.abs(row.top + row.height / 2 - bounds.top - bounds.height / 2);
+      });
+    await preview.click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('event')).toBe(target);
+    await expect.poll(offset).toBeLessThan(120);
+    expect(await core.subscribeCount()).toBe(1);
+    // Match the real SDK clear/repopulation from the captured full-suite trace:
+    // the URL stays put while the live snapshot loses the previously loaded row.
+    await core.emitTimelineDiff(subscription, [
+      {
+        op: 'reset',
+        values: [
+          ...historyItems({
+            idPrefix: 'replacement',
+            label: 'Replacement history',
+            count: 100,
+            timestampBase: 1_699_999_000_000,
+          }),
+          reply,
+        ],
+      },
+    ]);
+    await expect(timeline.itemByEventId(target)).toHaveCount(0);
+    await timeline.viewport.hover();
+    await page.mouse.wheel(0, 5_000);
+    await expect(preview).toBeInViewport();
+    await preview.click();
+    await expect.poll(() => core.subscribeCount()).toBe(2);
+    await expect.poll(offset).toBeLessThan(120);
+  });
 });

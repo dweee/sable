@@ -11,6 +11,8 @@ import { LOGIN_PASSWORD, LOGIN_USERNAME } from './loginAccount';
 import { MatrixAdmin } from './matrix';
 import { HomeserverProxy } from './proxy';
 import { homeserverStatePath } from './runtime';
+import { cloneableStorageState } from './session-snapshot';
+import { persistedSearchBodies } from './search-snapshot';
 
 export type TimelineHomeserver = TestHomeserver & {
   timelineRoomId: string;
@@ -152,7 +154,9 @@ async function saveSignedInState(
   });
   await settle?.(page);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(await context.storageState({ indexedDB: true })));
+  await writeFile(path, JSON.stringify(await cloneableStorageState(browser, page)), {
+    mode: 0o600,
+  });
   await context.close();
 }
 
@@ -299,41 +303,52 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
         statePath,
         async (page) => {
           const shell = new AppShell(page);
-          for (const roomId of [generalId, randomId, clubhouseId]) {
+          const warmRooms = [
+            { roomId: generalId, bodies: searchBodies('General') },
+            { roomId: randomId, bodies: searchBodies('Random') },
+            { roomId: clubhouseId, bodies: ['Clubhouse notice board', 'Clubhouse thread reply'] },
+          ];
+          for (const { roomId, bodies } of warmRooms) {
             await shell.openRoom(roomId);
             await expect(
-              page.locator('.timeline-viewport .item[data-event-id]').first()
+              page
+                .locator('.timeline-viewport')
+                .getByText(bodies[0], { exact: true })
+                .and(page.locator('[data-plain-body]'))
             ).toBeVisible({ timeout: 30_000 });
+            // A full navigation can release the worker before its periodic
+            // flush. Finish this room's actual message chunks before leaving.
+            await expect
+              .poll(
+                async () => {
+                  const state = await page.context().storageState({ indexedDB: true });
+                  const persisted = new Set(persistedSearchBodies(state, roomId));
+                  return bodies.filter((body) => !persisted.has(body));
+                },
+                { timeout: 150_000, intervals: [1_000] }
+              )
+              .toEqual([]);
           }
+          const expected = [
+            { roomId: generalId, bodies: searchBodies('General') },
+            { roomId: randomId, bodies: searchBodies('Random') },
+            { roomId: clubhouseId, bodies: ['Clubhouse notice board', 'Clubhouse thread reply'] },
+          ];
+          // A manifest exists before every message/chunk has been flushed.
+          // Freeze the session only when its persisted index contains the
+          // corpus that every restored search test is promised.
           await expect
             .poll(
               async () => {
-                const state = (await page.context().storageState({ indexedDB: true })) as {
-                  origins: {
-                    indexedDB?: {
-                      name: string;
-                      stores: { records: { key: unknown }[] }[];
-                    }[];
-                  }[];
-                };
-                return state.origins
-                  .flatMap((origin) => origin.indexedDB ?? [])
-                  .filter((database) => database.name.endsWith('::sable-search'))
-                  .flatMap((database) =>
-                    database.stores.flatMap((store) =>
-                      store.records.map((record) =>
-                        typeof record.key === 'string' ? record.key : ''
-                      )
-                    )
-                  );
+                const state = await page.context().storageState({ indexedDB: true });
+                return expected.map(({ roomId, bodies }) => {
+                  const persisted = new Set(persistedSearchBodies(state, roomId));
+                  return { roomId, missing: bodies.filter((body) => !persisted.has(body)) };
+                });
               },
               { timeout: 150_000, intervals: [1_000] }
             )
-            .toEqual(
-              expect.arrayContaining(
-                [generalId, randomId, clubhouseId].map((roomId) => `sable.search.room.${roomId}`)
-              )
-            );
+            .toEqual(expected.map(({ roomId }) => ({ roomId, missing: [] })));
         },
         async (page) => {
           await page.addInitScript(() => {

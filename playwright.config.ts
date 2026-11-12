@@ -1,4 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
+import { initializeHomeserverRunId } from './tests/e2e/fixtures/runtime';
+
+initializeHomeserverRunId();
 
 const port = process.env.SABLE_PREVIEW_PORT ?? '4173';
 const origin = `http://127.0.0.1:${port}`;

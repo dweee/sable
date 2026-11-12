@@ -1,4 +1,4 @@
-import { expect, test } from './fixtures/test';
+import { expect, test, SIGNED_OUT } from './fixtures/test';
 
 const WIDGET_URL =
   'https://widgets.example.test/dashboard?user=$matrix_user_id&room=$matrix_room_id&name=$matrix_display_name';
@@ -27,7 +27,7 @@ test('a widget renders in a sandboxed iframe with the room and user substituted'
   await expect(frame).toBeVisible();
   await expect(frame).toHaveAttribute(
     'sandbox',
-    'allow-forms allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads'
+    'allow-forms allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-modals'
   );
 
   const url = new URL((await frame.getAttribute('src')) ?? '');
@@ -90,4 +90,30 @@ test('removing a widget with permission takes it out of the room state', async (
       )
     )
     .toEqual({});
+});
+
+test.describe('cached summary before the backend room is ready', () => {
+  test.use({ storageState: SIGNED_OUT });
+  test('timeline readiness recovers widget management after an unknown room', async ({
+    page,
+    app,
+    timeline,
+    installRoomCore,
+  }) => {
+    await installRoomCore('cold_room_details');
+    await app.openRooms();
+    await expect(app.roomLink('General')).toBeVisible();
+    await page.waitForFunction(() =>
+      Object.keys(localStorage).some(
+        (key) =>
+          key.startsWith('sable.room-list.v2.') &&
+          localStorage.getItem(key)?.includes('!room:example.test')
+      )
+    );
+    await app.openRoom('!room:example.test');
+    await timeline.expectRevealed();
+    await expect(page.getByRole('button', { name: 'Widgets', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Widgets', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Remove Dashboard', exact: true })).toBeVisible();
+  });
 });

@@ -24,6 +24,19 @@ async function stubNotifications(page: Page): Promise<void> {
       this.addEventListener = () => {};
       this.close = () => {};
     }
+    // The app may use the registration API when its service worker is ready.
+    // Intercept both browser delivery paths; overriding Notification.permission
+    // alone does not grant native service-worker notification permission.
+    if (typeof ServiceWorkerRegistration !== 'undefined') {
+      Object.defineProperty(ServiceWorkerRegistration.prototype, 'showNotification', {
+        configurable: true,
+        value: (title: string, options: NotificationOptions = {}): Promise<void> => {
+          raised.push({ title, body: options.body ?? '', tag: options.tag ?? '' });
+          return Promise.resolve();
+        },
+      });
+    }
+
     StubNotification.permission = 'granted';
     StubNotification.requestPermission = () => Promise.resolve('granted');
 
@@ -61,10 +74,21 @@ for (const opened of [false, true]) {
       'The test homeserver does not resolve $ME/$LAZY membership selectors in sliding sync.'
     );
     const roomName = `Notified ${String(Date.now())}`;
-    const roomId = await guest.createRoom({ name: roomName, invite: [admin.userId] });
+    const roomId = await guest.createRoom({
+      name: roomName,
+      preset: 'public_chat',
+      visibility: 'public',
+    });
     await admin.join(roomId);
     await admin.sendMessage(roomId, 'Channel opened');
-    await admin.request('PUT', `client/v3/pushrules/global/room/${encodeURIComponent(roomId)}`, {
+    // A room-wide rule also notifies recent creation and membership state
+    // replayed from the worker's sealed initial sync. This contract is ordinary
+    // messages, so match their type at the push-rule source, including replay.
+    await admin.request('PUT', `client/v3/pushrules/global/override/e2e-channel-messages`, {
+      conditions: [
+        { kind: 'event_match', key: 'room_id', pattern: roomId },
+        { kind: 'event_match', key: 'type', pattern: 'm.room.message' },
+      ],
       actions: ['notify'],
     });
 
@@ -81,7 +105,7 @@ for (const opened of [false, true]) {
     await expect(page.locator(`a[href="/rooms/${roomId}"]`)).toBeVisible({ timeout: 30_000 });
 
     const body = `shipped the patch ${String(Date.now())}`;
-    await guest.sendMessage(roomId, body);
+    const eventId = await guest.sendMessage(roomId, body);
 
     await expect
       .poll(() => page.evaluate(() => window.__e2eNotifications), { timeout: 40_000 })
@@ -89,7 +113,7 @@ for (const opened of [false, true]) {
         {
           title: roomName,
           body: `${GUEST_DISPLAY_NAME}: ${body}`,
-          tag: '',
+          tag: `${admin.userId} ${roomId}:${eventId}`,
         },
       ]);
 

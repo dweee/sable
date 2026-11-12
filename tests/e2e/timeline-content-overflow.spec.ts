@@ -309,6 +309,10 @@ for (const layout of ['modern', 'compact', 'bubble'] as const) {
             });
             previousId = id;
             await expect(timeline.itemById(id)).toBeVisible();
+            // A loading placeholder can fit even when the decoded audio controls
+            // overflow. Measure the player this waveform fixture actually uses.
+            if (label === 'audio')
+              await expect(timeline.itemById(id).locator('.voice-message-player')).toBeVisible();
             const header = await timeline.itemById(id).evaluate((node) => {
               const name = node.querySelector('header .sender-identity');
               const details = node.querySelector('header .message-details');

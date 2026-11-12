@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { HOMESERVER_RUN_LABEL, removeOwnedHomeserver } from './container-ownership';
+import { homeserverRunId } from './runtime';
+
 const execFileAsync = promisify(execFile);
 
 const HOMESERVER_IMAGE = 'ghcr.io/continuwuity/continuwuity:latest';
@@ -11,7 +14,8 @@ const LIVEKIT_IMAGE = 'livekit/livekit-server:v1.13.11';
 const JWT_IMAGE = 'ghcr.io/element-hq/lk-jwt-service:latest';
 const PROXY_IMAGE = 'caddy:2';
 
-const NETWORK = 'sable-e2e-call';
+const NETWORK = 'host';
+const ownedContainers: string[] = [];
 const SERVER_NAME = 'hs.test';
 const HOMESERVER_PORT = 18108;
 const JWT_PORT = 18080;
@@ -22,41 +26,59 @@ const REGISTRATION_TOKEN = 'sable-e2e';
 const LIVEKIT_KEY = 'devkey';
 const LIVEKIT_SECRET = 'secretsecretsecretsecretsecretsecret';
 const CONTAINERS = [
-  'sable-e2e-call-hs',
-  'sable-e2e-call-proxy',
-  'sable-e2e-call-lk',
-  'sable-e2e-call-jwt',
+  `sable-e2e-call-${homeserverRunId()}-hs`,
+  `sable-e2e-call-${homeserverRunId()}-proxy`,
+  `sable-e2e-call-${homeserverRunId()}-lk`,
+  `sable-e2e-call-${homeserverRunId()}-jwt`,
 ];
 
 export const CALL_HOMESERVER_URL = `http://127.0.0.1:${String(HOMESERVER_PORT)}`;
 export const CALL_PASSWORD = 'test-passw0rd';
 
 async function docker(...args: string[]): Promise<string> {
+  const run = args[0] === 'run';
+  if (run) args.splice(1, 0, '--label', `${HOMESERVER_RUN_LABEL}=${homeserverRunId()}`);
   const { stdout } = await execFileAsync('docker', args);
-  return stdout.trim();
+  const result = stdout.trim();
+  if (run) {
+    if (!/^[0-9a-f]{64}$/.test(result))
+      throw new Error('Docker did not return a full container ID');
+    ownedContainers.push(result);
+    console.log(`Owned call container ${result}`);
+  }
+  return result;
 }
 
 export async function stopCallStack(): Promise<void> {
-  await Promise.all(CONTAINERS.map((name) => docker('rm', '-f', name).catch(() => '')));
-  await docker('network', 'rm', NETWORK).catch(() => '');
+  const results = await Promise.allSettled(ownedContainers.map((id) => removeOwnedHomeserver(id)));
+  if (results.some((result) => result.status === 'rejected')) {
+    throw new AggregateError(
+      results
+        .filter((result) => result.status === 'rejected')
+        .map((result): unknown => result.reason),
+      'Call container cleanup failed'
+    );
+  }
+  ownedContainers.length = 0;
 }
 
 // The JWT service validates each OpenID token against the federation API of the server named in
 // it, over HTTPS on 8448, so the homeserver is also reachable under its server name through a
-// TLS-terminating proxy on the shared network.
+// TLS-terminating proxy on loopback. Host networking avoids bridge changes that
+// invalidate Chromium requests; every listener is bound to loopback.
 export async function startCallStack(): Promise<void> {
-  await stopCallStack();
   const dir = await mkdtemp(join(tmpdir(), 'sable-call-stack-'));
   const caddyfile = join(dir, 'Caddyfile');
   const livekitConfig = join(dir, 'livekit.yaml');
   await writeFile(
     caddyfile,
-    `{\n  skip_install_trust\n}\n${SERVER_NAME}:8448 {\n  tls internal\n  reverse_proxy sable-e2e-call-hs:8008\n}\n`
+    `{\n  skip_install_trust\n  auto_https disable_redirects\n}\n${SERVER_NAME}:8448 {\n  tls internal\n  bind 127.0.0.1\n  reverse_proxy 127.0.0.1:${String(HOMESERVER_PORT)}\n}\n`
   );
   await writeFile(
     livekitConfig,
     [
       `port: ${String(LIVEKIT_PORT)}`,
+      'bind_addresses: [127.0.0.1]',
       'rtc:',
       `  tcp_port: ${String(LIVEKIT_TCP_PORT)}`,
       `  udp_port: ${String(LIVEKIT_UDP_PORT)}`,
@@ -68,7 +90,6 @@ export async function startCallStack(): Promise<void> {
     ].join('\n')
   );
 
-  await docker('network', 'create', NETWORK);
   await docker(
     'run',
     '-d',
@@ -76,8 +97,6 @@ export async function startCallStack(): Promise<void> {
     CONTAINERS[0],
     '--network',
     NETWORK,
-    '-p',
-    `${String(HOMESERVER_PORT)}:8008`,
     '--tmpfs',
     '/database',
     '-e',
@@ -85,9 +104,9 @@ export async function startCallStack(): Promise<void> {
     '-e',
     `CONTINUWUITY_WELL_KNOWN__CLIENT=${CALL_HOMESERVER_URL}`,
     '-e',
-    'CONTINUWUITY_ADDRESS=0.0.0.0',
+    'CONTINUWUITY_ADDRESS=127.0.0.1',
     '-e',
-    'CONTINUWUITY_PORT=8008',
+    `CONTINUWUITY_PORT=${String(HOMESERVER_PORT)}`,
     '-e',
     'CONTINUWUITY_DATABASE_PATH=/database',
     '-e',
@@ -113,8 +132,6 @@ export async function startCallStack(): Promise<void> {
     CONTAINERS[1],
     '--network',
     NETWORK,
-    '--network-alias',
-    SERVER_NAME,
     '-v',
     `${caddyfile}:/etc/caddy/Caddyfile:ro`,
     PROXY_IMAGE
@@ -126,14 +143,6 @@ export async function startCallStack(): Promise<void> {
     CONTAINERS[2],
     '--network',
     NETWORK,
-    '-p',
-    `${String(LIVEKIT_PORT)}:${String(LIVEKIT_PORT)}`,
-    '-p',
-    `${String(LIVEKIT_TCP_PORT)}:${String(LIVEKIT_TCP_PORT)}`,
-    '-p',
-    `${String(LIVEKIT_UDP_PORT)}:${String(LIVEKIT_UDP_PORT)}/udp`,
-    '-p',
-    `${String(JWT_PORT)}:${String(JWT_PORT)}`,
     '-v',
     `${livekitConfig}:/etc/livekit.yaml:ro`,
     LIVEKIT_IMAGE,
@@ -146,7 +155,9 @@ export async function startCallStack(): Promise<void> {
     '--name',
     CONTAINERS[3],
     '--network',
-    `container:${CONTAINERS[2]}`,
+    NETWORK,
+    '--add-host',
+    `${SERVER_NAME}:127.0.0.1`,
     '-e',
     `LIVEKIT_URL=ws://127.0.0.1:${String(LIVEKIT_PORT)}`,
     '-e',
@@ -156,7 +167,7 @@ export async function startCallStack(): Promise<void> {
     '-e',
     `LIVEKIT_FULL_ACCESS_HOMESERVERS=${SERVER_NAME}`,
     '-e',
-    `LIVEKIT_JWT_BIND=:${String(JWT_PORT)}`,
+    `LIVEKIT_JWT_BIND=127.0.0.1:${String(JWT_PORT)}`,
     '-e',
     'LIVEKIT_INSECURE_SKIP_VERIFY_TLS=YES_I_KNOW_WHAT_I_AM_DOING',
     JWT_IMAGE

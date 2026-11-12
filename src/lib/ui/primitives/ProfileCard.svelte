@@ -111,6 +111,7 @@
 
   const nameId = $props.id();
   let copied = $state(false);
+  let statusHovered = $state(false);
   async function copyUserId(): Promise<void> {
     await copyText(userId);
     copied = true;
@@ -127,6 +128,10 @@
 </script>
 
 <section
+  onpointerleave={(event) => {
+    statusHovered = false;
+    resetStatusScroll(event);
+  }}
   ondragstart={(event) => {
     event.preventDefault();
   }}
@@ -134,7 +139,7 @@
   class={[
     'profile-card',
     `profile-card-${variant}`,
-    { 'profile-card-inset-body': insetBody },
+    { 'profile-card-inset-body': insetBody, 'status-hovered': statusHovered },
     className,
     { tinted, 'tint-light': ink === BLACK, 'tint-dark': ink === WHITE },
   ]}
@@ -198,6 +203,7 @@
     {:else if status || statusField}
       <div
         class="profile-card-status"
+        onpointerenter={() => (statusHovered = true)}
         role="group"
         onpointerleave={resetStatusScroll}
         onfocusout={resetStatusScroll}
@@ -513,7 +519,7 @@
     outline-offset: calc(-1 * var(--focus-ring-width));
   }
 
-  .profile-card-status:hover .profile-card-status-text,
+  .profile-card.status-hovered .profile-card-status-text,
   .profile-card-status:focus-within .profile-card-status-text {
     display: block;
     -webkit-line-clamp: unset;

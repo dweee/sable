@@ -83,6 +83,9 @@ for (const source of ['reply', 'link']) {
       }
 
       await page.goBack();
+      await expect(page.locator('#drawer-toggle')).toHaveAttribute('aria-pressed', 'true');
+      await expect(page).toHaveURL(/\/rooms\/[^/]+$/);
+      await page.goBack();
       await expect(page).toHaveURL(/\/rooms$/);
     });
   }
@@ -105,6 +108,9 @@ test('mobile: switching rooms from the list replaces the entry, so back leaves t
   await pickRoom(page, /^Random/);
   expect(await historyLength(page)).toBe(length);
 
+  await page.goBack();
+  await expect(page.locator('#drawer-toggle')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page).toHaveURL(/\/rooms\/[^/]+$/);
   await page.goBack();
   await expect(page).toHaveURL(/\/rooms$/);
 });

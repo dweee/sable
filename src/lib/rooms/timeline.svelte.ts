@@ -108,6 +108,13 @@ export class RoomTimeline {
   mode = $state.raw<TimelineMode>({ kind: 'live' });
   backwardPagination = $state<BackwardPaginationState>('idle');
 
+  /** A painted timeline snapshot does not prove the SDK knows the room yet. */
+  get readyRoomId(): string | null {
+    return this.hasSnapshot && !this.loading && this.error === null && this.subscription !== null
+      ? (this.target?.roomId ?? null)
+      : null;
+  }
+
   get subscriptionId(): SubscriptionId | null {
     return this.subscription;
   }

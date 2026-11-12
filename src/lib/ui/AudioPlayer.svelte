@@ -213,6 +213,8 @@
     gap: var(--space-200);
 
     input {
+      flex: 1 1 0%;
+      min-width: 0;
       width: 100%;
     }
   }
@@ -247,7 +249,9 @@
 
   .audio-filename {
     font-size: var(--font-size-small);
+    min-width: 0;
     opacity: 0.8;
+    overflow-wrap: anywhere;
   }
 
   .audio-timestamp {

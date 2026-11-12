@@ -173,9 +173,12 @@ test('the header shows whether the room is end-to-end encrypted', () => {
   unmount();
 
   mountHeader({ isVoice: false, callParticipants: [], encrypted: false });
-  expect(
-    screen.getByRole('img', { name: 'Messages in this room are not end-to-end encrypted.' })
-  ).toBeInTheDocument();
+  const status = screen.getByRole('img', {
+    name: 'Messages in this room are not end-to-end encrypted.',
+  });
+  expect(status).toBeInTheDocument();
+  // Encryption is room metadata, not an action in the roving toolbar.
+  expect(screen.getByRole('toolbar', { name: 'Room actions' })).not.toContainElement(status);
 });
 
 test('the header claims nothing while encryption is unknown', () => {

@@ -29,6 +29,7 @@ import type {
 
 export type RoomCoreMode =
   | 'ready'
+  | 'cold_room_details'
   | 'direct'
   | 'room_name_overflow'
   | 'thread_links'
@@ -60,6 +61,7 @@ type WorkerMode = RoomCoreMode;
 declare global {
   interface Window {
     __e2eCommands: string[];
+    __e2eMediaRequests: { source: string; width: number; height: number }[];
     __e2eAccounts?: SessionInfo[];
     __e2eSwitchAccountError?: boolean;
     __e2eSwitchAccountDelayMs?: number;
@@ -105,6 +107,12 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
     }
 
     const commandLog: string[] = [];
+    let backendRoomReady = false;
+    const mediaRequests: Window['__e2eMediaRequests'] = [];
+    Object.defineProperty(window, '__e2eMediaRequests', {
+      configurable: true,
+      value: mediaRequests,
+    });
     const calls: { method: string; params: unknown }[] = [];
     const timelineRooms: string[] = [];
     const timelineSubscriptions: number[] = [];
@@ -1859,6 +1867,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
     };
 
     const replyDelay = (type: string, params: unknown): number => {
+      if (workerMode === 'cold_room_details' && type === 'timeline.subscribe') return 750;
       if (type === 'session.switch_account') return window.__e2eSwitchAccountDelayMs ?? 0;
       if (workerMode === 'forward_history' && type === 'timeline.paginate') return 0;
       if (
@@ -1869,6 +1878,11 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
         unreadContextOpened
       )
         return 1_500;
+      // A real pagination RPC completes after its page is loaded. Returning
+      // early makes history fill request a second page before the delayed diff.
+      if (workerMode === 'delayed_pagination' && type === 'timeline.paginate') {
+        return paginationDelay();
+      }
       if (type === 'timeline.paginate') return 500;
       if (
         type === 'timeline.subscribe' &&
@@ -1916,6 +1930,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
         }
         if (request.media) {
           const { source, width, height } = request.media;
+          mediaRequests.push({ source, width, height });
           commandLog.push(`fetch_media ${String(width)}x${String(height)}`);
           window.setTimeout(
             () => {
@@ -1941,6 +1956,13 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           )[method];
           let reply: { id: number; ok: unknown } | { id: number; err: { code: string } };
           try {
+            if (
+              workerMode === 'cold_room_details' &&
+              method === 'rooms.open' &&
+              !backendRoomReady
+            ) {
+              throw new FakeCoreError('unknown_room');
+            }
             const ok = handler ? handler(params, this) : null;
             if (ok === NO_REPLY) return;
             reply = { id: request.id, ok };
@@ -1954,6 +1976,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           }
           window.setTimeout(
             () => {
+              if (method === 'timeline.subscribe' && 'ok' in reply) backendRoomReady = true;
               this.onmessage?.({ data: reply } as MessageEvent);
               if (method !== 'timeline.subscribe' || !('ok' in reply)) return;
               this.subscribed((reply.ok as RpcResult<Rpc['timeline']['subscribe']>).subscription);

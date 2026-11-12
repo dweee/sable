@@ -135,34 +135,36 @@ test('an rpm or deb install reports the latest release instead of installing it'
   expect(await latest?.[1]({ senderFrame: {} })).toBe('2.4.0');
 });
 
-
 test.each([
   { name: 'the launch environment', env: '1', metadata: undefined },
   { name: 'immutable package metadata', env: undefined, metadata: false },
-])('fork isolation through $name blocks every native updater IPC route', async ({ env, metadata }) => {
-  vi.stubEnv('SABLE_DISABLE_UPDATER', env);
-  vi.stubEnv('APPIMAGE', '/home/user/Sable.AppImage');
-  mocks.autoUpdate = metadata;
-  vi.resetModules();
-  const updater = await import('./updater');
-  const fetch = vi.fn();
-  vi.stubGlobal('fetch', fetch);
-  expect(updater.supportsAutoUpdate()).toBe(false);
-  updater.setUpdateChannel('stable');
-  updater.registerUpdater(() => true);
-  const event = { senderFrame: {} };
-  const handler = (name: string) => {
-    const match = mocks.handle.mock.calls.find(([channel]) => channel === name);
-    expect(match).toBeDefined();
-    return match?.[1];
-  };
-  expect(await handler('sable-update-check')?.(event)).toBeNull();
-  expect(await handler('sable-update-latest-version')?.(event)).toBeNull();
-  await expect(handler('sable-update-download')?.(event)).rejects.toThrow('not the app');
-  handler('sable-update-install')?.(event);
-  expect(fetch).not.toHaveBeenCalled();
-  expect(mocks.setFeedURL).not.toHaveBeenCalled();
-  expect(mocks.checkForUpdates).not.toHaveBeenCalled();
-  expect(mocks.downloadUpdate).not.toHaveBeenCalled();
-  expect(mocks.quitAndInstall).not.toHaveBeenCalled();
-});
+])(
+  'fork isolation through $name blocks every native updater IPC route',
+  async ({ env, metadata }) => {
+    vi.stubEnv('SABLE_DISABLE_UPDATER', env);
+    vi.stubEnv('APPIMAGE', '/home/user/Sable.AppImage');
+    mocks.autoUpdate = metadata;
+    vi.resetModules();
+    const updater = await import('./updater');
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    expect(updater.supportsAutoUpdate()).toBe(false);
+    updater.setUpdateChannel('stable');
+    updater.registerUpdater(() => true);
+    const event = { senderFrame: {} };
+    const handler = (name: string) => {
+      const match = mocks.handle.mock.calls.find(([channel]) => channel === name);
+      expect(match).toBeDefined();
+      return match?.[1];
+    };
+    expect(await handler('sable-update-check')?.(event)).toBeNull();
+    expect(await handler('sable-update-latest-version')?.(event)).toBeNull();
+    await expect(handler('sable-update-download')?.(event)).rejects.toThrow('not the app');
+    handler('sable-update-install')?.(event);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mocks.setFeedURL).not.toHaveBeenCalled();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.quitAndInstall).not.toHaveBeenCalled();
+  }
+);

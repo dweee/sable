@@ -154,6 +154,10 @@ test('mobile emote sheet keeps its grid above the keyboard', async ({
   await page.getByRole('button', { name: en.composer.emotesAndStickers }).tap();
   const grid = page.locator('.board.sheet [role="grid"]').first();
   await expect(grid).toBeVisible();
+  // Measure the settled sheet, rather than a frame of its entry animation.
+  await page.locator('.dialog-content-sheet').evaluate(async (node) => {
+    await Promise.all(node.getAnimations().map((animation) => animation.finished));
+  });
 
   const measured = await page.evaluate(() => {
     const board = document.querySelector('.board.sheet');
@@ -163,8 +167,18 @@ test('mobile emote sheet keeps its grid above the keyboard', async ({
       board: board.getBoundingClientRect().bottom,
       grid: firstGrid.getBoundingClientRect().top,
       visible: window.visualViewport.height,
+      dialog: document
+        .querySelector('.dialog-content-sheet')
+        ?.getBoundingClientRect()
+        .toJSON() as unknown,
+      boardStyle: {
+        height: getComputedStyle(board).height,
+        minHeight: getComputedStyle(board).minHeight,
+        overlap: getComputedStyle(board).getPropertyValue('--keyboard-overlap'),
+        safe: getComputedStyle(board).getPropertyValue('--safe-bottom'),
+      },
     };
   });
-  expect(measured.board).toBeLessThanOrEqual(measured.visible + 1);
+  expect(measured.board, JSON.stringify(measured)).toBeLessThanOrEqual(measured.visible + 1);
   expect(measured.grid).toBeLessThan(measured.visible - 48);
 });

@@ -68,3 +68,35 @@ test('the signed-in surfaces have no accessibility violations', async ({
 
   expect(await violations(page)).toEqual([]);
 });
+
+test('mobile quick tools retain touch targets when route CSS is unavailable', async ({
+  page,
+  app,
+  installRoomCore,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installRoomCore('unverified');
+  await page.route(/\/_app\/immutable\/assets\/2\.[^/]+\.css$/, (route) =>
+    route.abort('internetdisconnected')
+  );
+  await app.openInbox();
+  await expect(page.getByRole('heading', { name: 'Notifications' })).toBeVisible();
+  const links = page.locator(
+    '.mobile-quick-tools a.quick-tool:is([href="/rooms"], [href="/navigate"], [href="/inbox"])'
+  );
+  await expect(links).toHaveCount(3);
+  const boxes = await links.evaluateAll((nodes) =>
+    nodes.map((n) => ({
+      label: n.getAttribute('aria-label'),
+      w: n.getBoundingClientRect().width,
+      h: n.getBoundingClientRect().height,
+    }))
+  );
+  await test
+    .info()
+    .attach('hitareas', { body: JSON.stringify(boxes), contentType: 'application/json' });
+  for (const b of boxes) {
+    expect(b.w, b.label ?? '').toBeGreaterThanOrEqual(44);
+    expect(b.h, b.label ?? '').toBeGreaterThanOrEqual(44);
+  }
+});

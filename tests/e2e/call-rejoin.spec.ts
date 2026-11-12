@@ -113,9 +113,9 @@ async function inboundAudioBytes(page: Page): Promise<number> {
 for (const encrypted of [false, true]) {
   test(`a call still carries audio after one side leaves and rejoins in ${encrypted ? 'an encrypted' : 'a plain'} room`, async ({
     browser,
-  }) => {
-    await startCallStack();
+  }, testInfo) => {
     try {
+      await startCallStack();
       const alice = await registerCallUser('alice');
       const bob = await registerCallUser('bob');
       const roomId = await createCallRoom(alice.accessToken, ROOM_NAME, [bob.userId], encrypted);
@@ -188,9 +188,11 @@ for (const encrypted of [false, true]) {
         await expectRemoteAudio(bobPage, 0);
       } catch (error) {
         console.log(await callStackLogs());
-        await alicePage.screenshot({ path: 'test-results/alice.png' });
-        await bobPage.screenshot({ path: 'test-results/bob.png' });
+        await alicePage.screenshot({ path: testInfo.outputPath('alice.png') });
+        await bobPage.screenshot({ path: testInfo.outputPath('bob.png') });
         throw error;
+      } finally {
+        await Promise.all(contexts.map((context) => context.close()));
       }
     } finally {
       await stopCallStack();

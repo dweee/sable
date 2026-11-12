@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, expect, test, vi } from 'vitest';
 import { commands, page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
@@ -30,6 +30,13 @@ async function png(transparent: boolean): Promise<Uint8Array<ArrayBuffer>> {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+// Keep canvas encoding outside the image-loading and opacity assertions.
+let avatarBytes: Uint8Array<ArrayBuffer>;
+let bannerBytes: Uint8Array<ArrayBuffer>;
+beforeAll(async () => {
+  [avatarBytes, bannerBytes] = await Promise.all([png(true), png(false)]);
+});
+
 afterEach(async () => {
   await commands.emulateColorScheme('light');
 });
@@ -40,7 +47,11 @@ for (const heroColor of [null, '#430039']) {
       await commands.emulateColorScheme(scheme);
       Object.assign(core, {
         session: { user_id: '@alice:example.test' },
-        fetchMedia: vi.fn(async (source: string) => png(source.endsWith('/transparent-avatar'))),
+        fetchMedia: vi.fn((source: string) =>
+          Promise.resolve(
+            (source.endsWith('/transparent-avatar') ? avatarBytes : bannerBytes).slice()
+          )
+        ),
       });
 
       const screen = await render(ProfileCard, {
@@ -55,14 +66,21 @@ for (const heroColor of [null, '#430039']) {
       const avatar = screen.container.querySelector<HTMLElement>('.profile-card-avatar');
       const cover = screen.container.querySelector<HTMLElement>('.profile-card-cover');
       if (!avatar || !cover) throw new Error('The profile card is not rendered');
-      await vi.waitFor(() => {
-        const image = cover.querySelector('img');
-        expect(image?.complete && image.naturalWidth > 0).toBe(true);
-        expect(avatar.querySelector('img')).not.toBeNull();
-      });
-      expect(avatar.querySelector('.media-image')?.getAttribute('style') ?? '').not.toMatch(
-        /background/
-      );
+      // Use the browser project's polling policy for both decoded images.
+      await expect
+        .poll(() => {
+          const image = cover.querySelector('img');
+          const avatarImage = avatar.querySelector('img');
+          return [
+            Boolean(image?.complete && image.naturalWidth > 0),
+            Boolean(avatarImage?.complete && avatarImage.naturalWidth > 0),
+          ];
+        })
+        .toEqual([true, true]);
+      // MediaImage reports the decoded picture through a Svelte effect, then Avatar clears its tint.
+      await expect
+        .poll(() => avatar.querySelector('.media-image')?.getAttribute('style') ?? '')
+        .not.toMatch(/background/);
 
       const withBanner = await page
         .elementLocator(avatar)
@@ -138,6 +156,22 @@ test('a hovered status clears the name and the actions below it', async () => {
   const bubbleBox = box('.profile-card-status');
   const identity = box('.profile-card-identity');
   expect(bubbleBox.y + bubbleBox.height).toBeLessThanOrEqual(identity.y);
+});
+
+test('leaving the status for a card action keeps its position stable', async () => {
+  const screen = await statusCard();
+  const status = screen.getByRole('region', { name: en.settings.status });
+  const userId = document.querySelector<HTMLElement>('.profile-card-user-id');
+  const bubble = document.querySelector<HTMLElement>('.profile-card-status');
+  if (!userId || !bubble) throw new Error('missing profile controls');
+  userId.focus();
+  await userEvent.hover(bubble);
+  const identity = box('.profile-card-identity');
+  await userEvent.hover(userId);
+  expect(overflowY(status.element())).toBe('auto');
+  expect(box('.profile-card-identity').y).toBe(identity.y);
+  await userEvent.unhover(userId);
+  expect(overflowY(status.element())).toBe('hidden');
 });
 
 test('an expanded status stays inside the card and above its controls', async () => {

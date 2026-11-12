@@ -883,6 +883,9 @@
     void focusEventId;
     void timeline.mode;
     untrack(() => {
+      // The same permalink can need a new subscription after a live timeline
+      // evicts its target. Reposition once that new context is ready.
+      handledFocus = null;
       focus.cancel();
       if (!switchingToUnread) unreadNavigation?.abort();
       future.reset();
@@ -891,7 +894,15 @@
   $effect(() => {
     const target = focusEventId;
     const engine = controller;
-    if (!engine || !revealed || target === handledFocus) return;
+    if (
+      !engine ||
+      !revealed ||
+      timeline.loading ||
+      !timeline.hasSnapshot ||
+      timeline.error !== null ||
+      target === handledFocus
+    )
+      return;
     if (target === null) {
       handledFocus = null;
       return;

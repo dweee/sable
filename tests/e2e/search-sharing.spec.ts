@@ -1,3 +1,4 @@
+import en from '../../src/locales/en.json' with { type: 'json' };
 import { expect, test, SIGNED_OUT } from './fixtures/test';
 
 test.use({ storageState: SIGNED_OUT });
@@ -26,11 +27,7 @@ test('search sharing starts by default and can be turned off', async ({ page }) 
   await expect(
     page.getByRole('switch', { name: 'Share the search index between devices', exact: true })
   ).toBeChecked();
-  await expect(
-    page.getByText(
-      'Open Sable on both devices on the same network. Indexing continues if they cannot connect.'
-    )
-  ).toBeVisible();
+  await expect(page.getByText(en.settings.searchPeerHint)).toBeVisible();
 
   await page
     .getByRole('switch', { name: 'Share the search index between devices', exact: true })
@@ -54,7 +51,9 @@ test('unsupported browsers keep direct sharing unavailable without starting it',
     Object.defineProperty(window, 'RTCPeerConnection', { value: undefined });
   });
   await page.goto('/settings/timeline');
-  await expect(page.getByText('Direct sharing unavailable', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(en.settings.searchPeerStateUnavailable, { exact: true })
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() => {

@@ -29,10 +29,14 @@ export class FakeCoreDriver {
     );
   }
 
-  mediaFetches(): Promise<string[]> {
-    return this.page.evaluate(() =>
-      window.__e2eCommands.filter((command) => command.startsWith('fetch_media'))
-    );
+  mediaFetches(source?: string): Promise<string[]> {
+    return this.page.evaluate((wanted) => {
+      if (wanted === undefined)
+        return window.__e2eCommands.filter((command) => command.startsWith('fetch_media'));
+      return window.__e2eMediaRequests
+        .filter((request) => request.source === wanted)
+        .map(({ width, height }) => `fetch_media ${String(width)}x${String(height)}`);
+    }, source);
   }
 
   async holdMedia(): Promise<void> {

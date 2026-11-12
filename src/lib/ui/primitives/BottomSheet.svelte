@@ -356,12 +356,17 @@
     height: 16rem;
   }
 
+  .collapsed,
   .expanded {
     display: flex;
     flex-direction: column;
+  }
+
+  .expanded {
     height: 100%;
   }
 
+  .collapsed > :global(*),
   .expanded > :global(*) {
     flex: 1 1 0;
     min-height: 0;

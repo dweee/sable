@@ -34,7 +34,7 @@ function picture(width: number, height: number) {
 }
 
 function undecodablePicture() {
-  const item = picture(800, 600);
+  const item = picture(1600, 1200);
   return {
     ...item,
     content: {
@@ -129,6 +129,11 @@ for (const mobile of [false, true]) {
       content: { ...message.content, html },
       bundled_link_previews: [
         {
+          video: null,
+          theme_color: null,
+          card: null,
+          author_name: null,
+          post: null,
           url: 'https://example.org/landscape',
           title: 'Landscape',
           description: null,
@@ -590,7 +595,7 @@ test('a video takes the same box as the picture it shares dimensions with', asyn
   expect(asVideo.sideways).toBe(0);
 });
 
-test('a picture that will not decode falls back to the original once, then stops asking', async ({
+test('a picture that will not decode exhausts bounded recovery, then stops asking', async ({
   page,
   app,
   timeline,
@@ -601,21 +606,27 @@ test('a picture that will not decode falls back to the original once, then stops
   await app.openRooms();
   await app.openRoomFromList('General');
   await timeline.expectRevealed();
-  await core.setTimelineItemById(await core.subscription(), 'general-19', undecodablePicture());
+  const broken = undecodablePicture();
+  await core.setTimelineItemById(await core.subscription(), 'general-19', broken);
   const media = timeline.image.first();
 
   await expect(media).toContainText('Media unavailable');
-  const fetches = await core.mediaFetches();
+  const fetches = await core.mediaFetches(broken.content.source);
   expect(fetches.at(-1)).toBe('fetch_media 0x0');
-  expect(fetches.filter((fetch) => fetch === 'fetch_media 0x0')).toHaveLength(1);
+  // Each size gets an initial fetch, one fresh object URL and one core-cache reset.
+  // This matches the maintained MediaImage recovery contract.
+  expect(fetches.filter((fetch) => fetch === 'fetch_media 0x0')).toHaveLength(3);
+  expect((await core.commands()).filter((command) => command === 'forget_media')).toHaveLength(2);
 
   await quietFor(page, NEGATIVE_SETTLE_MS * 6);
-  expect(await core.mediaFetches()).toEqual(fetches);
+  expect(await core.mediaFetches(broken.content.source)).toEqual(fetches);
   await expect(media.locator('img')).toHaveCount(0);
 
   await media.getByRole('button', { name: 'Retry' }).click();
   await expect.poll(() => core.commands()).toContain('forget_media');
-  await expect.poll(async () => (await core.mediaFetches()).length).toBeGreaterThan(fetches.length);
+  await expect
+    .poll(async () => (await core.mediaFetches(broken.content.source)).length)
+    .toBeGreaterThan(fetches.length);
 });
 
 test('square article previews use thumbnails while landscape previews stay large', async ({
@@ -645,6 +656,11 @@ test('square article previews use thumbnails while landscape previews stay large
       ...timelineItem('general-19', 'https://example.test/article'),
       bundled_link_previews: [
         {
+          video: null,
+          theme_color: null,
+          card: null,
+          author_name: null,
+          post: null,
           url: 'https://example.test/article',
           title: 'Article title',
           description: 'Article description',

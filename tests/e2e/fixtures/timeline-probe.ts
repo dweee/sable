@@ -40,6 +40,19 @@ export function instrumentSelfWrites(viewport: HTMLElement): void {
   const read = (element: Element): number => Number(descriptor.get?.call(element));
   const write = (element: Element, value: number): void => descriptor.set?.call(element, value);
   const record = { writes: 0 };
+  // A synchronous, cancelled trusted wheel event is reader input even when a
+  // virtual scroller applies its delta in JavaScript. Layout corrections before
+  // preventDefault and writes outside the event remain application corrections.
+  let wheel: WheelEvent | undefined;
+  viewport.addEventListener(
+    'wheel',
+    (event) => {
+      wheel = event;
+    },
+    true
+  );
+  const readerWheel = (): boolean =>
+    wheel?.isTrusted === true && wheel.defaultPrevented && wheel.eventPhase !== Event.NONE;
   Object.defineProperty(window, '__e2eSelfWrites', {
     configurable: true,
     get: () => record.writes,
@@ -53,10 +66,10 @@ export function instrumentSelfWrites(viewport: HTMLElement): void {
       return read(this);
     },
     set(this: Element, value: number) {
-      window.__e2eSelfWriteCount += 1;
+      if (!readerWheel()) window.__e2eSelfWriteCount += 1;
       const before = read(this);
       write(this, value);
-      record.writes += read(this) - before;
+      if (!readerWheel()) record.writes += read(this) - before;
     },
   });
   window.__e2eUnexpectedScrolls = [];
@@ -102,6 +115,7 @@ export async function sampleGesture(
   if (!anchor) throw new Error('no fully visible row to anchor on');
   const content = anchor.firstElementChild ?? anchor;
   let top = content.getBoundingClientRect().top;
+  const initialTop = top;
   let scrollTop = viewport.scrollTop;
   let writes = window.__e2eSelfWrites;
   const initialUnexpected = window.__e2eUnexpectedScrolls.length;
@@ -138,6 +152,7 @@ export async function sampleGesture(
     writes = nextWrites;
   }
   return {
+    screenMovement: content.getBoundingClientRect().top - initialTop,
     frameError,
     readerMovement,
     clamped,

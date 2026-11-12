@@ -169,10 +169,32 @@ export class TimelineWindow<T> {
     listen('scrollend', () => {
       this.scheduleSettle();
     });
-    listen('wheel', (event) => {
-      if (event.ctrlKey || event.deltaY === 0) return;
-      this.interact();
-    });
+    // Native wheel scrolling can clamp against the compositor's old range when
+    // history rebases scrollTop in the same frame. Apply vertical input against
+    // the current range, leaving nested scrollers and diagonal gestures native.
+    viewport.addEventListener(
+      'wheel',
+      (event) => {
+        if (event.ctrlKey || event.deltaY === 0 || event.defaultPrevented) return;
+        this.interact();
+        // Dispatched synthetic events do not have native default scrolling.
+        if (!event.isTrusted || !event.cancelable || event.deltaX !== 0 || event.shiftKey) return;
+        for (const node of event.composedPath()) {
+          if (node === viewport) break;
+          if (!(node instanceof HTMLElement)) continue;
+          if (!/^(auto|scroll)$/.test(getComputedStyle(node).overflowY)) continue;
+          const remaining = node.scrollHeight - node.clientHeight - node.scrollTop;
+          if ((event.deltaY < 0 && node.scrollTop > 0) || (event.deltaY > 0 && remaining > 0))
+            return;
+        }
+        const lineHeight = Number.parseFloat(getComputedStyle(viewport).lineHeight) || 16;
+        const unit =
+          event.deltaMode === 1 ? lineHeight : event.deltaMode === 2 ? viewport.clientHeight : 1;
+        event.preventDefault();
+        viewport.scrollTop += event.deltaY * unit;
+      },
+      { passive: false, signal: this.listeners.signal }
+    );
     listen('touchstart', () => {
       this.touching = true;
       this.interact();

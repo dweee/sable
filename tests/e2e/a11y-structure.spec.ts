@@ -16,6 +16,9 @@ test.beforeEach(async ({ page, signIn }) => {
 });
 
 test('every settings category has no accessibility violations', async ({ page }) => {
+  // Each of the 15 categories runs a full axe audit. Give that aggregate
+  // budget its own bound; individual navigation and axe checks still fail.
+  test.setTimeout(180_000);
   await page.goto('/settings/appearance');
   await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
 
@@ -32,8 +35,9 @@ test('every settings category has no accessibility violations', async ({ page })
 
   const failing: Record<string, string[]> = {};
   for (const href of categories) {
-    await page.goto(href);
+    await page.locator(`.settings-nav-item[href="${href}"]`).click();
     await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
+    await expect(page).toHaveURL(href);
     const found = await violations(page, { known: [SEPARATOR_SLOT] });
     if (found.length) failing[href] = found.map((violation) => violation.id);
   }

@@ -1,4 +1,6 @@
 <script lang="ts">
+  // Match the root layout bootstrap styles when rendering the isolated shell.
+  import './sidebar-touch.css';
   import { untrack } from 'svelte';
   import type { CoreClient } from '#lib/core/client.svelte.js';
   import { provideRoomList, RoomList } from '#lib/rooms/room-list.svelte.js';

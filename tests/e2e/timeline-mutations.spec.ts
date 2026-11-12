@@ -22,11 +22,22 @@ test('an edit above the viewport does not move the reader', async ({
   await expect.poll(() => timeline.distanceFromBottom()).toBe(0);
 
   // Away from the end, so this is the anchor's job, not follow-to-bottom.
-  await timeline.wheelUp(await timeline.viewport.evaluate((node) => node.clientHeight + 30));
+  const wheelDistance = await timeline.viewport.evaluate((node) => node.clientHeight + 30);
+  // The first paint can contain only the newest event while history is still
+  // arriving. Require enough real range for this input to leave the end.
+  await expect.poll(() => timeline.scrollableHeight()).toBeGreaterThan(wheelDistance);
+  await timeline.wheelUp(wheelDistance);
   await expect(timeline.jumpToLatest).toBeVisible();
   await timeline.waitForScrollSettled();
 
-  const before = await timeline.visibleRange();
+  // Overscan/date-divider rows can change as history expands. Hold the same
+  // fully visible Matrix event at its actual screen coordinate instead.
+  const anchor = await timeline.fullyVisibleAnchor();
+  const before = await timeline.itemById(anchor.itemId).evaluate((node) => {
+    const eventId = node.getAttribute('data-event-id');
+    if (!eventId) throw new Error('reader message has no Matrix event ID');
+    return { eventId, y: (node.firstElementChild ?? node).getBoundingClientRect().top };
+  });
   await expect.poll(() => timeline.eventIdAboveViewport()).not.toBeNull();
   const above = await timeline.eventIdAboveViewport();
   if (!above) throw new Error('no rendered row above the reader');
@@ -36,7 +47,13 @@ test('an edit above the viewport does not move the reader', async ({
   await expect(timeline.container.getByText(/and rewrapped/).first()).toBeVisible({
     timeout: 20_000,
   });
-  await expect.poll(() => timeline.visibleRange()).toEqual(before);
+  await expect
+    .poll(() =>
+      timeline
+        .itemByEventId(before.eventId)
+        .evaluate((node) => (node.firstElementChild ?? node).getBoundingClientRect().top)
+    )
+    .toBeCloseTo(before.y, 0);
 });
 
 test('a deletion above the viewport does not move the reader', async ({
@@ -49,11 +66,20 @@ test('a deletion above the viewport does not move the reader', async ({
   await timeline.expectRevealed();
   await expect.poll(() => timeline.distanceFromBottom()).toBe(0);
 
-  await timeline.wheelUp(await timeline.viewport.evaluate((node) => node.clientHeight + 30));
+  const wheelDistance = await timeline.viewport.evaluate((node) => node.clientHeight + 30);
+  // The first paint can contain only the newest event while history is still
+  // arriving. Require enough real range for this input to leave the end.
+  await expect.poll(() => timeline.scrollableHeight()).toBeGreaterThan(wheelDistance);
+  await timeline.wheelUp(wheelDistance);
   await expect(timeline.jumpToLatest).toBeVisible();
   await timeline.waitForScrollSettled();
 
-  const before = await timeline.visibleRange();
+  const anchor = await timeline.fullyVisibleAnchor();
+  const before = await timeline.itemById(anchor.itemId).evaluate((node) => {
+    const eventId = node.getAttribute('data-event-id');
+    if (!eventId) throw new Error('reader message has no Matrix event ID');
+    return { eventId, y: (node.firstElementChild ?? node).getBoundingClientRect().top };
+  });
   await expect.poll(() => timeline.eventIdAboveViewport()).not.toBeNull();
   const doomed = await timeline.eventIdAboveViewport();
   if (!doomed) throw new Error('no rendered row above the reader');
@@ -63,7 +89,16 @@ test('a deletion above the viewport does not move the reader', async ({
   await expect(timeline.itemByEventId(doomed)).toContainText(en.timeline.redacted, {
     timeout: 20_000,
   });
-  await expect.poll(() => timeline.visibleRange()).toEqual(before);
+  // Overscan rows may change as the window is trimmed. Measure the reader's
+  // fully visible message instead of the first CSS-visible (overscan) row.
+  // SDK resets may renumber item IDs; the Matrix event still names that reader.
+  await expect
+    .poll(() =>
+      timeline
+        .itemByEventId(before.eventId)
+        .evaluate((node) => (node.firstElementChild ?? node).getBoundingClientRect().top)
+    )
+    .toBeCloseTo(before.y, 0);
 });
 
 test('an image without dimensions takes the file shape without losing the newest message', async ({

@@ -23,13 +23,16 @@ test('fork desktop packaging keeps the separate v2 identity and disables native 
 
 test('retained upstream stable, nightly and sandboxed flavors keep their existing identities', () => {
   assert.deepEqual(packageFlavor('stable'), {
-    config: 'electron-builder.stable.yml', identifier: 'moe.sable.client',
+    config: 'electron-builder.stable.yml',
+    identifier: 'moe.sable.client',
   });
   assert.deepEqual(packageFlavor('nightly'), {
-    config: 'electron-builder.nightly.yml', identifier: 'moe.sable.next.nightly',
+    config: 'electron-builder.nightly.yml',
+    identifier: 'moe.sable.next.nightly',
   });
   assert.deepEqual(packageFlavor(undefined), packageFlavor('fork'));
   assert.deepEqual(packageFlavor('stable', true), {
-    config: 'electron-builder.sandboxed.yml', identifier: 'moe.sable.client.sandboxed',
+    config: 'electron-builder.sandboxed.yml',
+    identifier: 'moe.sable.client.sandboxed',
   });
 });

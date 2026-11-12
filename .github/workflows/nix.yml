@@ -27,10 +27,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {system: x86_64-linux, runner: ubuntu-24.04}
-          - {system: aarch64-linux, runner: ubuntu-24.04-arm}
-          - {system: x86_64-darwin, runner: macos-15-intel}
-          - {system: aarch64-darwin, runner: macos-15}
+          - { system: x86_64-linux, runner: ubuntu-24.04 }
+          - { system: aarch64-linux, runner: ubuntu-24.04-arm }
+          - { system: x86_64-darwin, runner: macos-15-intel }
+          - { system: aarch64-darwin, runner: macos-15 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

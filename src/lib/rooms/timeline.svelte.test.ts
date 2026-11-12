@@ -1159,3 +1159,25 @@ test('retrying failed thread history makes a new pagination request', async () =
   expect(subscribe).toHaveBeenCalledOnce();
   await timeline.stop();
 });
+
+test('a cached timeline is not backend-ready until its subscription completes', async () => {
+  const core = new FakeCore();
+  const pending = Promise.withResolvers<{
+    subscription: number;
+    items: TimelineItemView[];
+    aggregations: [];
+  }>();
+  vi.spyOn(core, 'subscribeTimeline').mockReturnValueOnce(pending.promise);
+  const snapshots = new Map([
+    ['!cold/false', { items: [item('cached')], aggregations: [], readMarkerEventId: null }],
+  ]);
+  const timeline = new RoomTimeline(core as unknown as CoreClient, snapshots);
+  const opening = timeline.start('!cold');
+  expect(timeline.hasSnapshot).toBe(true);
+  expect(timeline.readyRoomId).toBeNull();
+  pending.resolve({ subscription: 42, items: [item('live')], aggregations: [] });
+  await opening;
+  expect(timeline.readyRoomId).toBe('!cold');
+  await timeline.stop();
+  expect(timeline.readyRoomId).toBeNull();
+});

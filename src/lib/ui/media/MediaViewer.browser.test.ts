@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
@@ -49,13 +49,22 @@ async function png(): Promise<Uint8Array<ArrayBuffer>> {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+// Prepare the fixture before UI assertions; a media request must not wait for canvas encoding.
+let imageBytes: Uint8Array<ArrayBuffer>;
+beforeAll(async () => {
+  imageBytes = await png();
+});
+
 const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 900 },
   { name: 'mobile', width: 390, height: 800 },
 ] as const;
 
 beforeEach(() => {
-  Object.assign(core, { fetchMedia: vi.fn(png), forgetMedia: vi.fn() });
+  Object.assign(core, {
+    fetchMedia: vi.fn(() => Promise.resolve(imageBytes.slice())),
+    forgetMedia: vi.fn(),
+  });
   Object.defineProperty(navigator, 'share', { value: () => Promise.resolve(), configurable: true });
 });
 
@@ -302,15 +311,23 @@ test('timeline media opens after a standalone image closed from the backdrop', a
   await page.viewport(1280, 900);
   const screen = await render(MediaViewerHostHarness);
   mediaViewerState.openStandalone('mxc://example.test/avatar', 'Alice');
-  await expect.poll(() => document.querySelector('.stage img')).not.toBeNull();
+  const loadedImage = () => {
+    const image = document.querySelector<HTMLImageElement>('.stage img');
+    return Boolean(image?.complete && image.naturalWidth > 0);
+  };
+  await expect.poll(loadedImage).toBe(true);
   const stage = document.querySelector('.stage');
   if (!stage) throw new Error('the viewer stage is missing');
   await userEvent.click(stage, { position: { x: 30, y: 600 } });
   await expect.poll(() => mediaViewerState.eventId).toBeNull();
+  await expect
+    .element(screen.getByRole('dialog', { name: 'Media viewer', exact: true }))
+    .not.toBeInTheDocument();
 
   mediaViewerState.open('$item', () => [imageItem()]);
   expect(mediaViewerState.items.map((media) => media.eventId)).toEqual(['$item']);
   await expect
     .element(screen.getByRole('dialog', { name: 'Media viewer', exact: true }))
     .toBeVisible();
+  await expect.poll(loadedImage).toBe(true);
 });

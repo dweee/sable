@@ -29,7 +29,13 @@
       ]
     },
     "electron": {
-      "entry": ["after-pack.mjs", "src/main.ts", "src/preload.ts", "src/core-host.ts"],
+      "entry": [
+        "after-pack.mjs",
+        "publish-updates.mjs",
+        "src/main.ts",
+        "src/preload.ts",
+        "src/core-host.ts"
+      ],
       "ignoreUnresolved": ["./sable_node.node"]
     }
   },
@@ -41,7 +47,8 @@
     "dsymutil",
     "cc",
     "strip",
-    "package"
+    "package",
+    "electron"
   ],
   "ignore": ["scripts/build/csp.d.mts"],
   "ignoreUnresolved": ["/src/lib/model/model.ts", "/src/lib/search/search-peer.ts"],

@@ -321,7 +321,6 @@
     width: min(
       var(--timeline-media-fill),
       var(--timeline-media-max),
-      calc(var(--timeline-media-max) * var(--media-ratio)),
       max(
         var(--timeline-media-min),
         min(calc(var(--timeline-media-max) * var(--media-ratio)), var(--media-width, 100rem))

@@ -10,6 +10,8 @@
   import { type as osType } from '@tauri-apps/plugin-os';
   import IconContext from 'phosphor-svelte/lib/IconContext';
   import '../styles.css';
+  // Touch target geometry must be available before any signed-in route renders.
+  import '#lib/features/sidebar/sidebar-touch.css';
   import { createCoreClient } from '#lib/core/client.svelte.js';
   import { provideCoreClient } from '#lib/core/context.js';
   import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';

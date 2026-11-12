@@ -10,6 +10,7 @@ import Harness from './DesktopUpdateAlertHarness.test.svelte';
 const latestVersion = vi.fn<() => Promise<string | null>>();
 
 beforeEach(() => {
+  vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '0');
   preferences.autoUpdateCheck = true;
   vi.stubEnv('VITE_APP_VERSION', '1.2.3');
   vi.stubGlobal('__SABLE_AUTO_UPDATE__', false);
@@ -59,4 +60,18 @@ test('automatic package checks respect the preference', async () => {
   await tick();
 
   expect(latestVersion).not.toHaveBeenCalled();
+});
+
+test('fork-disabled desktop builds neither poll nor announce package updates', async () => {
+  vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '1');
+  latestVersion.mockClear();
+  const interval = vi.spyOn(globalThis, 'setInterval');
+  render(Harness);
+  await tick();
+
+  expect(latestVersion).not.toHaveBeenCalled();
+  expect(interval.mock.calls.some(([, delay]) => delay === 300_000)).toBe(false);
+  expect(
+    screen.queryByText('A newer version is available. Update Sable through your package manager.')
+  ).not.toBeInTheDocument();
 });

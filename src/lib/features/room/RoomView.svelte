@@ -309,20 +309,6 @@
       })
   );
 
-  let composerMounted = $state(false);
-  $effect(() => {
-    if (composerMounted) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const frame = requestAnimationFrame(() => {
-      timer = setTimeout(() => {
-        composerMounted = true;
-      });
-    });
-    return () => {
-      cancelAnimationFrame(frame);
-      clearTimeout(timer);
-    };
-  });
   let resolvedPermalink = $derived(
     permalinkTarget?.roomId === resolvedRoomId && permalinkTarget.eventId === eventId
       ? permalinkTarget
@@ -423,7 +409,12 @@
   });
 
   $effect(() => {
-    roomSession.sync(resolvedRoomId, isTombstoned, memberListChanges.version);
+    roomSession.sync(
+      resolvedRoomId,
+      isTombstoned,
+      memberListChanges.version,
+      timeline.readyRoomId === resolvedRoomId
+    );
   });
 
   let canManageWidgets = $derived(
@@ -467,6 +458,14 @@
   $effect(() => {
     const activeRoomId = timelineRoomId;
     if (!activeRoomId) return;
+    // A hot permalink may resolve to a thread. Keep the live main timeline until
+    // its relation is known; cold links retain their initial context fallback.
+    if (
+      eventId !== null &&
+      resolvedPermalink === null &&
+      untrack(() => openedRoomId === activeRoomId && timeline.mode.kind === 'live')
+    )
+      return;
     const targetEventId = timelineEventId;
     const anchor = untrack(() => {
       // A loaded event is reached by scrolling, but only while live.
@@ -878,31 +877,29 @@
       />
     {:else}
       <RoomPresencePrompt roomId={resolvedRoomId} roomName={resolvedRoom?.display_name ?? ''} />
-      {#if composerMounted}
-        <ScheduledMessages
-          roomId={resolvedRoomId}
-          revision={conversation.scheduledRevision}
-          editing={conversation.context?.kind === 'schedule' ? conversation.context.eventId : null}
-          onEdit={conversation.editScheduled}
-        />
-        <ConversationComposer
-          bind:this={composer}
-          {conversation}
-          roomId={resolvedRoomId}
-          roomMembers={memberLoader.members}
-          onSchedule={conversation.schedule}
-          canReact={roomSession.permissions?.can_react ?? true}
-          {roomName}
-          readOnly={roomSession.permissions ? !roomSession.permissions.can_post : false}
-          encrypted={resolvedRoom?.encrypted ?? null}
-          onDeleteEdited={conversation.redact}
-          onEditLast={conversation.editLast}
-          onEditNext={conversation.editNext}
-          onReplyStep={(direction) =>
-            conversation.moveReply(timelineList?.stepReply(direction) ?? null)}
-          onJumpToContext={jumpToEvent}
-        />
-      {/if}
+      <ScheduledMessages
+        roomId={resolvedRoomId}
+        revision={conversation.scheduledRevision}
+        editing={conversation.context?.kind === 'schedule' ? conversation.context.eventId : null}
+        onEdit={conversation.editScheduled}
+      />
+      <ConversationComposer
+        bind:this={composer}
+        {conversation}
+        roomId={resolvedRoomId}
+        roomMembers={memberLoader.members}
+        onSchedule={conversation.schedule}
+        canReact={roomSession.permissions?.can_react ?? true}
+        {roomName}
+        readOnly={roomSession.permissions ? !roomSession.permissions.can_post : false}
+        encrypted={resolvedRoom?.encrypted ?? null}
+        onDeleteEdited={conversation.redact}
+        onEditLast={conversation.editLast}
+        onEditNext={conversation.editNext}
+        onReplyStep={(direction) =>
+          conversation.moveReply(timelineList?.stepReply(direction) ?? null)}
+        onJumpToContext={jumpToEvent}
+      />
     {/if}
   </div>
 {/snippet}

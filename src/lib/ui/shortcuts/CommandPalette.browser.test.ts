@@ -93,6 +93,9 @@ test.each(['light', 'dark'] as const)(
     await userEvent.keyboard('{ArrowUp}');
     expectHighlight(beta.element(), alpha.element());
     await userEvent.keyboard('{Enter}');
-    expect(goto).toHaveBeenCalledWith('/rooms/!beta%3Aexample.org');
+    await vi.waitFor(() => {
+      expect(goto).toHaveBeenCalledWith('/rooms/!beta%3Aexample.org');
+    });
+    await expect.element(dialog).not.toBeInTheDocument();
   }
 );

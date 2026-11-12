@@ -61,7 +61,8 @@ export function registerUpdater(isAppFrame: IsAppFrame): void {
   });
 
   ipcMain.handle('sable-update-latest-version', async (event) => {
-    if (updatesDisabled() || enabled || !app.isPackaged || !isAppFrame(event.senderFrame)) return null;
+    if (updatesDisabled() || enabled || !app.isPackaged || !isAppFrame(event.senderFrame))
+      return null;
     const feed = `${FEEDS[builtChannel]}${feedChannel(builtChannel)}-linux.yml`;
     const response = await fetch(feed, { cache: 'no-store' });
     if (!response.ok) throw new Error(`Update feed request failed: ${String(response.status)}`);

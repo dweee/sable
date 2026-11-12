@@ -8,12 +8,12 @@ cache. Sable has no private inputs and the workflow receives none.
 
 ## Configuration (names only)
 
-| Kind | Name | Value |
-| --- | --- | --- |
-| variable | `ATTIC_PUSH_ENABLED` | `true` turns uploads on; unset or anything else keeps every run a dry run |
-| variable | `ATTIC_ENDPOINT` | `https://attic.monke.fail` (default if unset) |
-| variable | `ATTIC_CACHE` | `flakey` (default if unset) |
-| secret | `ATTIC_TOKEN` | repository-scoped token, `--pull flakey --push flakey`, at most 30 days, subject `github-sable` |
+| Kind     | Name                 | Value                                                                                           |
+| -------- | -------------------- | ----------------------------------------------------------------------------------------------- |
+| variable | `ATTIC_PUSH_ENABLED` | `true` turns uploads on; unset or anything else keeps every run a dry run                       |
+| variable | `ATTIC_ENDPOINT`     | `https://attic.monke.fail` (default if unset)                                                   |
+| variable | `ATTIC_CACHE`        | `flakey` (default if unset)                                                                     |
+| secret   | `ATTIC_TOKEN`        | repository-scoped token, `--pull flakey --push flakey`, at most 30 days, subject `github-sable` |
 
 Mint and install the token with `scripts/setup-github-attic.py --rotate --repo sable`
 in the private Flakey checkout (it needs a `sable` entry in its repository list). The

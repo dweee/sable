@@ -105,16 +105,18 @@ test.each([
   expect(supportsDesktopUpdateChecks()).toBe(supported);
 });
 
-
-test.each(['android', 'ios'])('fork %s builds never request upstream mobile releases', async (os) => {
-  mocks.osType.mockReturnValue(os);
-  vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '1');
-  const fetch = vi.fn();
-  vi.stubGlobal('fetch', fetch);
-  const { checkForMobileUpdate } = await load();
-  await expect(checkForMobileUpdate()).resolves.toBe(false);
-  expect(fetch).not.toHaveBeenCalled();
-});
+test.each(['android', 'ios'])(
+  'fork %s builds never request upstream mobile releases',
+  async (os) => {
+    mocks.osType.mockReturnValue(os);
+    vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '1');
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const { checkForMobileUpdate } = await load();
+    await expect(checkForMobileUpdate()).resolves.toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  }
+);
 
 test.each(['linux', 'darwin', 'win32'])(
   'fork %s builds do not query, download or install upstream desktop updates',

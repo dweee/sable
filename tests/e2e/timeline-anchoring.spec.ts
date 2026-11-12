@@ -472,9 +472,12 @@ test('anchors delayed history inserted after a stable date divider', async ({
   const before = await anchor.boundingBox();
   if (!before) throw new Error('missing history anchor');
   const indexBefore = Number(await anchor.getAttribute('data-index'));
+  console.log('delayed-anchor-before', { pages: await core.paginateCount(), indexBefore, before });
 
   await timeline.wheelUp(100);
-  await expect.poll(() => core.paginateCount()).toBe(1);
+  await expect
+    .poll(() => core.paginateCount(), { message: 'pagination count after baseline anchor' })
+    .toBe(1);
   await expect
     .poll(async () => Number(await anchor.getAttribute('data-index')), { timeout: 3_000 })
     .toBeGreaterThan(indexBefore);
