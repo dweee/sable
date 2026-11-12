@@ -29,10 +29,14 @@ export class FakeCoreDriver {
     );
   }
 
-  mediaFetches(): Promise<string[]> {
-    return this.page.evaluate(() =>
-      window.__e2eCommands.filter((command) => command.startsWith('fetch_media'))
-    );
+  mediaFetches(source?: string): Promise<string[]> {
+    return this.page.evaluate((wanted) => {
+      if (wanted === undefined)
+        return window.__e2eCommands.filter((command) => command.startsWith('fetch_media'));
+      return window.__e2eMediaRequests
+        .filter((request) => request.source === wanted)
+        .map(({ width, height }) => `fetch_media ${String(width)}x${String(height)}`);
+    }, source);
   }
 
   async holdMedia(): Promise<void> {
@@ -62,6 +66,13 @@ export class FakeCoreDriver {
     );
   }
 
+  indexOfTimelineItem(subscription: number, itemId: string): Promise<number> {
+    return this.page.evaluate(
+      ({ subscription, itemId }) => window.__e2eTimelineIndexOf(subscription, itemId),
+      { subscription, itemId }
+    );
+  }
+
   async setTimelineItemById(
     subscription: number,
     itemId: string,
@@ -69,14 +80,12 @@ export class FakeCoreDriver {
   ): Promise<void> {
     await this.page.evaluate(
       ({ subscription, itemId, value }) => {
-        const index = document
-          .querySelector(`[data-item-id="${itemId}"]`)
-          ?.getAttribute('data-index');
-        if (index === null || index === undefined) throw new Error(`no rendered row for ${itemId}`);
+        const index = window.__e2eTimelineIndexOf(subscription, itemId);
+        if (index < 0) throw new Error(`no core item ${itemId} in subscription ${subscription}`);
         window.__e2eEmitTimelineEvent({
           type: 'timeline_diff',
           subscription,
-          diffs: [{ op: 'set', index: Number(index), value }],
+          diffs: [{ op: 'set', index, value }],
         });
       },
       { subscription, itemId, value }

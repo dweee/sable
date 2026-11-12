@@ -4,7 +4,7 @@
   import { scale } from 'svelte/transition';
   import type { MemberView } from '#src/generated/protocol';
 
-  import { i18n } from '#lib/i18n.js';
+  import { currentLocale, i18n } from '#lib/i18n.js';
   import { MOTION_MS, motionMs, shouldReduceMotion } from '#lib/ui/motion.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
@@ -12,7 +12,7 @@
   import { memberAvatar, memberName } from '../members/members.js';
   import ReadReceiptFace from './ReadReceiptFace.svelte';
 
-  const MAX_FACES = 3;
+  const MAX_FACES = 2;
   const HOVER_FALLOFF = 0.45;
   const HOVER_SCALE = 1.05;
 
@@ -38,12 +38,10 @@
   );
   let faces = $derived(seen.slice(0, MAX_FACES));
   let overflow = $derived(Math.max(0, readers.length - MAX_FACES));
-  let names = $derived(seen.map((reader) => reader.name).join(', '));
+  let listFormat = $derived(new Intl.ListFormat(currentLocale(), { type: 'conjunction' }));
+  let names = $derived(listFormat.format(seen.map((reader) => reader.name)));
   let overflowNames = $derived(
-    seen
-      .slice(MAX_FACES)
-      .map((reader) => reader.name)
-      .join(', ')
+    listFormat.format(seen.slice(MAX_FACES).map((reader) => reader.name))
   );
 
   function setShifts(activeIdx: number | null): void {
@@ -94,6 +92,7 @@
   {#if coarse.current}
     <button
       class="read-receipt-stack chip selection-open"
+      style:--stack-slots={MAX_FACES + 1}
       type="button"
       aria-label={i18n.t('timeline.seenByNames', { names })}
       aria-haspopup="dialog"
@@ -110,6 +109,7 @@
   {:else}
     <div
       class="read-receipt-stack faces"
+      style:--stack-slots={MAX_FACES + 1}
       role="group"
       aria-label={i18n.t('timeline.seenBy')}
       bind:this={root}
@@ -141,9 +141,16 @@
 <style>
   .read-receipt-stack {
     --stack-ring: var(--bg-container);
+    --face-size: 1.125rem;
+    --stack-min: calc(
+      var(--space-050) + var(--stack-slots) * var(--face-size) - (var(--stack-slots) - 1) *
+        var(--space-150)
+    );
 
     align-items: center;
     display: inline-flex;
+    justify-content: flex-end;
+    min-inline-size: var(--stack-min);
   }
 
   .chip {
@@ -155,6 +162,7 @@
     font: inherit;
     height: var(--size-x300);
     max-width: 100%;
+    min-inline-size: calc(var(--stack-min) + 2 * var(--space-150) + 2 * var(--border-width));
     padding: 0 var(--space-150);
     position: relative;
     white-space: nowrap;
@@ -220,7 +228,7 @@
   }
 
   :global(.avatar-root.receipt-face) {
-    --avatar-size: 1.125rem;
+    --avatar-size: var(--face-size);
 
     background: var(--stack-ring);
     box-shadow: 0 0 0 0.125rem var(--stack-ring);
@@ -239,10 +247,10 @@
     font: inherit;
     font-size: var(--font-size-small);
     font-variant-numeric: tabular-nums;
-    height: 1.125rem;
+    height: var(--face-size);
     justify-content: center;
     line-height: 1;
-    min-width: 1.125rem;
+    min-width: var(--face-size);
     padding: 0 var(--space-050);
     position: relative;
   }

@@ -68,34 +68,11 @@ describe('setting sections', () => {
 });
 
 describe('select settings', () => {
-  it('formats search event counts in the selected language', async () => {
-    const { findCategory } = await import('./registry');
-    const { currentLocale, setLanguage } = await import('#lib/i18n.js');
-    const language = currentLocale();
-    const items = findCategory('timeline')?.items ?? [];
-    const base = items.find((item) => item.key === 'searchBaseEvents');
-    const cap = items.find((item) => item.key === 'searchMaxEvents');
-    expect(base?.type).toBe('select');
-    expect(cap?.type).toBe('select');
-    if (base?.type !== 'select' || cap?.type !== 'select') return;
-
-    try {
-      await setLanguage('en');
-      expect(base.options.find((option) => option.value === '5000')?.label).toBe('5,000 events');
-      expect(cap.options.find((option) => option.value === '500000')?.label).toBe('500,000 events');
-
-      await setLanguage('de');
-      expect(base.options.find((option) => option.value === '5000')?.label).toBe('5.000 events');
-      expect(cap.options.find((option) => option.value === '500000')?.label).toBe('500.000 events');
-    } finally {
-      await setLanguage(language);
-    }
-  });
-
   it('survive sanitization for every option value the registry declares', async () => {
-    const [{ settingsCategories }, { preferences, sanitize }] = await Promise.all([
+    const [{ settingsCategories }, { preferences }, { sanitize }] = await Promise.all([
       import('./registry'),
       import('./preferences.svelte'),
+      import('./definitions'),
     ]);
     const base = { ...preferences };
 
@@ -113,9 +90,10 @@ describe('select settings', () => {
   });
 
   it('survive sanitization for the member sort set outside the registry', async () => {
-    const [{ MEMBER_SORTS }, { preferences, sanitize }] = await Promise.all([
+    const [{ MEMBER_SORTS }, { preferences }, { sanitize }] = await Promise.all([
       import('#lib/rooms/member-listing.js'),
       import('./preferences.svelte'),
+      import('./definitions'),
     ]);
     const base = { ...preferences };
 

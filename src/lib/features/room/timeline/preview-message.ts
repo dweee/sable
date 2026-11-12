@@ -22,8 +22,7 @@ export function previewMessage(
       kind: 'message',
       body,
       html: body,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -40,6 +39,7 @@ export function previewMessage(
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
     ...fields,
   };
 }

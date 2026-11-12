@@ -14,7 +14,7 @@ use matrix_sdk::ruma::events::tag::{TagInfo, TagName};
 use matrix_sdk::ruma::room::RoomType;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{
-    OwnedRoomId, OwnedUserId, RoomAliasId, RoomOrAliasId, RoomVersionId, ServerName,
+    OwnedRoomId, OwnedUserId, RoomAliasId, RoomVersionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ use crate::search::MAX_SEARCH_RESULTS;
 use crate::room_settings::StateEventOut;
 use crate::room_settings::join_rule_content;
 use crate::room_settings::voice_power_level_override;
-use crate::protocol::{RpcError, CreateJoinRuleView, PublicRoomView, RoomAttachmentKind, RoomAttachmentView, RoomCosmeticsView, RoomOpenView, RoomPreviewView, RoomListItemView, RoomTag, RoomVersionView, RoomVersionsView};
+use crate::protocol::{RpcError, CreateJoinRuleView, PresenceHintView, PresencePromptView, PublicRoomView, RoomAttachmentKind, RoomAttachmentView, RoomCosmeticsView, RoomOpenView, RoomPreviewView, RoomListItemView, RoomTag, RoomVersionView, RoomVersionsView};
 use crate::view::FORUM_ROOM_TYPE;
 use crate::{Core, ResultExt, power_levels, view};
 
@@ -32,6 +32,8 @@ const WIDGETS_EVENT_TYPE: &str = "im.vector.modular.widgets";
 
 domain! {
     open,
+    presence_prompt,
+    answer_presence_prompt,
     list_item,
     preview,
     join,
@@ -125,8 +127,8 @@ impl Handler for OpenParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<RoomOpenView, RpcError> {
         let room_id = self.room_id;
-        let (permissions, power_level_tags, widgets, pinned_event_ids) = futures_util::join!(
-            core.room_permissions(&room_id),
+        let (access, power_level_tags, widgets, pinned_event_ids) = futures_util::join!(
+            core.room_access(&room_id),
             core.room_state_event_content(
                 room_id.clone(),
                 power_levels::TAGS_EVENT.to_owned(),
@@ -143,8 +145,10 @@ impl Handler for OpenParams {
             .await
             .ok()
             .and_then(|room| view::predecessor(&room));
+        let (permissions, power_levels) = access?;
         Ok(RoomOpenView {
-            permissions: permissions?,
+            permissions,
+            power_levels,
             power_level_tags: power_levels::parse_tags(
                 power_level_tags
                     .unwrap_or_else(|error| {
@@ -178,7 +182,8 @@ impl Handler for ListItemParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<RoomListItemView, RpcError> {
         let room = core.room(&self.room_id).await?;
-        Ok(view::listless_room_list_item(room, &core.push_rules().await?.snapshot().await).await)
+        let rules = core.push_rules().await?.snapshot().await;
+        Ok(view::listless_room_list_item(room, &rules, &core.nicknames()).await)
     }
 }
 
@@ -217,22 +222,39 @@ impl Handler for JoinParams {
     type Ok = String;
 
     async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
-        let address = RoomOrAliasId::parse(&self.address).map_err(|_| RpcError::UnknownRoom)?;
+        let room_id = core.join_room(&self.address, &self.via).await?;
+        core.follow_presence_upgrade(&room_id).await;
+        Ok(room_id.to_string())
+    }
+}
 
-        let via = self
-            .via
-            .iter()
-            .filter_map(|server| ServerName::parse(server).ok())
-            .collect::<Vec<_>>();
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PresencePromptParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+}
 
-        let room = core
-            .client()
-            .await?
-            .join_room_by_id_or_alias(&address, &via)
-            .await
-            .map_err(|error| core.room_error("join_room", error))?;
+impl Handler for PresencePromptParams {
+    type Ok = Option<PresencePromptView>;
 
-        Ok(room.room_id().to_string())
+    async fn run(self, core: &Arc<Core>) -> Result<Option<PresencePromptView>, RpcError> {
+        core.presence_prompt(&self.room_id).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct AnswerPresencePromptParams {
+    pub prompt: PresencePromptView,
+    pub share: bool,
+}
+
+impl Handler for AnswerPresencePromptParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.answer_presence_prompt(self.prompt, self.share).await
     }
 }
 
@@ -291,7 +313,7 @@ impl Handler for LeaveParams {
             .await?
             .leave()
             .await
-            .map_err(|error| core.room_error("leave_room", error))?;
+            .or_failed(core, "leave_room")?;
 
         // Keeping it would hand a stale timeline back on rejoin.
         core.timelines.lock().await.remove(&self.room_id);
@@ -317,7 +339,7 @@ impl Handler for InviteParams {
             .await?
             .invite_user_by_id(&self.user_id)
             .await
-            .map_err(|error| core.room_error("invite_user", error))?;
+            .or_failed(core, "invite_user")?;
 
         Ok(())
     }
@@ -375,7 +397,12 @@ impl Handler for CreateParams {
         let client = core.client().await?;
         let mut request = create_room::v3::Request::new();
         request.name = self.name;
-        request.topic = self.topic;
+        if let Some(topic) = self.topic.as_deref() {
+            request.initial_state.push(
+                InitialStateEvent::with_empty_state_key(super::room_state::topic_content(topic))
+                    .to_raw_any(),
+            );
+        }
         request.invite = self.invite;
         request.room_alias_name = self.alias;
         request.room_version = self.room_version
@@ -392,6 +419,16 @@ impl Handler for CreateParams {
         } else {
             RoomPreset::PrivateChat
         });
+        if let Some(hint) = core
+            .presence_hint_initial_state(if self.public {
+                PresenceHintView::Forbid
+            } else {
+                PresenceHintView::Suggest
+            })
+            .await
+        {
+            request.initial_state.push(hint);
+        }
 
         let room_type = self.kind.as_room_type();
         if room_type.is_some() || !self.federate || self.predecessor.is_some() {
@@ -472,34 +509,54 @@ pub struct CreateDmParams {
     pub user_id: OwnedUserId,
     #[serde(default)]
     pub encrypted: Option<bool>,
+    /// Whether a DM created because none matched is encrypted, when `encrypted` leaves it open.
+    pub encrypt_new: bool,
 }
 
 impl Handler for CreateDmParams {
     type Ok = String;
 
     async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
-        let Self { user_id, encrypted } = self;
+        let Self {
+            user_id,
+            encrypted,
+            encrypt_new,
+        } = self;
         let client = core.client().await?;
         let existing = client.get_dm_rooms(&user_id).find(|room| {
             !room.is_tombstoned()
                 && encrypted.is_none_or(|wanted| room.encryption_state().is_encrypted() == wanted)
         });
-        let room = match existing {
-            Some(room) => room,
-            None if encrypted == Some(false) => {
-                let mut request = create_room::v3::Request::new();
-                request.invite = vec![user_id];
-                request.is_direct = true;
-                request.preset = Some(RoomPreset::TrustedPrivateChat);
-                client
-                    .create_room(request)
-                    .await
-                    .or_failed(core, "create_dm")?
+        let room = if let Some(room) = existing {
+            room
+        } else {
+            let mut request = create_room::v3::Request::new();
+            request.creation_content = Some(
+                Raw::new(&serde_json::json!({ "additional_creators": [&user_id] }))
+                    .or_failed(core, "create_dm_creation_content")?
+                    .cast_unchecked(),
+            );
+            request.invite = vec![user_id];
+            request.is_direct = true;
+            request.preset = Some(RoomPreset::TrustedPrivateChat);
+            if encrypted == Some(true) || (encrypted.is_none() && encrypt_new) {
+                request.initial_state.push(
+                    InitialStateEvent::with_empty_state_key(
+                        RoomEncryptionEventContent::with_recommended_defaults(),
+                    )
+                    .to_raw_any(),
+                );
             }
-            None => client
-                .create_dm(&user_id)
+            if let Some(hint) = core
+                .presence_hint_initial_state(PresenceHintView::Suggest)
                 .await
-                .or_failed(core, "create_dm")?,
+            {
+                request.initial_state.push(hint);
+            }
+            client
+                .create_room(request)
+                .await
+                .or_failed(core, "create_dm")?
         };
 
         Ok(room.room_id().to_string())
@@ -562,8 +619,12 @@ impl Handler for UpgradeParams {
         let response = client
             .send(request)
             .await
-            .map_err(|error| core.room_error("upgrade_room", error.into()))?;
+            .or_failed(core, "upgrade_room")?;
         core.copy_room_packs(&client, &old_room, &response.replacement_room)
+            .await;
+        core.copy_presence_hint(&old_room, &response.replacement_room)
+            .await;
+        core.carry_presence_sharing(&old_room, &response.replacement_room)
             .await;
 
         Ok(response.replacement_room.to_string())
@@ -616,7 +677,7 @@ impl Handler for DirectoryVisibilityParams {
             .await?
             .send(get_room_visibility::v3::Request::new(self.room_id))
             .await
-            .map_err(|error| core.room_error("room_directory_visibility", error.into()))?;
+            .or_failed(core, "room_directory_visibility")?;
 
         Ok(response.visibility == Visibility::Public)
     }
@@ -647,7 +708,7 @@ impl Handler for SetDirectoryVisibilityParams {
                 visibility,
             ))
             .await
-            .map_err(|error| core.room_error("set_room_directory_visibility", error.into()))?;
+            .or_failed(core, "set_room_directory_visibility")?;
 
         Ok(())
     }
@@ -669,7 +730,7 @@ impl Handler for AliasesParams {
             .await?
             .send(aliases::v3::Request::new(self.room_id))
             .await
-            .map_err(|error| core.room_error("room_aliases", error.into()))?;
+            .or_failed(core, "room_aliases")?;
 
         Ok(response
             .aliases
@@ -697,7 +758,7 @@ impl Handler for CreateAliasParams {
             .await?
             .send(create_alias::v3::Request::new(alias, self.room_id))
             .await
-            .map_err(|error| core.room_error("create_room_alias", error.into()))?;
+            .or_failed(core, "create_room_alias")?;
 
         Ok(())
     }
@@ -719,7 +780,7 @@ impl Handler for DeleteAliasParams {
             .await?
             .send(delete_alias::v3::Request::new(alias))
             .await
-            .map_err(|error| core.room_error("delete_room_alias", error.into()))?;
+            .or_failed(core, "delete_room_alias")?;
 
         Ok(())
     }
@@ -779,10 +840,11 @@ impl Handler for ReplacedRoomsParams {
     async fn run(self, core: &Arc<Core>) -> Result<Vec<RoomListItemView>, RpcError> {
         let client = core.client().await?;
         let rules = core.push_rules().await?.snapshot().await;
+        let nicknames = core.nicknames();
         let mut rooms = Vec::new();
         for room in client.joined_rooms() {
             if room.is_tombstoned() {
-                rooms.push(view::listless_room_list_item(room, &rules).await);
+                rooms.push(view::listless_room_list_item(room, &rules, &nicknames).await);
             }
         }
         Ok(rooms)
@@ -847,11 +909,11 @@ impl Handler for SetTagParams {
         if self.set {
             room.set_tag(name, TagInfo::new())
                 .await
-                .map_err(|error| core.room_error("set_room_tag", error))?;
+                .or_failed(core, "set_room_tag")?;
         } else {
             room.remove_tag(name)
                 .await
-                .map_err(|error| core.room_error("remove_room_tag", error))?;
+                .or_failed(core, "remove_room_tag")?;
         }
 
         Ok(())

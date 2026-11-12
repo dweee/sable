@@ -25,6 +25,7 @@ vi.mock('#lib/rooms/presence.svelte.js', async () => {
 });
 
 import { core } from '#lib/core/__mocks__/context.js';
+import { expectNoA11yViolations, ICONS_HIDDEN_BY_LAYOUT } from '#lib/test-support/a11y.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
 
 import TimelineItemHarness from './TimelineItemHarness.test.svelte';
@@ -47,6 +48,8 @@ const profile: ProfileView = {
   user_id: '@alice:example.test',
   display_name: 'Alice',
   avatar_url: null,
+  real_name: 'Alice',
+  real_avatar_url: null,
   bio: null,
   hero_color: null,
   hero_brightness: null,
@@ -76,8 +79,7 @@ function message(id: string, sender: string, senderName: string): TimelineItemVi
       kind: 'message',
       body: `Message from ${senderName}`,
       html: `Message from ${senderName}`,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -94,6 +96,7 @@ function message(id: string, sender: string, senderName: string): TimelineItemVi
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
   });
 }
 
@@ -156,6 +159,17 @@ test('a compact connected reply keeps its connector clear of the name gutter', a
   expect(connectorLeft).toBeGreaterThanOrEqual(gutter.getBoundingClientRect().right);
 });
 
+test('a compact reply preview keeps the name gutter level with the message body', async () => {
+  setPreference('replyPreviewStyle', 'compact');
+  await mountItem(replyToAlice('compact-reply-name', '@bob:example.test', 'Bob'), 'compact');
+
+  const row = document.querySelector('.message');
+  const gutter = row?.querySelector('.compact-gutter');
+  const body = row?.querySelector('.formatted-body');
+  if (!gutter || !body) throw new Error('missing compact reply parts');
+  expect(gutter.getBoundingClientRect().top).toBe(body.getBoundingClientRect().top);
+});
+
 test('a mobile connected reply aligns its preview text with the sender name', async () => {
   await page.viewport(390, 844);
   setPreference('replyPreviewStyle', 'connected');
@@ -212,7 +226,7 @@ function layers(root: Element): number[][] {
 
 test('an avatar picture fills its frame exactly, however wide the image', async () => {
   await parkPointer();
-  Object.assign(core, { fetchMedia: vi.fn(widePng) });
+  Object.assign(core, { fetchMedia: vi.fn().mockResolvedValue(await widePng()) });
   await mountItem({
     ...message('wide', '@alice:example.test', 'Alice'),
     sender_avatar: 'mxc://example.test/wide-avatar',
@@ -226,10 +240,10 @@ test('an avatar picture fills its frame exactly, however wide the image', async 
 
 test('the hover animation stacks over the still picture inside the frame', async () => {
   await parkPointer();
-  Object.assign(core, { fetchMedia: vi.fn(widePng) });
+  Object.assign(core, { fetchMedia: vi.fn().mockResolvedValue(await widePng()) });
   await mountItem({
     ...message('hover', '@hover:example.test', 'Hover'),
-    sender_avatar: 'mxc://example.test/wide-avatar',
+    sender_avatar: 'mxc://example.test/hover-avatar',
   });
 
   await expect.poll(() => document.querySelector('.avatar-root img')).not.toBeNull();
@@ -255,6 +269,8 @@ test('right-clicking the same message again reopens the menu at the pointer', as
   if (!row) throw new Error('the message row is not rendered');
   const box = row.getBoundingClientRect();
   const menu = () => document.querySelectorAll('.message-menu');
+  row.focus();
+  await expectNoA11yViolations(document.body, { disableRules: ICONS_HIDDEN_BY_LAYOUT });
   const menuLeft = () => document.querySelector('.message-menu')?.getBoundingClientRect().x ?? 0;
 
   await userEvent.click(screen.getByRole('article').first(), {
@@ -262,6 +278,7 @@ test('right-clicking the same message again reopens the menu at the pointer', as
     position: { x: 20, y: box.height / 2 },
   });
   await expect.poll(() => menu().length).toBe(1);
+  await expectNoA11yViolations(document.body, { disableRules: ICONS_HIDDEN_BY_LAYOUT });
   const first = menuLeft();
 
   await userEvent.click(screen.getByRole('article').first(), {
@@ -339,7 +356,13 @@ for (const [name, width] of [
         { filename: 'one', width: 800, height: 600 },
         { filename: 'two', width: 800, height: 600 },
       ]),
-      forwarded: { room_id: '!random:example.test', event_id: '$original', timestamp: null },
+      forwarded: {
+        sender: null,
+        content_valid: null,
+        room_id: '!random:example.test',
+        event_id: '$original',
+        timestamp: null,
+      },
       read_by: ['@bob:example.test'],
     });
 
@@ -381,4 +404,24 @@ test('a long handle in a narrow row gives way to the sender name', async () => {
   if (!name || !time) throw new Error('missing the sender name or the time');
   expect(name.scrollWidth).toBeLessThanOrEqual(name.clientWidth);
   expect(time.getBoundingClientRect().right).toBeLessThanOrEqual(320);
+});
+
+test('a grouped message shows its time in the avatar gutter when every time is shown', async () => {
+  setPreference('showAllTimestamps', true);
+  try {
+    const screen = await mountItem(message('second', '@alice:example.test', 'Alice'), 'modern', {
+      collapsed: true,
+    });
+    screen.container.style.paddingInline = 'var(--page-gutter)';
+    const time = screen.container.querySelector<HTMLElement>('.collapsed-time time');
+    const body = screen.container.querySelector<HTMLElement>('.message-main');
+    if (!time || !body) throw new Error('Missing grouped message time');
+
+    expect(time.getBoundingClientRect().left).toBeGreaterThanOrEqual(0);
+    expect(time.getBoundingClientRect().right).toBeLessThanOrEqual(
+      body.getBoundingClientRect().left
+    );
+  } finally {
+    setPreference('showAllTimestamps', false);
+  }
 });

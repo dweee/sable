@@ -9,11 +9,15 @@
     TimelineItemView,
   } from '#src/generated/protocol';
 
+  import { formattedForEditing } from '#lib/composer/composer-context.js';
   import { editMessage } from '#lib/core/api/messages.svelte.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { projectPersona } from '#lib/personas/persona.js';
   import { usePersonaStore } from '#lib/personas/personas.svelte.js';
+  import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
+  import { useRoomList } from '#lib/rooms/room-list.svelte.js';
+  import { personaSpaces } from '#lib/features/composer/persona-spaces.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import StealEmotesDialog from '#lib/features/emotes/StealEmotesDialog.svelte';
@@ -80,6 +84,7 @@
 
   const core = useCoreClient();
   const personaStore = usePersonaStore();
+  const roomList = useRoomList();
 
   function live(entry: OpenMessageDialog): TimelineItemView {
     return (entry.item.event_id && events.get(entry.item.event_id)) || entry.item;
@@ -103,20 +108,30 @@
       .catch(failed('report'));
   }
 
-  function forward(item: TimelineItemView, toRoomIds: string[]): void {
+  function forward(item: TimelineItemView, toRoomIds: string[], includeMetadata: boolean): void {
     const eventId = item.event_id;
     if (!eventId) return;
     for (const toRoomId of toRoomIds) {
       void core.rpc.messages
-        .forward({ room_id: roomId, event_id: eventId, to_room_id: toRoomId })
+        .forward({
+          room_id: roomId,
+          event_id: eventId,
+          to_room_id: toRoomId,
+          include_metadata: includeMetadata,
+          persona: $state.snapshot(
+            outgoingPersona(
+              personaStore,
+              toRoomId,
+              personaSpaces(roomList.rooms, toRoomId, undefined).order
+            ).persona
+          ),
+        })
         .catch(failed('forward'));
     }
   }
 
   function reproxyKind(content: TimelineItemView['content']): MessageKind {
-    if (content.kind !== 'message') return 'text';
-    if (content.emote) return 'emote';
-    return content.notice ? 'notice' : 'text';
+    return content.kind === 'message' ? content.msgtype : 'text';
   }
 
   function reproxy(item: TimelineItemView, persona: PersonaView | null): void {
@@ -141,10 +156,10 @@
     if (content.kind !== 'message' && !media) return;
     const body = content.kind === 'message' ? content.body : (content.caption ?? '');
     void editMessage(core.rpc, roomId, item.event_id, body, {
-      formatted: content.html,
+      formatted: formattedForEditing(content.html),
       kind: reproxyKind(content),
-      mediaCaption: media,
-      threadRoot: item.thread_root ?? null,
+      media_caption: media,
+      thread_root: item.thread_root ?? null,
       persona: persona ? projectPersona(persona, preferences.personaFallback && body !== '') : null,
     }).catch(failed('reproxy'));
   }
@@ -155,8 +170,7 @@
       kind: 'message',
       body: version.body,
       html: version.html,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     });
@@ -175,6 +189,7 @@
       source={entry.source}
       encrypted={entry.encrypted}
       original={entry.original}
+      encryption={entry.encryption}
     />
   {:else if entry.kind === 'edit-history'}
     <EditHistoryDialog
@@ -199,7 +214,8 @@
     <MessageForwardDialog
       bind:open={() => true, setOpen}
       fromRoomId={roomId}
-      onForward={(toRoomIds) => forward(item, toRoomIds)}
+      metadataLocked={item.forwarded != null}
+      onForward={(toRoomIds, includeMetadata) => forward(item, toRoomIds, includeMetadata)}
     />
   {:else if entry.kind === 'reproxy'}
     <MessageReproxyDialog
@@ -240,6 +256,7 @@
       {currentUserId}
       {canRedactOwn}
       {canRedactOthers}
+      {onReply}
       onMemberProfile={onSenderProfile}
     />
   {:else if entry.kind === 'receipts'}

@@ -1,0 +1,15 @@
+extends: file:./electron-builder.yml
+productName: Sable Nightly
+extraMetadata:
+  desktopName: moe.sable.next.electron.Nightly.desktop
+protocols:
+  - name: Sable Nightly
+    schemes:
+      - moe.sable.next
+      - matrix
+linux:
+  executableName: sable-nightly
+deb:
+  packageName: sable-nightly
+rpm:
+  packageName: sable-nightly

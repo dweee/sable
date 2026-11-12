@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { CoreEvent } from '#src/generated/protocol';
+import type { CoreEvent, SealStateView } from '#src/generated/protocol';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { clearDraft, clearDrafts, readDraft } from '#lib/composer/composer-drafts.svelte.js';
@@ -8,7 +8,7 @@ import { clearDraft, clearDrafts, readDraft } from '#lib/composer/composer-draft
 import { ACCOUNT_DATA_KEY_TYPE, AccountSync, type SyncedDocument } from './account-sync.svelte';
 import { draftsDocumentFor } from './sync-documents';
 
-type SealState = 'plain' | 'sealed' | 'locked';
+type SealState = SealStateView;
 
 function stubCore(
   remote: Record<string, unknown>,
@@ -78,6 +78,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   clearDrafts();
   vi.useRealTimers();
@@ -119,28 +120,51 @@ describe('AccountSync', () => {
     });
   });
 
-  it('converts v1 account data only when the v2 document is absent', async () => {
-    const local = { value: 'local' };
-    const document = stubDocument(local, {
-      legacy: { eventType: 'old.settings', convert: (content) => content },
+  it('uploads a cleared draft as soon as the app is hidden', async () => {
+    const roomId = '!room:example.org';
+    const document = draftsDocumentFor('');
+    const remote = { [document.eventType]: { v: 1, drafts: { [roomId]: { type: 'doc' } } } };
+    const { core, commands } = stubCore(remote, {
+      canSeal: true,
+      states: { [document.eventType]: 'sealed' },
     });
-    const { core, commands } = stubCore({ 'old.settings': { v: 1, value: 'v1' } });
-    new AccountSync().start(core, [document]);
+    const sync = new AccountSync();
+    const stop = sync.start(core, [document]);
     await vi.runAllTimersAsync();
-    expect(local.value).toBe('v1');
+
+    clearDraft(roomId);
+    sync.push(document);
+    vi.spyOn(globalThis.document, 'visibilityState', 'get').mockReturnValue('hidden');
+    globalThis.document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+
+    expect(commands.setSealedData).toHaveBeenCalledWith({
+      event_type: document.eventType,
+      content: { v: 1, drafts: {} },
+    });
+  });
+
+  it('skips the debounce while the app is hidden', async () => {
+    const local = { value: 'local' };
+    const document = stubDocument(local);
+    const { core, commands } = stubCore({ [document.eventType]: { v: 1, value: 'local' } });
+    const sync = new AccountSync();
+    const stop = sync.start(core, [document]);
+    await vi.runAllTimersAsync();
+
+    vi.spyOn(globalThis.document, 'visibilityState', 'get').mockReturnValue('hidden');
+    local.value = 'edited';
+    sync.push(document);
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+
     expect(commands.setData).toHaveBeenCalledWith({
       event_type: document.eventType,
-      content: { v: 1, value: 'v1' },
+      content: { v: 1, value: 'edited' },
     });
-    const current = stubCore({
-      'old.settings': { v: 1, value: 'stale' },
-      [document.eventType]: { v: 1, value: 'v2' },
-    });
-    new AccountSync().start(current.core, [document]);
-    await vi.runAllTimersAsync();
-    expect(local.value).toBe('v2');
-    expect(current.commands.data).not.toHaveBeenCalledWith({ event_type: 'old.settings' });
   });
+
   it('adopts what the account already holds', async () => {
     const local = { value: 'local' };
     const document = stubDocument(local);
@@ -150,6 +174,18 @@ describe('AccountSync', () => {
     await vi.runAllTimersAsync();
 
     expect(local.value).toBe('remote');
+  });
+
+  it('flags the first adoption of a mergeable document as a first sync', async () => {
+    const local = { value: 'local' };
+    const adopt = vi.fn(() => true);
+    const document = stubDocument(local, { adopt, merge: () => null });
+    const { core } = stubCore({ [document.eventType]: { v: 1, value: 'remote' } });
+
+    new AccountSync().start(core, [document]);
+    await vi.runAllTimersAsync();
+
+    expect(adopt).toHaveBeenCalledWith({ v: 1, value: 'remote' }, true);
   });
 
   it('seeds the account when the event is unusable', async () => {
@@ -192,6 +228,94 @@ describe('AccountSync', () => {
 
     expect(commands.setData).not.toHaveBeenCalled();
     stop();
+  });
+
+  it('keeps the fields another build wrote and uploads them with its own', async () => {
+    const local = { value: 'shared' };
+    const document = stubDocument(local);
+    const { core, commands } = stubCore({
+      [document.eventType]: { v: 1, value: 'shared', later: ['kept'] },
+    });
+
+    const sync = new AccountSync();
+    sync.start(core, [document]);
+    await vi.runAllTimersAsync();
+    sync.push(document);
+    await vi.runAllTimersAsync();
+    expect(commands.setData).not.toHaveBeenCalled();
+
+    local.value = 'changed';
+    sync.push(document);
+    await vi.runAllTimersAsync();
+
+    expect(commands.setData).toHaveBeenCalledWith({
+      event_type: document.eventType,
+      content: { v: 1, value: 'changed', later: ['kept'] },
+    });
+  });
+
+  it('stops answering a build that keeps rewriting the document its own way', async () => {
+    const shaped = (local: { value: string }, extra: object) =>
+      stubDocument(local, {
+        snapshot: () => ({ content: { v: 1, value: local.value, nested: extra } }),
+      });
+    const mine = shaped({ value: 'shared' }, { mine: true });
+    const theirs = shaped({ value: 'shared' }, { theirs: true });
+    const { core, commands, announce } = stubCore({
+      [mine.eventType]: { v: 1, value: 'shared', nested: { theirs: true } },
+    });
+    const write = commands.setData.getMockImplementation();
+    commands.setData.mockImplementation((request) => {
+      const written = write?.(request);
+      announce(request.event_type);
+      return written ?? Promise.resolve(null);
+    });
+
+    new AccountSync().start(core, [mine]);
+    new AccountSync().start(core, [theirs]);
+    await vi.runAllTimersAsync();
+
+    expect(commands.setData).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads once more after a burst of changes', async () => {
+    const document = stubDocument({ value: 'local' });
+    const { core, commands, announce } = stubCore({
+      [document.eventType]: { v: 1, value: 'remote' },
+    });
+
+    new AccountSync().start(core, [document]);
+    await vi.runAllTimersAsync();
+    commands.data.mockClear();
+
+    for (let change = 0; change < 5; change += 1) announce(document.eventType);
+    await vi.runAllTimersAsync();
+
+    expect(commands.data).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not repeat an upload that is still in flight', async () => {
+    const local = { value: 'shared' };
+    const document = stubDocument(local);
+    const { core, commands, announce } = stubCore({
+      [document.eventType]: { v: 1, value: 'shared' },
+    });
+    const sync = new AccountSync();
+    sync.start(core, [document]);
+    await vi.runAllTimersAsync();
+
+    const upload = Promise.withResolvers<null>();
+    commands.setData.mockImplementationOnce(() => upload.promise);
+    vi.spyOn(globalThis.document, 'visibilityState', 'get').mockReturnValue('hidden');
+    local.value = 'edited';
+    sync.push(document);
+    announce(document.eventType);
+    await vi.advanceTimersByTimeAsync(0);
+    sync.push(document);
+    upload.resolve(null);
+    await vi.runAllTimersAsync();
+
+    expect(commands.setData).toHaveBeenCalledTimes(1);
   });
 
   it('uploads a local change once the debounce elapses', async () => {

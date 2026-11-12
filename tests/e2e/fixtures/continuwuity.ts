@@ -1,8 +1,16 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { GenericContainer, Wait } from 'testcontainers';
+import {
+  HOMESERVER_RUN_LABEL,
+  removeOwnedHomeserver,
+  removeStaleHomeservers,
+} from './container-ownership';
+import { homeserverRunId } from './runtime';
 
-const IMAGE = 'ghcr.io/continuwuity/continuwuity:latest';
+// Frozen v26.9.3 image; both Linux architectures are in this immutable index.
+const IMAGE =
+  'ghcr.io/continuwuity/continuwuity@sha256:a177e08ab62e3d5bc60e4b8cea0a2ea9d18d4cb2bf8a6138cb0392a423c575a8';
 const CLIENT_SERVER_PORT = 8008;
 // The server mints its OAuth 2.0 metadata URLs at boot and the browser follows
 // them through a redirect login, so the host port has to be known beforehand.
@@ -31,9 +39,11 @@ export const TIMELINE_ROOM_NAME = 'Timeline fixture';
 export const TIMELINE_MESSAGE_COUNT = 100;
 
 export async function startContinuwuity(): Promise<TestHomeserver> {
-  await removeStaleHomeservers();
+  const runId = homeserverRunId();
+  await removeStaleHomeservers(HOST_PORT);
 
   const container = await new GenericContainer(IMAGE)
+    .withLabels({ [HOMESERVER_RUN_LABEL]: runId })
     .withExposedPorts({ container: CLIENT_SERVER_PORT, host: HOST_PORT })
     .withEnvironment({
       CONTINUWUITY_SERVER_NAME: SERVER_NAME,
@@ -96,21 +106,9 @@ async function waitForClientApi(containerId: string): Promise<void> {
   );
 }
 
-// An interrupted run leaves a container holding the port, with its accounts.
-async function removeStaleHomeservers(): Promise<void> {
-  const { stdout } = await execFileAsync('docker', [
-    'ps',
-    '-aq',
-    '--filter',
-    `publish=${String(HOST_PORT)}`,
-  ]);
-  for (const containerId of stdout.split('\n').filter(Boolean)) {
-    await removeContinuwuity(containerId);
-  }
-}
-
+// Cleanup only owns containers labelled by this Playwright invocation.
 export async function removeContinuwuity(containerId: string): Promise<void> {
-  await execFileAsync('docker', ['rm', '-f', containerId]);
+  await removeOwnedHomeserver(containerId);
 }
 
 export async function registerUser(

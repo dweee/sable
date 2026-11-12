@@ -4,10 +4,15 @@ if (!repository || !tag || !/^[a-f0-9]{40}$/.test(commit ?? '')) {
 }
 const url = new URL(repository);
 const repositoryPath = url.pathname.replace(/\/$/, '').replace(/\.git$/, '');
-const endpoint = new URL(`/api/v1/repos${repositoryPath}/tags/${encodeURIComponent(tag)}`, url.origin);
+const endpoint = new URL(
+  `/api/v1/repos${repositoryPath}/tags/${encodeURIComponent(tag)}`,
+  url.origin
+);
 const response = await fetch(endpoint, { signal: AbortSignal.timeout(30_000) });
 if (!response.ok) {
-  throw new Error(`Create the release tag ${tag} in canonical Forgejo first (HTTP ${response.status}).`);
+  throw new Error(
+    `Create the release tag ${tag} in canonical Forgejo first (HTTP ${response.status}).`
+  );
 }
 const canonical = await response.json();
 if (canonical.commit?.sha !== commit) {

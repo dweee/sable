@@ -2,10 +2,14 @@ import { isRecord } from '#lib/guards.js';
 import { reactionKey } from '#lib/model/model.js';
 import type { StateChangeView, TimelineItemView } from '#src/generated/protocol';
 
-import { isCustomReaction } from '../messages/reaction-emote-label';
+import { isCustomReaction, reactionText } from '../messages/reaction-emote-label';
 import { relationOf } from './timeline-event-index';
 
 export type Translate = (key: string, values?: Record<string, unknown>) => string;
+
+function senderLabel(item: TimelineItemView, t: Translate): string {
+  return item.sender_name ?? item.sender ?? t('timeline.unknownSender');
+}
 
 function stateChangeText(change: StateChangeView, user: string, t: Translate): string {
   switch (change.kind) {
@@ -63,7 +67,7 @@ function hiddenEventText(
     if (key) {
       return t('timeline.hiddenReaction', {
         user,
-        key: isCustomReaction(key) ? t('timeline.customEmote') : key,
+        key: isCustomReaction(key) ? t('timeline.customEmote') : reactionText(key),
       });
     }
   }
@@ -117,17 +121,17 @@ export function stateEventText(item: TimelineItemView, t: Translate): string {
   switch (content.kind) {
     case 'call_invite':
       return t('timeline.callInvite', {
-        user: item.sender_name ?? item.sender ?? t('timeline.unknownSender'),
+        user: senderLabel(item, t),
       });
     case 'verification_request':
       return t('timeline.verificationRequest', {
-        user: item.sender_name ?? item.sender ?? t('timeline.unknownSender'),
+        user: senderLabel(item, t),
       });
     case 'cute': {
       const type =
         content.cute_type && CUTE_TYPES.has(content.cute_type) ? content.cute_type : 'other';
       return t(`timeline.cute.${type}`, {
-        user: item.sender_name ?? item.sender ?? t('timeline.unknownSender'),
+        user: senderLabel(item, t),
         body: content.body,
       });
     }
@@ -147,16 +151,12 @@ export function stateEventText(item: TimelineItemView, t: Translate): string {
         : t('timeline.profileAvatarChanged', { user });
     }
     case 'state_event': {
-      const user = item.sender_name ?? item.sender ?? t('timeline.unknownSender');
+      const user = senderLabel(item, t);
       if (content.change) return stateChangeText(content.change, user, t);
       return t('timeline.hiddenStateEvent', { user, type: content.event_type });
     }
     case 'hidden_event':
-      return hiddenEventText(
-        content,
-        item.sender_name ?? item.sender ?? t('timeline.unknownSender'),
-        t
-      );
+      return hiddenEventText(content, senderLabel(item, t), t);
     case 'unsupported':
       return t('timeline.unsupported', { description: content.description });
     default:

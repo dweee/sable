@@ -11,7 +11,7 @@ use matrix_sdk::ruma::{ClientSecret, OwnedClientSecret, OwnedSessionId, SessionI
 use std::sync::Arc;
 
 use crate::api::auth::RequestPasswordResetEmailOk;
-use crate::protocol::RpcError;
+use crate::protocol::{RpcCode, RpcError};
 use crate::{Core, session};
 
 #[derive(serde::Serialize)]
@@ -67,20 +67,21 @@ fn change_password_request(
 }
 
 impl Core {
-    fn password_reset_error(&self, context: &str, error: matrix_sdk::HttpError) -> RpcError {
-        match error.client_api_error_kind() {
-            Some(ErrorKind::ThreepidNotFound | ErrorKind::NotFound) => RpcError::UnknownEmail,
+    fn password_reset_error(&self, context: &str, error: &matrix_sdk::HttpError) -> RpcError {
+        let rpc = match error.client_api_error_kind() {
+            Some(ErrorKind::ThreepidNotFound | ErrorKind::NotFound) => RpcCode::UnknownEmail,
             Some(
                 ErrorKind::ThreepidMediumNotSupported
                 | ErrorKind::ThreepidDenied
                 | ErrorKind::Unrecognized,
-            ) => RpcError::Unsupported,
-            Some(ErrorKind::WeakPassword) => RpcError::WeakPassword,
+            ) => RpcCode::Unsupported,
+            Some(ErrorKind::WeakPassword) => RpcCode::WeakPassword,
             Some(kind) if kind.errcode().as_str().starts_with("M_PASSWORD_") => {
-                RpcError::WeakPassword
+                RpcCode::WeakPassword
             }
-            _ => self.homeserver_http_error(context, error),
-        }
+            _ => return self.rpc_error(context, error),
+        };
+        crate::errors::coded(context, rpc, error)
     }
 
     pub(super) async fn request_password_reset_email(
@@ -94,11 +95,11 @@ impl Core {
     ) -> Result<RequestPasswordResetEmailOk, RpcError> {
         let email = email.trim().to_owned();
         if email.is_empty() || !email.contains('@') {
-            return Err(RpcError::InvalidEmail);
+            return Err(RpcCode::InvalidEmail.into());
         }
         let client_secret = match client_secret {
             Some(secret) => {
-                ClientSecret::parse(&secret).map_err(|_| RpcError::EmailVerificationFailed)?
+                ClientSecret::parse(&secret).map_err(|_| RpcCode::EmailVerificationFailed)?
             }
             None => ClientSecret::new(),
         };
@@ -110,7 +111,7 @@ impl Core {
         let response = client
             .send(request)
             .await
-            .map_err(|error| self.password_reset_error("password_reset_email", error))?;
+            .map_err(|error| self.password_reset_error("password_reset_email", &error))?;
         Ok(RequestPasswordResetEmailOk {
             client_secret: client_secret.to_string(),
             sid: response.sid.to_string(),
@@ -128,8 +129,8 @@ impl Core {
         }: ResetPasswordParams,
     ) -> Result<(), RpcError> {
         let client_secret =
-            ClientSecret::parse(&client_secret).map_err(|_| RpcError::EmailVerificationFailed)?;
-        let sid = SessionId::parse(&sid).map_err(|_| RpcError::EmailVerificationFailed)?;
+            ClientSecret::parse(&client_secret).map_err(|_| RpcCode::EmailVerificationFailed)?;
+        let sid = SessionId::parse(&sid).map_err(|_| RpcCode::EmailVerificationFailed)?;
         let client = session::discovery_client(&homeserver)
             .await
             .map_err(|error| self.discovery_error(error))?;
@@ -141,11 +142,11 @@ impl Core {
             Ok(_) => return Ok(()),
             Err(error) => match error.as_uiaa_response() {
                 Some(info) => info.clone(),
-                None => return Err(self.password_reset_error("reset_password", error)),
+                None => return Err(self.password_reset_error("reset_password", &error)),
             },
         };
         if !offers_email_identity(&info) {
-            return Err(RpcError::Unsupported);
+            return Err(RpcCode::Unsupported.into());
         }
         let auth = email_identity_auth(&sid, &client_secret, info.session.as_deref())
             .ok_or_else(|| self.failed("reset_password", "email identity auth did not build"))?;
@@ -160,9 +161,9 @@ impl Core {
         {
             Ok(_) => Ok(()),
             Err(error) if error.as_uiaa_response().is_some() => {
-                Err(RpcError::EmailVerificationFailed)
+                Err(RpcCode::EmailVerificationFailed.into())
             }
-            Err(error) => Err(self.password_reset_error("reset_password", error)),
+            Err(error) => Err(self.password_reset_error("reset_password", &error)),
         }
     }
 }
@@ -308,7 +309,13 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(result, Err(RpcError::EmailVerificationFailed)));
+        assert!(matches!(
+            result,
+            Err(RpcError {
+                code: RpcCode::EmailVerificationFailed,
+                ..
+            })
+        ));
         drop(core);
         drop(server);
         let _ = std::fs::remove_dir_all(directory);
@@ -352,8 +359,20 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(unknown, Err(RpcError::UnknownEmail)));
-        assert!(matches!(invalid, Err(RpcError::InvalidEmail)));
+        assert!(matches!(
+            unknown,
+            Err(RpcError {
+                code: RpcCode::UnknownEmail,
+                ..
+            })
+        ));
+        assert!(matches!(
+            invalid,
+            Err(RpcError {
+                code: RpcCode::InvalidEmail,
+                ..
+            })
+        ));
         drop(core);
         drop(server);
         let _ = std::fs::remove_dir_all(directory);
@@ -405,8 +424,20 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(unsupported, Err(RpcError::Unsupported)));
-        assert!(matches!(weak, Err(RpcError::WeakPassword)));
+        assert!(matches!(
+            unsupported,
+            Err(RpcError {
+                code: RpcCode::Unsupported,
+                ..
+            })
+        ));
+        assert!(matches!(
+            weak,
+            Err(RpcError {
+                code: RpcCode::WeakPassword,
+                ..
+            })
+        ));
         drop(core);
         drop(server);
         let _ = std::fs::remove_dir_all(directory);

@@ -6,10 +6,8 @@ use serde::{Deserialize, Serialize};
 use super::Handler;
 use crate::Core;
 use crate::protocol::{RpcError, LoginFlowsView, RegistrationFlowsView, RegistrationResultView};
-use crate::session;
 
 domain! {
-    discover_homeserver,
     login,
     login_flows,
     registration_flows,
@@ -49,29 +47,14 @@ pub enum AuthIntent {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct DiscoverHomeserverParams {
-    pub server_name: String,
-}
-
-impl Handler for DiscoverHomeserverParams {
-    type Ok = String;
-
-    async fn run(self, _core: &Arc<Core>) -> Result<String, RpcError> {
-        let client = session::discovery_client(&self.server_name)
-            .await
-            .map_err(|_| RpcError::UnknownHomeserver)?;
-        Ok(client.homeserver().to_string())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct LoginParams {
     #[serde(default)]
     pub reauth_account_id: Option<String>,
     pub homeserver: String,
     pub identifier: LoginIdentifier,
     pub password: String,
+    #[serde(default)]
+    pub device_display_name: Option<String>,
 }
 
 impl Handler for LoginParams {
@@ -83,6 +66,7 @@ impl Handler for LoginParams {
             self.identifier,
             self.password,
             self.reauth_account_id,
+            self.device_display_name,
         )
         .await
         .map(|user_id| user_id.to_string())
@@ -126,6 +110,8 @@ pub struct RegisterParams {
     #[serde(default)]
     pub registration_email: Option<String>,
     pub registration_token: Option<String>,
+    #[serde(default)]
+    pub device_display_name: Option<String>,
 }
 
 impl Handler for RegisterParams {
@@ -138,6 +124,7 @@ impl Handler for RegisterParams {
             self.password,
             self.registration_email,
             self.registration_token,
+            self.device_display_name,
         )
         .await
     }
@@ -252,6 +239,8 @@ pub struct StartOidcLoginParams {
     pub homeserver: String,
     pub redirect_uri: String,
     pub intent: AuthIntent,
+    #[serde(default)]
+    pub device_display_name: Option<String>,
 }
 
 impl Handler for StartOidcLoginParams {
@@ -305,6 +294,8 @@ impl Handler for StartSsoLoginParams {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct CompleteSsoLoginParams {
     pub callback_url: String,
+    #[serde(default)]
+    pub device_display_name: Option<String>,
 }
 
 impl Handler for CompleteSsoLoginParams {

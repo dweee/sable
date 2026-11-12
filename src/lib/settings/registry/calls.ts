@@ -10,7 +10,7 @@ import {
   CALL_VIDEO_BITRATES,
   CALL_VIDEO_CODECS,
   CALL_VIDEO_RESOLUTIONS,
-} from '../preferences.svelte';
+} from '../definitions';
 import type { SettingOption, SettingsCategory } from '../registry';
 
 const callResolutionOptions: SettingOption[] = CALL_VIDEO_RESOLUTIONS.map((value) =>
@@ -45,9 +45,32 @@ export const callsCategory: SettingsCategory = {
     { id: 'ringing', name: 'settings.groups.ringing' },
     { id: 'call-button', name: 'settings.groups.callButton' },
     { id: 'call-screens', name: 'settings.groups.callScreens' },
+    { id: 'call-service', name: 'settings.callServiceTitle' },
     { id: 'call-compat', name: 'settings.groups.callCompat' },
   ],
   items: [
+    {
+      key: 'callInputMode',
+      section: 'microphone',
+      icon: MicrophoneIcon,
+      name: 'settings.callInputMode',
+      description: 'settings.callInputModeHint',
+      supported: () => !hasNativeCalls(),
+      type: 'select',
+      options: [
+        { value: 'voice-activity', label: 'settings.callInputVoiceActivity' },
+        { value: 'push-to-talk', label: 'settings.callInputPushToTalk' },
+      ],
+    },
+    {
+      key: 'callGlobalShortcuts',
+      section: 'microphone',
+      icon: MicrophoneIcon,
+      name: 'settings.callGlobalShortcuts',
+      description: 'settings.callGlobalShortcutsHint',
+      type: 'boolean',
+      supported: isElectron,
+    },
     {
       key: 'callCameraResolution',
       section: 'call-camera',

@@ -1,25 +1,31 @@
 <script lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { copyText } from '#lib/platform/clipboard.js';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
 
-  import { SABLE_DONATE_URL, SABLE_SOURCE_URL } from '#lib/config/links.js';
+  import { appName } from '#lib/deployment/brand.js';
+  import { DEFAULT_APP_NAME } from '#lib/deployment/default-app-name.js';
+  import { donateUrl, sourceUrl } from '#lib/deployment/links.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { restartSetup } from '#lib/features/auth/setup/setup-record.js';
+  import { writeText } from '#lib/platform/local-json.js';
   import { i18n } from '#lib/i18n.js';
   import { desktopUpdate, installPendingUpdate } from '#lib/platform/desktop-update.svelte.js';
   import {
     checkForMobileUpdate,
+    checkForPackagedUpdate,
     checkForUpdate,
     relaunchApp,
     supportsAutoUpdate,
+    supportsDesktopUpdateChecks,
     updatePlatform,
   } from '#lib/platform/updates.js';
-  import { isElectron } from '#lib/platform/electron.js';
+  import { desktopDataDir } from '#lib/platform/data-dir.js';
+  import { electronBridge } from '#lib/platform/electron.js';
   import { hostsServiceWorker } from '#lib/platform/service-worker.js';
   import { checkForWebUpdate } from '#lib/platform/web-updates.svelte.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
-  import { supporter } from '#lib/supporter/supporter.svelte.js';
   import SableBrandMark from '#lib/ui/SableBrandMark.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
@@ -35,25 +41,30 @@
   import CheckIcon from 'phosphor-svelte/lib/CheckIcon';
   import CopySimpleIcon from 'phosphor-svelte/lib/CopySimpleIcon';
 
-  import SupporterSettings from './SupporterSettings.svelte';
+  import HomeserverInfo from './HomeserverInfo.svelte';
+  import SupporterActivationSettings from './SupporterActivationSettings.svelte';
+  import { supporter } from '#lib/supporter/supporter.svelte.js';
 
   const core = useCoreClient();
+  let source = $derived(sourceUrl());
+  let donate = $derived(donateUrl());
   const version = `v${import.meta.env.VITE_APP_VERSION ?? 'dev'}`;
-  const automaticUpdateChecksSupported = supportsAutoUpdate() || hostsServiceWorker();
+  const automaticUpdateChecksSupported = supportsDesktopUpdateChecks() || hostsServiceWorker();
   let confirmingReset = $state(false);
   let resetting = $state(false);
   let resetFailed = $state(false);
   let restarting = $state(false);
   let restartFailed = $state(false);
   let checkingForUpdate = $state(false);
-  let updateCheckResult = $state<'available' | 'current' | 'mobile-available' | 'failed' | null>(
-    null
-  );
+  let updateCheckResult = $state<
+    'available' | 'current' | 'mobile-available' | 'package-available' | 'failed' | null
+  >(null);
 
   const pendingUpdate = $derived(supportsAutoUpdate() ? desktopUpdate.update : null);
   const pendingStage = $derived(desktopUpdate.stage);
 
   let versionCopied = $state(false);
+  const dataDir = desktopDataDir().catch(() => null);
   async function copyVersion(): Promise<void> {
     await copyText(version);
     versionCopied = true;
@@ -67,6 +78,7 @@
     resetFailed = false;
     try {
       await core.resetCaches();
+      await electronBridge()?.clearWebCaches();
       window.location.reload();
     } catch {
       resetting = false;
@@ -80,7 +92,7 @@
     restarting = true;
     restartFailed = false;
     try {
-      await restartSetup(core, localStorage, session.user_id, session.device_id);
+      await restartSetup(core, { setItem: writeText }, session.user_id, session.device_id);
       await goto(resolve('setup'));
     } catch {
       restartFailed = true;
@@ -95,6 +107,10 @@
     updateCheckResult = null;
     try {
       const platform = updatePlatform();
+      if (platform === 'desktop' && !supportsAutoUpdate()) {
+        updateCheckResult = (await checkForPackagedUpdate()) ? 'package-available' : 'current';
+        return;
+      }
       const available =
         platform === 'desktop'
           ? Boolean(await checkForUpdate())
@@ -114,12 +130,14 @@
   }
 </script>
 
+<PageTitle title={i18n.t('settings.about')} />
+
 <div class="about-page">
   <header class="product">
     <SableBrandMark class="about-logo" />
     <div>
       <div class="product-name">
-        <h1>Sable</h1>
+        <h1>{appName()}</h1>
         <Tooltip label={i18n.t(versionCopied ? 'common.copied' : 'common.copy')}>
           {#snippet trigger({ props })}
             <button
@@ -138,54 +156,39 @@
           {/snippet}
         </Tooltip>
       </div>
-      <p>{i18n.t('settings.aboutTagline')}</p>
-      <div class="product-actions">
-        <LinkButton href={SABLE_SOURCE_URL} target="_blank" rel="noopener noreferrer" size="small">
-          <CodeIcon aria-hidden="true" />
-          {i18n.t('common.sourceCode')}
-        </LinkButton>
-        <LinkButton
-          href={SABLE_DONATE_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          variant="primary"
-          size="small"
-        >
-          <HeartIcon aria-hidden="true" />
-          {i18n.t('common.supportSable')}
-        </LinkButton>
-      </div>
+      {#if appName() !== DEFAULT_APP_NAME}
+        <p>{i18n.t('settings.aboutPoweredBy')}</p>
+      {/if}
+      <p>{i18n.t('settings.aboutTagline')} 🇵🇸 🇺🇦 🏳️‍⚧️</p>
+      {#if source || donate}
+        <div class="product-actions">
+          {#if source}
+            <LinkButton href={source} target="_blank" rel="noopener noreferrer" size="small">
+              <CodeIcon aria-hidden="true" />
+              {i18n.t('common.sourceCode')}
+            </LinkButton>
+          {/if}
+          {#if donate}
+            <LinkButton
+              href={donate}
+              target="_blank"
+              rel="noopener noreferrer"
+              variant="primary"
+              size="small"
+            >
+              <HeartIcon aria-hidden="true" />
+              {i18n.t('common.supportSable')}
+            </LinkButton>
+          {/if}
+        </div>
+      {/if}
     </div>
   </header>
-
-  {#if supporter.enabled}
-    <SupporterSettings />
+  {#if supporter.enabled && donate}
+    <SupporterActivationSettings />
   {/if}
-
   <svelte:boundary>
-    {@const info = await core.rpc.session.homeserverInfo().catch((error: unknown) => {
-      console.debug('[sable settings] homeserver info unavailable', error);
-      return null;
-    })}
-    {#if info}
-      <SettingsSection title={i18n.t('settings.aboutHomeserver')} headingId="about-homeserver">
-        <ul class="settings">
-          <SettingsRow id="homeserver-url" title={i18n.t('settings.aboutHomeserverUrl')}>
-            <span class="value">{info.homeserver.replace(/\/+$/, '')}</span>
-          </SettingsRow>
-          <SettingsRow id="homeserver-software" title={i18n.t('settings.aboutHomeserverSoftware')}>
-            <span class="value"
-              >{info.server?.name ?? i18n.t('settings.aboutHomeserverUnknown')}</span
-            >
-          </SettingsRow>
-          <SettingsRow id="homeserver-version" title={i18n.t('settings.aboutHomeserverVersion')}>
-            <span class="value"
-              >{info.server?.version ?? i18n.t('settings.aboutHomeserverUnknown')}</span
-            >
-          </SettingsRow>
-        </ul>
-      </SettingsSection>
-    {/if}
+    <HomeserverInfo />
 
     {#snippet pending()}{/snippet}
   </svelte:boundary>
@@ -197,9 +200,23 @@
           {i18n.t('settings.aboutReport')}
         </LinkButton>
       </SettingsRow>
+      {#await dataDir then dir}
+        {#if dir}
+          <SettingsRow
+            id="data-folder"
+            title={i18n.t('settings.aboutDataFolder')}
+            description={dir}
+          >
+            <Button size="small" onclick={() => void copyText(dir)}>
+              {i18n.t('common.copy')}
+            </Button>
+          </SettingsRow>
+        {/if}
+      {/await}
       {#if automaticUpdateChecksSupported}
         <SettingsRow
           id="auto-update-check"
+          key="autoUpdateCheck"
           title={i18n.t('settings.autoUpdateCheck')}
           description={i18n.t('settings.autoUpdateCheckHint')}
           control="auto-update-check-switch"
@@ -212,9 +229,10 @@
           />
         </SettingsRow>
       {/if}
-      {#if isElectron()}
+      {#if supportsAutoUpdate()}
         <SettingsRow
           id="update-channel"
+          key="updateChannel"
           title={i18n.t('settings.updateChannel')}
           description={i18n.t('settings.updateChannelHint')}
         >
@@ -279,6 +297,10 @@
       {:else if updateCheckResult === 'mobile-available'}
         <li class="settings-form status" aria-live="polite">
           {i18n.t('settings.aboutMobileUpdateAvailable')}
+        </li>
+      {:else if updateCheckResult === 'package-available'}
+        <li class="settings-form status" aria-live="polite">
+          {i18n.t('settings.aboutPackageUpdateAvailable')}
         </li>
       {:else if updateCheckResult === 'failed'}
         <li class="settings-form error" role="alert">
@@ -384,8 +406,7 @@
   }
 
   .version-copy-button,
-  p,
-  .value {
+  p {
     color: var(--surface-var-on-container);
   }
 
@@ -397,13 +418,6 @@
     list-style: none;
     margin: 0;
     padding: 0;
-  }
-
-  .value {
-    font-family: var(--font-family-mono);
-    font-size: var(--font-size-small);
-    font-variant-ligatures: none;
-    overflow-wrap: anywhere;
   }
 
   .error {

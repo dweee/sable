@@ -18,7 +18,7 @@ test('mobile: the room header keeps search and the menu, the rest moves into the
   await expect(header.getByRole('button', { name: 'Threads' })).toHaveCount(0);
   await expect(header.getByRole('button', { name: 'Pinned messages' })).toHaveCount(0);
   await expect(header.locator('h1')).toBeVisible();
-  const title = await header.locator('h1').boundingBox();
+  const title = await header.locator('.room-title').boundingBox();
   expect(title?.width ?? 0).toBeGreaterThan(120);
   await page.screenshot({ path: 'test-results/room-header-mobile.png' });
 

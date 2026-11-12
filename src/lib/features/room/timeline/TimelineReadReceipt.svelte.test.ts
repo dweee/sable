@@ -2,27 +2,14 @@ import { render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-const native = vi.hoisted(() => ({
-  onFocus: null as ((focused: boolean) => void) | null,
-}));
-
-vi.mock('#lib/platform/window-decorations.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('#lib/platform/window-decorations.js')>()),
-  watchWindowFocus: (onFocus: (focused: boolean) => void) => {
-    native.onFocus = onFocus;
-    return Promise.resolve(() => {});
-  },
-}));
-
 import type { TimelineItemView } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { RoomTimeline } from '#lib/rooms/timeline.svelte.js';
 
 import TimelineReadReceipt from './TimelineReadReceipt.svelte';
-import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
+import { timelineItem } from '#lib/features/room/timeline/test-items.js';
 
 beforeEach(() => {
-  native.onFocus = null;
   vi.spyOn(document, 'hasFocus').mockReturnValue(true);
 });
 
@@ -30,41 +17,6 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
-
-function item(): TimelineItemView {
-  return withRowFields({
-    id: 'latest',
-    event_id: '$latest',
-    transaction_id: null,
-    send_state: null,
-    sender: '@alice:example.org',
-    sender_name: 'Alice',
-    sender_avatar: null,
-    timestamp: 0,
-    content: {
-      kind: 'message',
-      body: 'latest',
-      html: 'latest',
-      emote: false,
-      notice: false,
-      edited: false,
-      jumbo: null,
-    },
-    in_reply_to: null,
-    thread_root: null,
-    thread_summary: null,
-    reactions: [],
-    is_own: false,
-    read_by: [],
-    read_timestamps: {},
-    per_message_profile: null,
-    bundled_link_previews: [],
-    link_previews_removed: null,
-    mention: 'none',
-    forwarded: null,
-    forum_title: null,
-  });
-}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -78,7 +30,7 @@ test.each(['thread', 'focused'] as const)('%s receipt scope is respected', async
   vi.useFakeTimers();
   const timeline = new RoomTimeline({} as CoreClient);
   timeline.mode = kind === 'thread' ? { kind, rootEventId: '$root' } : { kind, eventId: '$latest' };
-  timeline.items = [item()];
+  timeline.items = [timelineItem('latest')];
   const read = vi.fn().mockResolvedValue(undefined);
   const instance = render(TimelineReadReceipt, {
     props: { timeline, visibleEventId: '$latest', onRead: read },
@@ -93,7 +45,7 @@ test.each(['thread', 'focused'] as const)('%s receipt scope is respected', async
 test('does not duplicate a read receipt while the first request is pending', async () => {
   vi.useFakeTimers();
   const timeline = new RoomTimeline({} as CoreClient);
-  timeline.items = [item()];
+  timeline.items = [timelineItem('latest')];
   const pending = deferred<undefined>();
   const read = vi.fn(() => pending.promise);
   const instance = render(TimelineReadReceipt, {
@@ -119,7 +71,7 @@ test('does not duplicate a read receipt while the first request is pending', asy
 test('a queued receipt is discarded when switching to focused history', async () => {
   vi.useFakeTimers();
   const timeline = new RoomTimeline({} as CoreClient);
-  timeline.items = [item()];
+  timeline.items = [timelineItem('latest')];
   const read = vi.fn().mockResolvedValue(undefined);
   const instance = render(TimelineReadReceipt, {
     props: { timeline, visibleEventId: '$latest', onRead: read },
@@ -137,7 +89,7 @@ test('a focused timeline read to the live end sends a receipt', async () => {
   vi.useFakeTimers();
   const timeline = new RoomTimeline({} as CoreClient);
   timeline.mode = { kind: 'focused', eventId: '$latest' };
-  timeline.items = [item()];
+  timeline.items = [timelineItem('latest')];
   const read = vi.fn().mockResolvedValue(undefined);
   const instance = render(TimelineReadReceipt, {
     props: { timeline, visibleEventId: '$latest', atLatest: true, onRead: read },
@@ -150,38 +102,8 @@ test('a focused timeline read to the live end sends a receipt', async () => {
 });
 
 function itemWithId(id: string): TimelineItemView {
-  return { ...item(), id, event_id: `$${id}` };
+  return { ...timelineItem('latest'), id, event_id: `$${id}` };
 }
-
-test('new messages stay unread after native focus is lost while the page reports visible', async () => {
-  vi.useFakeTimers();
-  const timeline = new RoomTimeline({} as CoreClient);
-  timeline.items = [itemWithId('a')];
-  const read = vi.fn().mockResolvedValue(undefined);
-  const props = $state({ timeline, visibleEventId: '$a', onRead: read });
-  const instance = render(TimelineReadReceipt, { props });
-
-  await tick();
-  await vi.advanceTimersByTimeAsync(500);
-  expect(read).toHaveBeenCalledExactlyOnceWith('$a');
-
-  native.onFocus?.(false);
-  await tick();
-  timeline.items = [...timeline.items, itemWithId('b')];
-  props.visibleEventId = '$b';
-  await tick();
-  await vi.advanceTimersByTimeAsync(1000);
-
-  expect(document.visibilityState).toBe('visible');
-  expect(document.hasFocus()).toBe(true);
-  expect(read).toHaveBeenCalledTimes(1);
-
-  native.onFocus?.(true);
-  await tick();
-  await vi.advanceTimersByTimeAsync(500);
-  expect(read).toHaveBeenNthCalledWith(2, '$b');
-  instance.unmount();
-});
 
 test('a fast scroll across many rows sends one receipt for the newest', async () => {
   vi.useFakeTimers();
@@ -368,7 +290,7 @@ test('hiding the document does not send the pending receipt', async () => {
 test('unread navigation blocks receipts even when the viewport is at latest', async () => {
   vi.useFakeTimers();
   const timeline = new RoomTimeline({} as CoreClient);
-  timeline.items = [item()];
+  timeline.items = [timelineItem('latest')];
   const read = vi.fn().mockResolvedValue(undefined);
   const props = $state({ timeline, visibleEventId: '$latest', enabled: false, onRead: read });
   const instance = render(TimelineReadReceipt, { props });
@@ -386,7 +308,7 @@ test('unread navigation blocks receipts even when the viewport is at latest', as
 test('blocking receipts discards a previously queued receipt', async () => {
   vi.useFakeTimers();
   const timeline = new RoomTimeline({} as CoreClient);
-  timeline.items = [item()];
+  timeline.items = [timelineItem('latest')];
   const read = vi.fn().mockResolvedValue(undefined);
   const props = $state({ timeline, visibleEventId: '$latest', enabled: true, onRead: read });
   const instance = render(TimelineReadReceipt, { props });

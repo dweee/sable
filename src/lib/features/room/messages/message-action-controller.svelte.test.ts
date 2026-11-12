@@ -2,8 +2,14 @@
 import { expect, test, vi } from 'vitest';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import type { TimelineItemView } from '#src/generated/protocol';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 import { MessageActionExecutor } from './message-action-controller.svelte.js';
 import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
+
+const writeClipboard = vi.fn((_text?: string) => Promise.resolve());
+vi.mock('#lib/platform/clipboard.js', () => ({
+  copyText: (text: string) => writeClipboard(text),
+}));
 
 function message(): TimelineItemView {
   return withRowFields({
@@ -19,8 +25,7 @@ function message(): TimelineItemView {
       kind: 'message',
       body: 'hello',
       html: '<b>hello</b>',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -37,6 +42,7 @@ function message(): TimelineItemView {
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
   });
 }
 
@@ -59,6 +65,7 @@ function fixture() {
     source: string;
     encrypted: boolean;
     original: string | null;
+    encryption: string | null;
   }>();
   const removeLinkPreviews = vi.fn(() => Promise.resolve());
   const deps = {
@@ -125,6 +132,7 @@ test('source lookup keeps the event selected when the action began', async () =>
     source: '{"event_id":"$item"}',
     encrypted: true,
     original: '{"type":"m.room.encrypted"}',
+    encryption: '{"session":null}',
   });
   await source.promise;
   await Promise.resolve();
@@ -133,6 +141,7 @@ test('source lookup keeps the event selected when the action began', async () =>
     source: '{"event_id":"$item"}',
     encrypted: true,
     original: '{"type":"m.room.encrypted"}',
+    encryption: '{"session":null}',
   });
 });
 
@@ -148,4 +157,13 @@ test('removing embeds edits the message in its own thread', () => {
     event_id: '$item',
     thread_root: '$root',
   });
+});
+
+test('copying message text writes to clipboard and shows confirmation toast', async () => {
+  const { executor } = fixture();
+  for (const toast of toasts.items) toasts.dismiss(toast.id);
+  executor.actions.onCopyText?.();
+  await Promise.resolve();
+  expect(writeClipboard).toHaveBeenCalledWith('hello');
+  expect(toasts.items.at(-1)?.message).toBe('Copied');
 });

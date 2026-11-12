@@ -1,22 +1,24 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import { Select as BitsSelect } from 'bits-ui';
   import CaretDownIcon from 'phosphor-svelte/lib/CaretDownIcon';
   import CheckIcon from 'phosphor-svelte/lib/CheckIcon';
   import type { ClassValue } from 'svelte/elements';
   import { i18n } from '#lib/i18n.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
   import BottomSheet from './BottomSheet.svelte';
   import Switcher, { getSettingsChoices, hasSettingsChoices } from './Switcher.svelte';
   import './form-control.css';
   import './menu.css';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
+  import MediaImage from '../MediaImage.svelte';
 
   type Item = {
     value: string;
     label: string;
     image?: string;
+    mediaImage?: string;
     imageClass?: ClassValue;
     labelClass?: ClassValue;
     disabled?: boolean;
@@ -50,7 +52,7 @@
     onValueChange,
   }: Props = $props();
 
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   const inlineChoices = hasSettingsChoices() ? getSettingsChoices() : false;
   const useSwitcher = $derived(
     !forceDropdown &&
@@ -79,6 +81,8 @@
       alt=""
       aria-hidden="true"
     />
+  {:else if item.mediaImage}
+    <MediaImage class="select-item-image" source={item.mediaImage} alt="" width={32} height={32} />
   {/if}
   <span class={['selection-label', item.labelClass]}>{item.label}</span>
   {#if selected}<CheckIcon class="select-check" aria-hidden="true" />{/if}
@@ -149,11 +153,11 @@
     <BitsSelect.Portal>
       <BitsSelect.Content
         sideOffset={4}
+        collisionPadding={collisionPadding()}
         class="menu-surface select-content"
         {...overlayLayer()}
-        {@attach scrollHint}
       >
-        <BitsSelect.Viewport>
+        <BitsSelect.Viewport class="menu-scroll-content" {@attach scrollHint}>
           {#each items as item (item.value)}
             <BitsSelect.Item
               value={item.value}
@@ -181,9 +185,9 @@
     cursor: pointer;
     display: flex;
     gap: var(--space-300);
-    height: var(--control-height-300);
+    height: var(--control-height-400);
     justify-content: space-between;
-    min-height: var(--control-height-300);
+    min-height: var(--control-height-400);
     position: relative;
     text-align: left;
     width: 100%;
@@ -191,7 +195,7 @@
 
   :global(.select::after) {
     content: '';
-    inset-block: calc((var(--target-hit) - var(--control-height-300)) / -2);
+    inset-block: calc((var(--target-hit) - var(--control-height-400)) / -2);
     inset-inline: 0;
     position: absolute;
   }
@@ -203,10 +207,6 @@
     text-overflow: ellipsis;
     text-transform: none;
     white-space: nowrap;
-  }
-
-  :global(.selection-label) {
-    text-transform: capitalize;
   }
 
   :global(.selection-label.literal-label) {
@@ -255,6 +255,11 @@
   .select-sheet-row :global(.selection-label) {
     flex: 1;
     text-align: start;
+  }
+
+  :global(.select-content .menu-item),
+  .select-sheet-row {
+    padding-block: var(--space-150);
   }
 
   :global(.menu-surface.select-content) {

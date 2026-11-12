@@ -1,6 +1,14 @@
 import { execSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 
+// The setup-release job installs no packages, so this cannot use `semver`.
+const STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const IDENTIFIER = '(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)';
+const RELEASE_TAG = new RegExp(
+  `^v?(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)` +
+    `(?:-${IDENTIFIER}(?:\\.${IDENTIFIER})*)?(?:\\+[0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*)?$`
+);
+
 function commitDate() {
   try {
     const seconds = execSync('git log -1 --format=%ct', {
@@ -16,7 +24,7 @@ function commitDate() {
 
 function nightlyVersion(gitSha) {
   const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
-  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  const match = STABLE_VERSION.exec(version);
   if (!match) {
     throw new Error(`package.json version must be stable SemVer (got: ${version})`);
   }
@@ -32,12 +40,13 @@ function nightlyVersion(gitSha) {
     pad(date.getUTCSeconds()),
   ].join('');
 
-  const [, major, minor, patch] = match;
-  return `${major}.${minor}.${Number(patch) + 1}-nightly.${stamp}.${gitSha.slice(0, 12)}`;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return `${major}.${minor}.${patch + 1}-nightly.${stamp}.g${gitSha.slice(0, 12)}`;
 }
 
 function resolveReleaseMeta({ eventName, inputTag, gitRef, gitRefName, gitSha }) {
   if (eventName === 'workflow_dispatch' && inputTag) {
+    if (!RELEASE_TAG.test(inputTag)) throw new Error(`Invalid release tag: ${inputTag}`);
     return { tag: inputTag, version: inputTag.replace(/^v/, ''), ref: inputTag, nightly: false };
   }
   if (gitRef === 'refs/heads/main') {
@@ -47,7 +56,7 @@ function resolveReleaseMeta({ eventName, inputTag, gitRef, gitRefName, gitSha })
     const version = nightlyVersion(gitSha);
     return { tag: `nightly-${version}`, version, ref: gitSha, nightly: true };
   }
-  if (/^v\d+\./.test(gitRefName)) {
+  if (gitRefName.startsWith('v') && RELEASE_TAG.test(gitRefName)) {
     return { tag: gitRefName, version: gitRefName.replace(/^v/, ''), ref: gitRef, nightly: false };
   }
   throw new Error(`No release target for ref ${gitRef || '<none>'}`);

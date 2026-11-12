@@ -1,18 +1,14 @@
 <script lang="ts">
+  import { appName } from '#lib/deployment/brand.js';
   import { i18n } from '#lib/i18n.js';
   import {
     closeWindow,
-    dismissSnapLayouts,
     minimizeWindow,
-    releaseSnapLayouts,
-    showSnapLayouts,
-    supportsSnapLayouts,
-    startWindowResize,
     toggleMaximizeWindow,
     watchMaximized,
     type TitleBarKind,
-    type WindowEdge,
   } from '#lib/platform/window-decorations.js';
+  import { trackTitlebarHeight } from '#lib/ui/titlebar-inset.svelte.js';
 
   interface Props {
     kind: TitleBarKind;
@@ -20,35 +16,6 @@
 
   let { kind }: Props = $props();
   let maximized = $state(false);
-
-  const SNAP_LAYOUTS_DELAY_MS = 620;
-  let snapTimer: ReturnType<typeof setTimeout> | undefined;
-  let snapShown = false;
-
-  function snapFailed(error: unknown): void {
-    console.debug('[sable window] snap layouts failed', error);
-  }
-
-  function hoverMaximize(): void {
-    if (kind !== 'desktop' || !supportsSnapLayouts()) return;
-    clearTimeout(snapTimer);
-    snapTimer = setTimeout(() => {
-      snapShown = true;
-      showSnapLayouts().catch(snapFailed);
-    }, SNAP_LAYOUTS_DELAY_MS);
-  }
-
-  function endSnap(action: () => Promise<void>): void {
-    clearTimeout(snapTimer);
-    if (!snapShown) return;
-    snapShown = false;
-    action().catch(snapFailed);
-  }
-
-  const leaveMaximize = (): void => endSnap(releaseSnapLayouts);
-  const dismissSnap = (): void => endSnap(dismissSnapLayouts);
-
-  $effect(() => dismissSnap);
 
   $effect(() => {
     let stop: (() => void) | null = null;
@@ -70,22 +37,11 @@
       stop?.();
     };
   });
-
-  const edges: WindowEdge[] = [
-    'North',
-    'NorthEast',
-    'East',
-    'SouthEast',
-    'South',
-    'SouthWest',
-    'West',
-    'NorthWest',
-  ];
 </script>
 
-<div class={['titlebar', kind === 'mac' && 'titlebar-mac']}>
+<div class={['titlebar', kind === 'mac' && 'titlebar-mac']} {@attach trackTitlebarHeight}>
   <div class="drag" data-tauri-drag-region>
-    <span class="title">Sable</span>
+    <span class="title">{appName()}</span>
   </div>
   {#if kind === 'desktop'}
     <div class="controls">
@@ -93,8 +49,7 @@
         type="button"
         aria-label={i18n.t('window.minimize')}
         onclick={() => {
-          dismissSnap();
-          void minimizeWindow();
+          minimizeWindow();
         }}
       >
         <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">
@@ -104,11 +59,8 @@
       <button
         type="button"
         aria-label={maximized ? i18n.t('common.restore') : i18n.t('window.maximize')}
-        onmouseenter={hoverMaximize}
-        onmouseleave={leaveMaximize}
         onclick={() => {
-          dismissSnap();
-          void toggleMaximizeWindow();
+          toggleMaximizeWindow();
         }}
       >
         <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">
@@ -125,8 +77,7 @@
         class="close"
         aria-label={i18n.t('common.close')}
         onclick={() => {
-          dismissSnap();
-          void closeWindow();
+          closeWindow();
         }}
       >
         <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">
@@ -136,20 +87,6 @@
     </div>
   {/if}
 </div>
-
-{#if kind === 'desktop' && !maximized}
-  <div class="resize-handles" aria-hidden="true">
-    {#each edges as edge (edge)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="handle handle-{edge.toLowerCase()}"
-        onmousedown={(event) => {
-          if (event.button === 0) void startWindowResize(edge);
-        }}
-      ></div>
-    {/each}
-  </div>
-{/if}
 
 <style>
   .titlebar {
@@ -225,81 +162,11 @@
     vector-effect: non-scaling-stroke;
   }
 
-  .handle {
-    pointer-events: auto;
-    position: fixed;
-    z-index: calc(var(--layer-chrome) + 1);
-  }
-
   :global([data-tauri-drag-region]) {
     -webkit-app-region: drag;
   }
 
   :global(.titlebar .controls) {
     -webkit-app-region: no-drag;
-  }
-
-  .handle-north,
-  .handle-south {
-    height: var(--resize-handle);
-    inset-inline: var(--resize-handle) var(--resize-handle);
-  }
-
-  .handle-north {
-    cursor: ns-resize;
-    top: 0;
-  }
-
-  .handle-south {
-    bottom: 0;
-    cursor: ns-resize;
-  }
-
-  .handle-east,
-  .handle-west {
-    inset-block: var(--resize-handle) var(--resize-handle);
-    width: var(--resize-handle);
-  }
-
-  .handle-east {
-    cursor: ew-resize;
-    right: 0;
-  }
-
-  .handle-west {
-    cursor: ew-resize;
-    left: 0;
-  }
-
-  .handle-northwest,
-  .handle-northeast,
-  .handle-southwest,
-  .handle-southeast {
-    height: var(--resize-handle);
-    width: var(--resize-handle);
-  }
-
-  .handle-northwest {
-    cursor: nwse-resize;
-    left: 0;
-    top: 0;
-  }
-
-  .handle-northeast {
-    cursor: nesw-resize;
-    right: 0;
-    top: 0;
-  }
-
-  .handle-southwest {
-    bottom: 0;
-    cursor: nesw-resize;
-    left: 0;
-  }
-
-  .handle-southeast {
-    bottom: 0;
-    cursor: nwse-resize;
-    right: 0;
   }
 </style>

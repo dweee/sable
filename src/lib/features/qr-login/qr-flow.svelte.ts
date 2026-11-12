@@ -1,9 +1,11 @@
+import { on } from 'svelte/events';
 import { uint8ArrayToBase64 } from 'uint8array-extras';
 
 import type { QrLoginFailureView, QrLoginProgressView } from '#src/generated/protocol';
 import { CoreError } from '#src/transport';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
+import { isAndroid } from '#lib/platform/os.js';
 
 export type QrMode = 'login' | 'grant';
 
@@ -35,12 +37,14 @@ export class QrFlow {
   pending = $state(false);
 
   private stopEvents: (() => void) | null = null;
+  private stopWaitingForReturn: (() => void) | null = null;
 
   constructor(
     private readonly core: QrFlowCore,
     private readonly mode: () => QrMode,
     private readonly target: () => QrLoginTarget | null = () => null,
-    private readonly onSignedIn: () => void = () => {}
+    private readonly onSignedIn: () => void = () => {},
+    private readonly continueOnReturn: () => boolean = isAndroid
   ) {}
 
   listen(): () => void {
@@ -50,11 +54,12 @@ export class QrFlow {
       if (event.type !== 'qr_login' || event.grant !== grant) return;
       this.progress = event.progress;
       if (event.progress.stage === 'signed_in') void this.signIn(event.progress.user_id);
-      if (event.progress.stage === 'waiting_for_auth') void this.continueGrant(true);
+      if (event.progress.stage === 'waiting_for_auth') this.continueAfterApproval();
     });
     return () => {
       this.stopEvents?.();
       this.stopEvents = null;
+      this.endWaitingForReturn();
       void this.cancel();
     };
   }
@@ -91,9 +96,40 @@ export class QrFlow {
   }
 
   reset(): void {
+    this.endWaitingForReturn();
     this.progress = null;
     this.scanning = false;
     this.pending = false;
+  }
+
+  approvalBesideApp(): void {
+    if (!this.stopWaitingForReturn) return;
+    this.endWaitingForReturn();
+    void this.continueGrant(true);
+  }
+
+  // Android stops the app behind the approval browser, so the SDK must not poll until the user is back.
+  private continueAfterApproval(): void {
+    this.endWaitingForReturn();
+    if (!this.continueOnReturn()) {
+      void this.continueGrant(true);
+      return;
+    }
+    let left = false;
+    this.stopWaitingForReturn = on(document, 'visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        left = true;
+        return;
+      }
+      if (!left) return;
+      this.endWaitingForReturn();
+      void this.continueGrant(true);
+    });
+  }
+
+  private endWaitingForReturn(): void {
+    this.stopWaitingForReturn?.();
+    this.stopWaitingForReturn = null;
   }
 
   private async start(scanned: string | null): Promise<void> {

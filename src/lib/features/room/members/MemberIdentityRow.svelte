@@ -5,7 +5,6 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
-  import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
   import { UserProfile } from '#lib/profile/user-profile.svelte.js';
   import { useRoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { usePresenceStore } from '#lib/rooms/presence.svelte.js';
@@ -40,16 +39,14 @@
     secondary,
   }: Props = $props();
   const core = useCoreClient();
+  const profileDescriptionId = $props.id();
   const presenceStore = usePresenceStore();
   const roomCosmetics = useRoomCosmetics();
   const profile = new UserProfile(core, () => userId);
   let member = $derived(findMember(members, userId));
-  let ownIdentity = $derived({
-    name: member ? member.display_name : (profile.current?.display_name ?? null),
-    avatar: member ? member.avatar_url : (profile.current?.avatar_url ?? null),
-  });
-  let displayName = $derived(profileOverrides.name(userId, ownIdentity.name ?? userId));
-  let avatarUrl = $derived(profileOverrides.avatar(userId, ownIdentity.avatar));
+  let shown = $derived(member ?? profile.current);
+  let displayName = $derived(shown?.display_name ?? userId);
+  let avatarUrl = $derived(shown?.avatar_url ?? null);
   let cosmetics = $derived(roomCosmetics?.for(userId) ?? null);
   let colors = $derived(
     senderDisplayColors(userId, profile.current, null, false, cosmetics, powerTag?.color ?? null)
@@ -65,7 +62,14 @@
 
 {#snippet identity()}
   <span class="member-identity-avatar">
-    <Avatar src={avatarUrl} name={displayName} id={userId} size="small" />
+    <Avatar
+      src={avatarUrl}
+      name={displayName}
+      id={userId}
+      size="small"
+      decorative
+      initialsAsDecoration
+    />
     {#if presence && presence.presence !== 'offline'}
       <PresenceDot
         presence={presence.presence}
@@ -80,13 +84,13 @@
       <SenderName {displayName} {colors} nameClass="member-name" compact />
       {@render secondary?.()}
       {#if userStatus}
-        {@const statusLabel = [userStatus.emoji, userStatus.text].filter(Boolean).join(' ')}
+        {@const statusLabel = [userStatus?.emoji, userStatus?.text].filter(Boolean).join(' ')}
         <Tooltip label={statusLabel}>
           {#snippet trigger({ props })}
             <span {...props} class="member-identity-status">
-              {#if userStatus.emoji}<span class="member-identity-status-emoji"
+              {#if userStatus?.emoji}<span class="member-identity-status-emoji"
                   >{userStatus.emoji}</span
-                >{/if}{userStatus.text}
+                >{/if}{userStatus?.text}
             </span>
           {/snippet}
         </Tooltip>
@@ -102,10 +106,12 @@
   <button
     type="button"
     class={['member-identity-row', 'member-identity-button', className]}
-    aria-label={profileLabel}
+    aria-label={displayName}
+    aria-describedby={profileDescriptionId}
     onclick={openProfile}
   >
     {@render identity()}
+    <span id={profileDescriptionId} class="screen-reader-only">{profileLabel}</span>
   </button>
 {:else}
   <div class={['member-identity-row', className]}>

@@ -4,12 +4,13 @@
   import { useCoreClient } from '#lib/core/context.js';
   import MediaContent from '#lib/ui/MediaContent.svelte';
   import MediaImage from '#lib/ui/MediaImage.svelte';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
 
-  import { imageMimeFromUrl } from './link-preview.js';
+  import { GIF_PLAYBACK, hasPreviewData, imageMimeFromUrl, isGifHostUrl } from './link-preview.js';
   import { previewSources, resolveUrlPreview } from './link-preview-cache';
   import { findLinkPresentation } from './link-presentations';
-  import { hasMediaViewerOpener, useMediaViewerOpener } from './media-viewer-opener.svelte.js';
   import { hasRoomMediaPreviews, useRoomMediaPreviews } from './room-media-previews.svelte.js';
+  import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
 
   interface Props {
     url: string;
@@ -20,43 +21,60 @@
   let { url, encrypted, bundled = null }: Props = $props();
   const core = useCoreClient();
   let preview = $state<UrlPreviewView | null>(null);
+  let resolvedUrl: string | null = null;
   let sources = $derived(previewSources(encrypted));
 
   $effect(() => {
-    if (!sources.server && !sources.client) {
-      preview = null;
+    if (bundled !== null && hasPreviewData(bundled)) {
+      preview =
+        preferences.urlPreviews || preferences.clientEmbeds || sources.server ? bundled : null;
+      resolvedUrl = null;
       return;
     }
-    if (bundled !== null) {
-      preview = bundled;
+    if (!sources.server && !sources.client) {
+      preview = null;
+      resolvedUrl = null;
       return;
     }
 
     let cancelled = false;
-    preview = null;
-    void resolveUrlPreview(core.rpc.messages, url, sources).then((result) => {
-      if (!cancelled) preview = result;
+    const wanted = url;
+    if (resolvedUrl !== wanted) preview = null;
+    void resolveUrlPreview(core.rpc.messages, wanted, sources).then((result) => {
+      if (cancelled) return;
+      preview = result;
+      resolvedUrl = wanted;
     });
     return () => {
       cancelled = true;
     };
   });
 
+  let shown = $derived(preview ? [preview] : []);
   let title = $derived(preview?.title ?? preview?.site_name ?? url);
+  let gif = $derived(
+    preview?.video?.gif === true || preview?.image_mime === 'image/gif' || isGifHostUrl(url)
+  );
   let compactImage = $derived(
-    preview?.card === 'summary'
-      ? true
-      : preview?.card === 'summary_large_image'
-        ? false
-        : preview?.image_width != null &&
-          preview.image_height != null &&
-          preview.image_width > 0 &&
-          preview.image_width <= preview.image_height
+    !gif &&
+      (preview?.card === 'summary'
+        ? true
+        : preview?.card === 'summary_large_image'
+          ? false
+          : preview?.image_width != null &&
+            preview.image_height != null &&
+            preview.image_width > 0 &&
+            preview.image_width <= preview.image_height)
   );
   const roomMedia = hasRoomMediaPreviews() ? useRoomMediaPreviews() : null;
   let mediaHidden = $derived(roomMedia?.hidden ?? false);
-  const openMediaViewer = hasMediaViewerOpener() ? useMediaViewerOpener() : null;
   let Presentation = $derived(preview && findLinkPresentation(url, preview));
+  let videoPlayback = $derived.by(() => {
+    if (!gif) return null;
+    return preferences.autoplayGifs
+      ? GIF_PLAYBACK
+      : { ...GIF_PLAYBACK, gif: false, autoplay: false };
+  });
   let imageHidden = $derived.by(() => {
     void url;
     void preview?.image;
@@ -64,102 +82,103 @@
   });
 
   function openPreviewImage(): void {
-    if (openMediaViewer === null || preview === null || preview.image === null) return;
-    openMediaViewer({
-      kind: 'image',
-      filename: url,
-      caption: null,
-      html: null,
-      source: preview.image,
-      mime: preview.image_mime ?? imageMimeFromUrl(url),
-      width: preview.image_width,
-      height: preview.image_height,
-      size: null,
-      blurhash: null,
-      thumbnail: null,
-      spoiler: null,
-      animated: null,
-      sender: url,
-    });
+    if (preview === null || preview.image === null) return;
+    mediaViewerState.openStandalone(
+      preview.image,
+      url,
+      preview.image_mime ?? imageMimeFromUrl(url),
+      preview.image_width,
+      preview.image_height
+    );
   }
 </script>
 
-{#if preview && Presentation}
-  <Presentation {url} {preview} {mediaHidden} />
-{:else if preview?.video && !mediaHidden && preview.title === null && preview.site_name === null}
-  <MediaContent
-    class="link-preview-inline"
-    source={preview.video.source}
-    mime={preview.video.mime}
-    filename={url}
-    kind="video"
-    width={preview.video.width}
-    height={preview.video.height}
-    thumbnail={preview.image}
-  />
-{:else if preview?.image && !mediaHidden && preview.title === null && preview.site_name === null}
-  <MediaImage
-    class="link-preview-inline"
-    source={preview.image}
-    alt={preview.description ?? ''}
-    width={400}
-    height={300}
-    intrinsicWidth={preview.image_width}
-    intrinsicHeight={preview.image_height}
-    mime={preview.image_mime ?? imageMimeFromUrl(url)}
-    bind:spoilerHidden={imageHidden}
-    href={url}
-    onclick={openMediaViewer ? openPreviewImage : undefined}
-  />
-{:else if preview}
-  <div
-    class={[
-      'link-preview',
-      { compact: compactImage && !preview.video, accented: preview.theme_color !== null },
-    ]}
-    style:--link-preview-accent={preview.theme_color}
-  >
-    {#if preview.video && !mediaHidden}
-      <MediaContent
-        class="link-preview-video"
-        source={preview.video.source}
-        mime={preview.video.mime}
-        filename={url}
-        kind="video"
-        width={preview.video.width}
-        height={preview.video.height}
-        thumbnail={preview.image}
-      />
-    {:else if preview.image && !mediaHidden}
-      <MediaImage
-        class="link-preview-image"
-        source={preview.image}
-        alt=""
-        width={compactImage ? 80 : 400}
-        height={compactImage ? 80 : 225}
-        intrinsicWidth={preview.image_width}
-        intrinsicHeight={preview.image_height}
-        bind:spoilerHidden={imageHidden}
-        href={url}
-        onclick={openMediaViewer ? openPreviewImage : undefined}
-      />
-    {/if}
-    <a
-      class="link-preview-text"
+<!-- An each block holds its item through teardown, where a getter reading `preview` would see null. -->
+{#each shown as view, index (index)}
+  {#if Presentation}
+    <Presentation {url} preview={view} {mediaHidden} />
+  {:else if view.video && !mediaHidden && view.title === null && view.site_name === null}
+    <MediaContent
+      class="link-preview-inline"
+      source={view.video.source}
+      mime={view.video.mime}
+      filename={url}
+      kind="video"
+      width={view.video.width}
+      height={view.video.height}
+      thumbnail={view.image}
+      thumbnailMime={view.image_mime}
+      playback={videoPlayback}
+    />
+  {:else if view.image && !mediaHidden && view.title === null && view.site_name === null}
+    <MediaImage
+      class="link-preview-inline"
+      source={view.image}
+      alt={view.description ?? ''}
+      width={400}
+      height={300}
+      intrinsicWidth={view.image_width}
+      intrinsicHeight={view.image_height}
+      mime={view.image_mime ?? imageMimeFromUrl(url)}
+      animatedHint={gif || null}
+      bind:spoilerHidden={imageHidden}
       href={url}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={title}
+      onclick={openPreviewImage}
+    />
+  {:else}
+    <div
+      class={[
+        'link-preview',
+        { compact: compactImage && !view.video, accented: view.theme_color !== null },
+      ]}
+      style:--link-preview-accent={view.theme_color}
     >
-      {#if preview.site_name}<span class="link-preview-site">{preview.site_name}</span>{/if}
-      {#if preview.author_name}<span class="link-preview-author">{preview.author_name}</span>{/if}
-      <span class="link-preview-title">{title}</span>
-      {#if preview.description}
-        <span class="link-preview-description">{preview.description}</span>
+      {#if view.video && !mediaHidden}
+        <MediaContent
+          class="link-preview-video"
+          source={view.video.source}
+          mime={view.video.mime}
+          filename={url}
+          kind="video"
+          width={view.video.width}
+          height={view.video.height}
+          thumbnail={view.image}
+          thumbnailMime={view.image_mime}
+          playback={videoPlayback}
+        />
+      {:else if view.image && !mediaHidden}
+        <MediaImage
+          class="link-preview-image"
+          source={view.image}
+          alt=""
+          width={compactImage ? 80 : 400}
+          height={compactImage ? 80 : 225}
+          intrinsicWidth={view.image_width}
+          intrinsicHeight={view.image_height}
+          mime={view.image_mime ?? imageMimeFromUrl(url)}
+          animatedHint={gif || null}
+          bind:spoilerHidden={imageHidden}
+          href={url}
+          onclick={openPreviewImage}
+        />
       {/if}
-    </a>
-  </div>
-{/if}
+      <a
+        class="link-preview-text"
+        href={url}
+        target="_blank"
+        rel="external noopener noreferrer"
+        aria-label={title}
+      >
+        {#if view.site_name}<span class="link-preview-site">{view.site_name}</span>{/if}
+        {#if view.author_name}<span class="link-preview-author">{view.author_name}</span>{/if}
+        <span class="link-preview-title">{title}</span>
+        {#if view.description}
+          <span class="link-preview-description">{view.description}</span>
+        {/if}
+      </a>
+    </div>
+  {/if}
+{/each}
 
 <style>
   :global(.link-preview-inline) {

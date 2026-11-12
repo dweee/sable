@@ -3,10 +3,11 @@
   import HeartIcon from 'phosphor-svelte/lib/HeartIcon';
   import type { ClassValue } from 'svelte/elements';
 
-  import { SABLE_DONATE_URL } from '#lib/config/links.js';
+  import { donateUrl } from '#lib/deployment/links.js';
   import { graphemes } from '#lib/graphemes.js';
   import { i18n } from '#lib/i18n.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
   import LinkButton from '#lib/ui/primitives/LinkButton.svelte';
 
   import SupporterMark from './SupporterMark.svelte';
@@ -43,6 +44,7 @@
   let selected = $derived(supporterAppearance(appearance));
   let { variant, color, colors, customCardColors, cardColor, buttonColor } = $derived(selected);
   const id = $props.id();
+  let donateHref = $derived(donateUrl());
   let open = $state(false);
   let donorName = $derived.by(() => {
     let shortened = '';
@@ -93,6 +95,8 @@
     bigendergradient: ['var(--supporter-bigender-pink)', 'var(--supporter-bigender-blue)'],
     demigender: ['var(--supporter-demigender-gray)', 'var(--supporter-demigender-yellow)'],
     demigendergradient: ['var(--supporter-demigender-gray)', 'var(--supporter-demigender-yellow)'],
+    pluraljourney: ['var(--supporter-pluraljourney-purple)', 'var(--supporter-black)'],
+    pluraljourneygradient: ['var(--supporter-pluraljourney-purple)', 'var(--supporter-black)'],
     bisexual: ['var(--supporter-bisexual-pink)', 'var(--supporter-bisexual-blue)'],
     bisexualgradient: ['var(--supporter-bisexual-pink)', 'var(--supporter-bisexual-blue)'],
     pansexual: ['var(--supporter-pansexual-pink)', 'var(--supporter-pansexual-blue)'],
@@ -110,6 +114,9 @@
     mlmgradient: ['var(--supporter-mlm-green)', 'var(--supporter-mlm-indigo)'],
     pride: ['var(--supporter-rainbow-red)', 'var(--supporter-rainbow-violet)'],
     pridegradient: ['var(--supporter-rainbow-red)', 'var(--supporter-rainbow-violet)'],
+    ukraine: ['var(--supporter-ukraine-blue)', 'var(--supporter-ukraine-yellow)'],
+    palestine: ['var(--supporter-palestine-red)', 'var(--supporter-palestine-green)'],
+    cuba: ['var(--supporter-cuba-blue)', 'var(--supporter-cuba-red)'],
     ceo: ['var(--supporter-gold)', 'var(--supporter-gold)'],
   };
   let customStyle = $derived.by(() => {
@@ -142,9 +149,13 @@
               'mlmgradient',
               'pride',
               'pridegradient',
+              'ukraine',
+              'cuba',
             ].includes(variant)
           ? 'var(--supporter-white)'
-          : 'var(--supporter-card-bg)';
+          : variant === 'palestine'
+            ? 'var(--supporter-black)'
+            : 'var(--supporter-card-bg)';
     const mix = customCardColors
       ? ink === 'var(--supporter-white)'
         ? 'var(--supporter-black)'
@@ -188,40 +199,42 @@
       side="bottom"
       align="end"
       sideOffset={10}
-      collisionPadding={12}
+      collisionPadding={collisionPadding(12)}
       trapFocus={false}
       role="dialog"
       aria-labelledby={`${id}-heading`}
-      aria-describedby={`${id}-description`}
+      aria-describedby={donateHref ? `${id}-description` : undefined}
     >
       <div class="supporter-card-art" aria-hidden="true">
         <SupporterMark {...selected} />
       </div>
       <h2 id={`${id}-heading`}>{label}</h2>
-      <p id={`${id}-description`}>
-        {i18n.t(
-          isOwnBadge
-            ? 'supporter.badgeOwnDescription'
-            : donated
-              ? 'supporter.badgeDonorDescription'
-              : 'supporter.badgeDescription',
-          { name: donorName }
-        )}
-      </p>
-      <LinkButton
-        href={SABLE_DONATE_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-        block
-        class="supporter-card-donate"
-        onclick={() => (open = false)}
-      >
-        <HeartIcon aria-hidden="true" weight="fill" />
-        {i18n.t(donated ? 'common.supportSable' : 'supporter.badgeDonate')}
-      </LinkButton>
-      <small class="supporter-card-hint"
-        >{i18n.t(donated ? 'supporter.badgeDonorHint' : 'supporter.badgeHint')}</small
-      >
+      {#if donateHref}
+        <p id={`${id}-description`}>
+          {i18n.t(
+            isOwnBadge
+              ? 'supporter.badgeOwnDescription'
+              : donated
+                ? 'supporter.badgeDonorDescription'
+                : 'supporter.badgeDescription',
+            { name: donorName }
+          )}
+        </p>
+        <LinkButton
+          href={donateHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          block
+          class="supporter-card-donate"
+          onclick={() => (open = false)}
+        >
+          <HeartIcon aria-hidden="true" weight="fill" />
+          {i18n.t(donated ? 'common.supportSable' : 'supporter.badgeDonate')}
+        </LinkButton>
+        <small class="supporter-card-hint"
+          >{i18n.t(donated ? 'supporter.badgeDonorHint' : 'supporter.badgeHint')}</small
+        >
+      {/if}
     </Popover.Content>
   </Popover.Portal>
 </Popover.Root>
@@ -370,6 +383,29 @@
     to {
       opacity: 0;
       scale: 0.98;
+    }
+  }
+
+  @supports not (color: color-mix(in srgb, black, white)) {
+    :global(.supporter-badge:hover .supporter-mark),
+    :global(.supporter-badge:focus-visible .supporter-mark),
+    :global(.supporter-badge[data-state='open'] .supporter-mark) {
+      filter: drop-shadow(0 0 var(--space-050) var(--supporter-accent-start));
+    }
+
+    :global(.supporter-card) {
+      background: var(--surface-container);
+      border: var(--border-width) solid var(--surface-var-container-line);
+    }
+
+    :global(.supporter-card[data-custom-colors]),
+    :global(.supporter-card[data-custom-colors] .supporter-card-donate) {
+      border-color: var(--surface-var-container-line);
+    }
+
+    :global(.supporter-card-donate) {
+      --button-container-hover: var(--supporter-button);
+      --button-container-active: var(--supporter-button);
     }
   }
 </style>

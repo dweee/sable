@@ -1,3 +1,5 @@
+import { attachmentBytes } from '../transport/attachment-bytes';
+import { transportFailure } from '../transport';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { createCoreWorkerBoundary, type WorkerCore, type WorkerPort } from './core-worker-boundary';
@@ -28,9 +30,65 @@ function fakeCore(call: WorkerCore['call'] = () => Promise.resolve('null')): Wor
     sendAttachment: () => Promise.resolve(),
     sendGallery: () => Promise.resolve(),
     uploadMedia: () => Promise.resolve(''),
+    rtcData: () => Promise.resolve(new Uint8Array(new ArrayBuffer())),
     setActive: () => Promise.resolve(),
   };
 }
+
+test('forwards core span names and epoch timing to connected pages', () => {
+  const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore()));
+  const first = new FakePort();
+  const second = new FakePort();
+  boundary.connect(first);
+  boundary.connect(second);
+
+  boundary.handleSpan('search.index_room_search', 1_794_000_000_125, 25.5);
+
+  const expected = [
+    {
+      span: { name: 'search.index_room_search', startMs: 1_794_000_000_125, durationMs: 25.5 },
+    },
+  ];
+  expect(first.messages).toEqual(expected);
+  expect(second.messages).toEqual(expected);
+});
+
+test('a core rejecting with a bare payload keeps the protocol error', async () => {
+  const boundary = createCoreWorkerBoundary(
+    // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- the wasm core rejects with the bare payload
+    Promise.resolve(fakeCore(() => Promise.reject('{"code":"unknown_room"}')))
+  );
+  const port = new FakePort();
+  boundary.connect(port);
+
+  await port.send({ id: 1, call: { method: 'session.restore', params: {} } });
+
+  expect(port.messages).toEqual([{ id: 1, err: { code: 'unknown_room' } }]);
+});
+
+test('a core rejecting with an Error carrying the payload keeps the protocol error', async () => {
+  const boundary = createCoreWorkerBoundary(
+    Promise.resolve(fakeCore(() => Promise.reject(new Error('{"code":"unknown_room"}'))))
+  );
+  const port = new FakePort();
+  boundary.connect(port);
+
+  await port.send({ id: 1, call: { method: 'session.restore', params: {} } });
+
+  expect(port.messages).toEqual([{ id: 1, err: { code: 'unknown_room' } }]);
+});
+
+test('a core rejecting with a plain message fails the command', async () => {
+  const boundary = createCoreWorkerBoundary(
+    Promise.resolve(fakeCore(() => Promise.reject(new Error('the media is gone'))))
+  );
+  const port = new FakePort();
+  boundary.connect(port);
+
+  await port.send({ id: 1, call: { method: 'session.restore', params: {} } });
+
+  expect(port.messages).toEqual([{ id: 1, err: transportFailure('the media is gone') }]);
+});
 
 test.each([undefined, false, true])(
   'passes background=%s through to WASM media downloads',
@@ -59,6 +117,7 @@ test('passes rich attachment captions and mentions to the WASM core', async () =
   const port = new FakePort();
   boundary.connect(port);
   const bytes = new Uint8Array([1]);
+  const thumbnail = { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 };
   const formattedCaption = '<a href="https://matrix.to/#/@one:example.org">One</a>';
 
   await port.send({
@@ -68,6 +127,7 @@ test('passes rich attachment captions and mentions to the WASM core', async () =
       filename: 'photo.png',
       mime: 'image/png',
       bytes,
+      thumbnail,
       caption: 'One',
       inReplyTo: '$reply',
       silentReply: true,
@@ -97,7 +157,7 @@ test('passes rich attachment captions and mentions to the WASM core', async () =
       persona: null,
       spoiler: true,
     }),
-    bytes
+    attachmentBytes([{ bytes, thumbnail }])
   );
   expect(port.messages).toEqual([{ id: 1, uri: null }]);
 });
@@ -116,7 +176,36 @@ test('asks the WASM core to forget a media source', async () => {
   expect(port.messages).toEqual([{ id: 1, uri: null }]);
 });
 
+test('passes an RTC frame to the core and returns the reply bytes', async () => {
+  const core = fakeCore();
+  const rtcData = vi.fn(() => Promise.resolve(new Uint8Array([9, 8])));
+  core.rtcData = rtcData;
+  const boundary = createCoreWorkerBoundary(Promise.resolve(core));
+  const port = new FakePort();
+  boundary.connect(port);
+
+  await port.send({ id: 1, rtc: { sessionId: 'session', frame: new Uint8Array([1, 2]) } });
+
+  expect(rtcData).toHaveBeenCalledWith('session', new Uint8Array([1, 2]));
+  expect(port.messages).toEqual([{ id: 1, bytes: new Uint8Array([9, 8]) }]);
+});
+
 test('passes gallery items and shared metadata to the WASM core', async () => {
+  const persona = {
+    id: 'kris',
+    display_name: 'Kris',
+    avatar_url: null,
+    pronouns: [],
+    color_on_light: null,
+    color_on_dark: null,
+    has_fallback: false,
+    biography: null,
+    banner_url: null,
+    is_animal: null,
+    has_animal: null,
+    animal_need: null,
+  };
+  const thumbnail = { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 };
   const core = fakeCore();
   const sendGallery = vi.fn(() => Promise.resolve());
   core.sendGallery = sendGallery;
@@ -133,6 +222,8 @@ test('passes gallery items and shared metadata to the WASM core', async () => {
           filename: 'one.png',
           mime: 'image/png',
           bytes: new Uint8Array([1]),
+          thumbnail,
+          spoiler: true,
         },
         {
           filename: 'two.pdf',
@@ -147,6 +238,7 @@ test('passes gallery items and shared metadata to the WASM core', async () => {
       inReplyTo: '$reply',
       silentReply: true,
       threadRoot: '$thread',
+      persona,
     },
   });
 
@@ -154,8 +246,8 @@ test('passes gallery items and shared metadata to the WASM core', async () => {
     JSON.stringify({
       room_id: '!room:example.org',
       attachments: [
-        { filename: 'one.png', mime: 'image/png', info: null },
-        { filename: 'two.pdf', mime: 'application/pdf', info: null },
+        { filename: 'one.png', mime: 'image/png', info: null, spoiler: true },
+        { filename: 'two.pdf', mime: 'application/pdf', info: null, spoiler: false },
       ],
       caption: 'Weekend',
       in_reply_to: '$reply',
@@ -164,12 +256,9 @@ test('passes gallery items and shared metadata to the WASM core', async () => {
       formatted_caption: '<strong>Weekend</strong>',
       mentions: ['@one:example.org'],
       mentions_room: true,
-      persona: null,
+      persona,
     }),
-    JSON.stringify([
-      { filename: 'one.png', mime: 'image/png', bytes: [1], info: null },
-      { filename: 'two.pdf', mime: 'application/pdf', bytes: [2], info: null },
-    ])
+    attachmentBytes([{ bytes: new Uint8Array([1]), thumbnail }, { bytes: new Uint8Array([2]) }])
   );
   expect(port.messages).toEqual([{ id: 1, uri: null }]);
 });
@@ -231,6 +320,26 @@ test('sends the subscription snapshot before startup events buffered for its por
     },
   ]);
   expect(second.messages).toEqual([]);
+});
+
+test('a core failure reaches one page, so it is reported once', () => {
+  const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(() => Promise.resolve('{}'))));
+  const first = new FakePort();
+  const second = new FakePort();
+  boundary.connect(first);
+  boundary.connect(second);
+  const failure = {
+    type: 'failure',
+    log_id: 'e1',
+    context: 'join_room',
+    report: { frames: [], http: null, span_trace: null },
+  };
+
+  boundary.handleEvent(JSON.stringify([failure, { type: 'sync_status', status: 'running' }]));
+
+  const status = { events: [{ type: 'sync_status', status: 'running' }] };
+  expect(first.messages).toEqual([status, { events: [failure] }]);
+  expect(second.messages).toEqual([status]);
 });
 
 test('forwards a core batch as one message per port', async () => {
@@ -394,7 +503,7 @@ test('a panic reaches every port and later commands fail instead of hanging', as
   expect(second.messages).toEqual([{ panic: { message: 'index out of bounds' } }]);
   expect(first.messages).toEqual([
     { panic: { message: 'index out of bounds' } },
-    { id: 1, err: { code: 'failed', log_id: 'core panicked: index out of bounds' } },
+    { id: 1, err: transportFailure('core panicked: index out of bounds') },
   ]);
 });
 
@@ -413,6 +522,26 @@ test('a worker failure carries its own stack to the page', () => {
       },
     },
   ]);
+});
+
+test('a panic forwards the wasm stack and debug image to every page', () => {
+  const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(() => Promise.resolve('{}'))));
+  const first = new FakePort();
+  const second = new FakePort();
+  boundary.connect(first);
+  boundary.connect(second);
+  const stack = 'Error: panic\n    at sable.wasm:wasm-function[12]:0x1234';
+  const wasm = {
+    type: 'wasm' as const,
+    code_file: 'https://sable.test/sable.wasm',
+    code_id: '00112233445566778899aabbccddeeff',
+    debug_id: '00112233445566778899aabbccddeeff0',
+  };
+
+  boundary.handlePanic('panic', stack, wasm);
+
+  expect(first.messages).toEqual([{ panic: { message: 'panic', stack, wasm } }]);
+  expect(second.messages).toEqual(first.messages);
 });
 
 test('WASM logs are batched to every connected port', () => {
@@ -458,6 +587,21 @@ test('the lines after a log entry stay attached to it', () => {
         'INFO sable_core: next',
       ],
     },
+  ]);
+  vi.useRealTimers();
+});
+
+test('a line the core marked as reported starts its own entry', () => {
+  vi.useFakeTimers();
+  const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(() => Promise.resolve('{}'))));
+  const port = new FakePort();
+  boundary.connect(port);
+
+  boundary.handleLog('ERROR matrix_sdk: first(\n    detail,\n)\n\u001eERROR sable_core: second');
+  vi.advanceTimersByTime(250);
+
+  expect(port.messages).toEqual([
+    { logs: ['ERROR matrix_sdk: first(\n    detail,\n)', '\u001eERROR sable_core: second'] },
   ]);
   vi.useRealTimers();
 });
@@ -523,7 +667,7 @@ test('a reset request fails while another port is connected', () => {
 
   expect(terminate).not.toHaveBeenCalled();
   expect(first.messages).toEqual([
-    { id: 1, err: { code: 'failed', log_id: 'close other Sable tabs before resetting the cache' } },
+    { id: 1, err: transportFailure('close other Sable tabs before resetting the cache') },
   ]);
   expect(second.messages).toEqual([]);
 });
@@ -577,6 +721,70 @@ test('a superseded worker tells every page', () => {
   expect(second.messages).toEqual([{ superseded: true }]);
 });
 
+describe('foreground across tabs', () => {
+  const foregroundCalls = (call: ReturnType<typeof vi.fn<WorkerCore['call']>>) =>
+    call.mock.calls
+      .filter(([method]) => method === 'session.set_app_in_foreground')
+      .map(([, params]) => (JSON.parse(params) as { foreground: boolean }).foreground);
+
+  test('a hidden page cannot background the app while another page is visible', async () => {
+    const call = vi.fn<WorkerCore['call']>(() => Promise.resolve('null'));
+    const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(call)));
+    const first = new FakePort();
+    const second = new FakePort();
+    boundary.connect(first);
+    boundary.connect(second);
+    await first.send({ visible: true });
+    await second.send({ visible: false });
+    await second.send({
+      id: 1,
+      call: { method: 'session.set_app_in_foreground', params: { foreground: false } },
+    });
+    expect(foregroundCalls(call)).toEqual([true]);
+    expect(second.messages).toEqual([{ id: 1, ok: null }]);
+  });
+
+  test('closing the last visible page backgrounds the app', async () => {
+    const call = vi.fn<WorkerCore['call']>(() => Promise.resolve('null'));
+    const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(call)));
+    const first = new FakePort();
+    const second = new FakePort();
+    boundary.connect(first);
+    boundary.connect(second);
+    await first.send({ visible: true });
+    await second.send({ visible: false });
+    await first.send({ disconnect: true });
+    expect(first.onmessage).toBeNull();
+    await second.send({ visible: true });
+    expect(foregroundCalls(call)).toEqual([true, false, true]);
+  });
+
+  test('cache reset drains foreground updates before closing the stores', async () => {
+    const pending = Promise.withResolvers<string>();
+    const call = vi.fn<WorkerCore['call']>(() => pending.promise);
+    const stop = vi.fn(() => Promise.resolve());
+    const boundary = createCoreWorkerBoundary(
+      Promise.resolve(fakeCore(call)),
+      undefined,
+      undefined,
+      undefined,
+      stop
+    );
+    const port = new FakePort();
+    boundary.connect(port);
+    await port.send({ visible: true });
+    const resetting = port.onmessage?.({
+      data: { id: 2, reset: true },
+    } as MessageEvent<WorkerRequest>);
+    await Promise.resolve();
+    expect(stop).not.toHaveBeenCalled();
+    pending.resolve('null');
+    await resetting;
+    expect(stop).toHaveBeenCalledOnce();
+    expect(port.onmessage).toBeNull();
+  });
+});
+
 describe('sync activity', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -601,62 +809,23 @@ describe('sync activity', () => {
   const send = (port: FakePort, request: WorkerRequest) =>
     port.onmessage?.({ data: request } as MessageEvent<WorkerRequest>);
 
-  test('stops sync three seconds after the last visible tab hides', async () => {
+  test('keeps syncing while every tab is hidden or closed', async () => {
     const { first, second, setActive } = setup();
 
-    send(first, { visible: false });
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(setActive).toHaveBeenLastCalledWith(true);
-    setActive.mockClear();
-
-    send(second, { visible: false });
-    await vi.advanceTimersByTimeAsync(2999);
-    expect(setActive).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(setActive).toHaveBeenCalledExactlyOnceWith(false);
-  });
-
-  test('a tab returning inside the delay cancels the stop and resumes at once', async () => {
-    const { first, second, setActive } = setup();
     send(first, { visible: false });
     send(second, { visible: false });
-    await vi.advanceTimersByTimeAsync(1000);
-    setActive.mockClear();
-
-    send(second, { visible: true });
-    await vi.advanceTimersByTimeAsync(5000);
-
-    expect(setActive).toHaveBeenCalledExactlyOnceWith(true);
-  });
-
-  test('closing the only visible tab idles sync for the hidden ones', async () => {
-    const { first, second, setActive } = setup();
-    send(first, { visible: false });
-    await vi.advanceTimersByTimeAsync(0);
-    setActive.mockClear();
-
     send(second, { disconnect: true });
-    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(60_000);
 
-    expect(setActive).toHaveBeenCalledExactlyOnceWith(false);
+    expect(setActive).not.toHaveBeenCalled();
   });
 
-  test('a returning network retries sync only while a tab is visible', async () => {
-    const { boundary, first, second, setActive } = setup();
-    send(first, { visible: false });
-    send(second, { visible: false });
-    await vi.advanceTimersByTimeAsync(3000);
-    setActive.mockClear();
-
-    boundary.handleOnline();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(setActive).not.toHaveBeenCalled();
+  test('a tab becoming visible retries sync at once', async () => {
+    const { second, setActive } = setup();
 
     send(second, { visible: true });
     await vi.advanceTimersByTimeAsync(0);
-    setActive.mockClear();
-    boundary.handleOnline();
-    await vi.advanceTimersByTimeAsync(0);
+
     expect(setActive).toHaveBeenCalledExactlyOnceWith(true);
   });
 });

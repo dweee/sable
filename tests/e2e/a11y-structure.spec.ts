@@ -1,8 +1,12 @@
-// A test.fail() marks a gap from #960; it goes red once the gap closes.
-
-import { violations, tabStops } from './fixtures/a11y';
+import { violations, tabStops, type KnownViolation } from './fixtures/a11y';
 import { TIMELINE_ROOM_NAME } from './fixtures/continuwuity';
 import { expect, test, SIGNED_OUT } from './fixtures/test';
+
+const SEPARATOR_SLOT: KnownViolation = {
+  rule: 'target-size',
+  html: /composer-separator-control/,
+  reason: 'the composer board separator slot is 10px wide by design',
+};
 
 test.use({ storageState: SIGNED_OUT });
 
@@ -12,6 +16,9 @@ test.beforeEach(async ({ page, signIn }) => {
 });
 
 test('every settings category has no accessibility violations', async ({ page }) => {
+  // Each of the 15 categories runs a full axe audit. Give that aggregate
+  // budget its own bound; individual navigation and axe checks still fail.
+  test.setTimeout(180_000);
   await page.goto('/settings/appearance');
   await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
 
@@ -28,9 +35,10 @@ test('every settings category has no accessibility violations', async ({ page })
 
   const failing: Record<string, string[]> = {};
   for (const href of categories) {
-    await page.goto(href);
+    await page.locator(`.settings-nav-item[href="${href}"]`).click();
     await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
-    const found = await violations(page);
+    await expect(page).toHaveURL(href);
+    const found = await violations(page, { known: [SEPARATOR_SLOT] });
     if (found.length) failing[href] = found.map((violation) => violation.id);
   }
   expect(failing).toEqual({});
@@ -75,15 +83,17 @@ test.describe('room view tab stops', () => {
   });
 
   test('the timeline is one tab stop', async ({ page }) => {
-    test.fail(true, '#960: every message and its actions are tab stops');
-    const stops = await tabStops(page.getByRole('log'));
+    const stops = await tabStops(page.getByRole('feed'));
     expect(stops, stops.join('\n')).toHaveLength(1);
   });
 
-  test('the room list is one tab stop', async ({ page }) => {
-    test.fail(true, '#960: rooms and spaces should be a tree with one tab stop');
-    const list = page.getByRole('navigation', { name: 'Primary navigation' });
-    const stops = await tabStops(list);
-    expect(stops, stops.join('\n')).toHaveLength(1);
+  test('the spaces rail and room list are one tab stop each', async ({ page }) => {
+    for (const tree of [
+      page.locator('[data-focus-region="spaces"]'),
+      page.locator('[data-focus-region="rooms"]'),
+    ]) {
+      const stops = await tabStops(tree);
+      expect(stops, stops.join('\n')).toHaveLength(1);
+    }
   });
 });

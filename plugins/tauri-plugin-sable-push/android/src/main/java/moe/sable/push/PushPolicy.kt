@@ -30,6 +30,14 @@ internal class PushPolicy(context: Context) {
         get() = prefs.getBoolean("clear-on-read", true)
         set(value) = prefs.edit().putBoolean("clear-on-read", value).apply()
 
+    var privateReceipts: Boolean
+        get() = prefs.getBoolean("private-receipts", false)
+        set(value) = prefs.edit().putBoolean("private-receipts", value).apply()
+
+    var quietWhenActiveElsewhere: Boolean
+        get() = prefs.getBoolean("quiet-when-active-elsewhere", false)
+        set(value) = prefs.edit().putBoolean("quiet-when-active-elsewhere", value).apply()
+
     var accounts: Map<String, String>
         get() = runCatching {
             val stored = JSONObject(prefs.getString("accounts", "{}") ?: "{}")
@@ -42,4 +50,6 @@ internal class PushPolicy(context: Context) {
     fun deviceIdFor(userId: String): String? = if (userId.isEmpty()) null else accounts[userId]
 
     fun knowsAnyAccount(): Boolean = accounts.isNotEmpty()
+
+    fun soleAccount(): String? = accounts.keys.singleOrNull()
 }

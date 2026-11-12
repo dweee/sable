@@ -15,6 +15,7 @@
     findCategory,
     settingFocusId,
     settingsCategories,
+    settingsContext,
   } from '#lib/settings/registry.js';
   import SettingsNav from '#lib/ui/primitives/SettingsNav.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
@@ -48,7 +49,9 @@
   let query = $state('');
   let trimmedQuery = $derived(query.trim());
   let results = $derived(
-    trimmedQuery ? searchSettings(trimmedQuery, settingsCategories, i18n.t) : []
+    trimmedQuery
+      ? searchSettings(trimmedQuery, settingsCategories, i18n.t, settingsContext(core))
+      : []
   );
 
   function sectionLabel(id: string): string {
@@ -109,7 +112,7 @@
         <li>
           <a
             class="selection-layer"
-            href={`${resolve(`settings/${hit.category.id}`)}?focus=${encodeURIComponent(focus)}`}
+            href={resolve(`settings/${hit.category.id}?focus=${encodeURIComponent(focus)}`)}
             draggable="false"
             onclick={(event) => {
               select(event, hit.category.id, focus);

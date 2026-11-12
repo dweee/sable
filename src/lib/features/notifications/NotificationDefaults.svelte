@@ -8,30 +8,25 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
-  import {
-    type BadgeNotificationMode,
-    preferences,
-    setPreference,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { type BadgeNotificationMode } from '#lib/settings/definitions.js';
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
   import SettingsAnchorLink from '#lib/ui/primitives/SettingsAnchorLink.svelte';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Select from '#lib/ui/primitives/Select.svelte';
   import Switch from '#lib/ui/primitives/Switch.svelte';
 
+  import { notificationModeLabels } from '#lib/rooms/notification-modes.js';
+
   import { settingsChanges } from './notifications.svelte';
   import '#lib/ui/primitives/settings-row.css';
 
   const core = useCoreClient();
-  const modeLabels: Record<Exclude<NotificationModeView, 'mute'>, string> = {
-    all: 'room.notifyAll',
-    mentions: 'room.notifyMentions',
-  };
-
   const modes: Exclude<NotificationModeView, 'mute'>[] = ['all', 'mentions'];
   const badgeModes: BadgeNotificationMode[] = ['all', 'mentions', 'quiet'];
   const badgeModeLabels: Record<BadgeNotificationMode, string> = {
-    ...modeLabels,
+    all: notificationModeLabels.all,
+    mentions: notificationModeLabels.mentions,
     quiet: 'room.notifyMentionsQuiet',
   };
 
@@ -48,8 +43,8 @@
     label: string;
     direct: boolean;
   }[] = [
-    { key: 'direct', label: 'common.directMessages', direct: true },
-    { key: 'group', label: 'settings.notificationDefaultGroup', direct: false },
+    { key: 'direct', label: 'settings.notificationDefaultDirectRooms', direct: true },
+    { key: 'group', label: 'settings.notificationDefaultOtherRooms', direct: false },
   ];
 
   const eventRows: { key: EventNotificationView; label: string }[] = [
@@ -58,7 +53,9 @@
     { key: 'edits', label: 'settings.notificationEdits' },
     { key: 'notices', label: 'settings.notificationNotices' },
     { key: 'invites', label: 'settings.notificationInvites' },
-    { key: 'calls', label: 'settings.notificationCalls' },
+    { key: 'rtc_user', label: 'settings.notificationCalls' },
+    { key: 'rtc_room', label: 'settings.notificationRoomCalls' },
+    { key: 'calls', label: 'settings.notificationLegacyCalls' },
   ];
 
   const eventItems = [
@@ -89,7 +86,10 @@
       (view) => {
         if (alive) events = view;
       },
-      (error: unknown) => console.warn('[sable notifications] loading event settings failed', error)
+      (error: unknown) => {
+        console.warn('[sable notifications] loading event settings failed', error);
+        if (alive) failed = true;
+      }
     );
     void core.rpc.notifications.masterMute().then(
       (value) => {
@@ -154,7 +154,7 @@
 
   <ul class="settings-rows">
     {#each badgeRows as { key, label } (key)}
-      <SettingsRow id={`notification-badge-${key}`} title={i18n.t(label)}>
+      <SettingsRow id={`notification-badge-${key}`} title={i18n.t(label)} {key}>
         <Select
           aria-label={`${i18n.t('settings.notificationBadges')}: ${i18n.t(label)}`}
           value={preferences[key]}
@@ -176,6 +176,8 @@
     <SettingsAnchorLink anchor="notification-push" />
   </div>
   <p class="hint settings-description">{i18n.t('settings.notificationPushHint')}</p>
+  <p class="hint settings-description">{i18n.t('settings.notificationMemberCountHint')}</p>
+  <p class="hint settings-description">{i18n.t('settings.notificationRulesCleanupHint')}</p>
 
   {#if failed}
     <Alert variant="warning" role="status">
@@ -203,7 +205,10 @@
           <Select
             aria-label={`${i18n.t('settings.notificationPush')}: ${i18n.t(label)}`}
             value={current[key]}
-            items={modes.map((mode) => ({ value: mode, label: i18n.t(modeLabels[mode]) }))}
+            items={modes.map((mode) => ({
+              value: mode,
+              label: i18n.t(notificationModeLabels[mode]),
+            }))}
             onValueChange={(value) => {
               savePush(key, direct, value as NotificationModeView);
             }}
@@ -213,16 +218,25 @@
     {/each}
     {#if events}
       {#each eventRows as { key, label } (key)}
-        {#if events[key] !== null}
-          <SettingsRow id={`notification-event-${key}`} title={i18n.t(label)}>
-            <Select
-              aria-label={i18n.t(label)}
-              value={events[key] ? 'on' : 'off'}
-              items={eventItems.map((item) => ({ value: item.value, label: i18n.t(item.label) }))}
-              onValueChange={(value) => {
-                saveEvent(key, value === 'on');
-              }}
-            />
+        {@const supported = events[key] != null}
+        {#if supported || key === 'rtc_user' || key === 'rtc_room'}
+          <SettingsRow
+            id={`notification-event-${key}`}
+            title={i18n.t(label)}
+            description={!supported ? i18n.t('settings.notificationRtcUnavailableHint') : undefined}
+          >
+            {#if supported}
+              <Select
+                aria-label={i18n.t(label)}
+                value={events[key] ? 'on' : 'off'}
+                items={eventItems.map((item) => ({ value: item.value, label: i18n.t(item.label) }))}
+                onValueChange={(value) => {
+                  saveEvent(key, value === 'on');
+                }}
+              />
+            {:else}
+              <span class="hint">{i18n.t('settings.unavailable')}</span>
+            {/if}
           </SettingsRow>
         {/if}
       {/each}

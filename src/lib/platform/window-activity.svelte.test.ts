@@ -3,20 +3,6 @@
 import { flushSync } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-const native = vi.hoisted(() => ({
-  onChange: null as ((focused: boolean) => void) | null,
-  initialFocus: null as boolean | null,
-  stop: vi.fn(),
-}));
-
-vi.mock('./window-decorations.js', () => ({
-  watchWindowFocus: (onChange: (focused: boolean) => void) => {
-    native.onChange = onChange;
-    if (native.initialFocus !== null) onChange(native.initialFocus);
-    return Promise.resolve(native.stop);
-  },
-}));
-
 import { windowActivity } from './window-activity.js';
 
 let focused = true;
@@ -25,9 +11,6 @@ let visibility: DocumentVisibilityState = 'visible';
 beforeEach(() => {
   focused = true;
   visibility = 'visible';
-  native.onChange = null;
-  native.initialFocus = null;
-  native.stop.mockReset();
   vi.spyOn(document, 'hasFocus').mockImplementation(() => focused);
   vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
 });
@@ -91,32 +74,6 @@ test('goes invisible when a PWA page is hidden or frozen', () => {
   stop();
 });
 
-test('trusts the native window focus over the document', async () => {
-  const { seen, stop } = track();
-  await Promise.resolve();
-
-  native.onChange?.(false);
-  flushSync();
-
-  expect(seen).toEqual([true, false]);
-  stop();
-  await Promise.resolve();
-  expect(native.stop).toHaveBeenCalled();
-});
-
-test('starts inactive when the native window is already minimized', async () => {
-  native.initialFocus = false;
-  const { seen, stop } = track();
-  await Promise.resolve();
-
-  expect(seen.length).toBeGreaterThan(0);
-  expect(seen.every((active) => !active)).toBe(true);
-  native.onChange?.(true);
-  flushSync();
-  expect(seen.at(-1)).toBe(true);
-  stop();
-});
-
 test('stops listening once nothing reads it', () => {
   const removed = vi.spyOn(window, 'removeEventListener');
   const { seen, stop } = track();
@@ -134,4 +91,30 @@ test('stops listening once nothing reads it', () => {
     'pageshow',
   ]);
   expect(windowActivity.active).toBe(false);
+});
+
+test('goes idle after five minutes without input and wakes on input', () => {
+  vi.useFakeTimers();
+  const seen: boolean[] = [];
+  const stop = $effect.root(() => {
+    $effect(() => {
+      seen.push(windowActivity.idle);
+    });
+  });
+  flushSync();
+
+  vi.advanceTimersByTime(4 * 60_000);
+  window.dispatchEvent(new Event('keydown'));
+  vi.advanceTimersByTime(4 * 60_000);
+  flushSync();
+  expect(seen).toEqual([false]);
+
+  vi.advanceTimersByTime(60_000);
+  flushSync();
+  window.dispatchEvent(new Event('pointermove'));
+  flushSync();
+
+  expect(seen).toEqual([false, true, false]);
+  stop();
+  vi.useRealTimers();
 });

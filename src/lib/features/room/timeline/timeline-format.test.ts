@@ -8,7 +8,7 @@ import type {
 } from '#src/generated/protocol';
 
 import { preferences } from '#lib/settings/preferences.svelte.js';
-import type { TimelinePreferences } from '#lib/settings/preferences.svelte.js';
+import type { TimelinePreferences } from '#lib/settings/definitions.js';
 
 import { rowFields } from './row-fixtures';
 import { stateEventSubject, stateEventText, type Translate } from './state-event-text';
@@ -25,6 +25,7 @@ import {
   unreadCountAfter,
   visibleAggregations,
   visibleTimelineItems,
+  withDateDividers,
 } from './timeline-format';
 
 const items = [{ event_id: '$older' }, { event_id: '$latest' }] as TimelineItemView[];
@@ -169,8 +170,7 @@ const message = item({
   kind: 'message',
   body: 'hi',
   html: 'hi',
-  emote: false,
-  notice: false,
+  msgtype: 'text',
   edited: false,
   jumbo: null,
 });
@@ -205,7 +205,7 @@ function withEvent(row: TimelineItemView, eventId: string | null): TimelineItemV
 const replyRows = [
   withEvent(message, '$first'),
   withEvent(joined, '$joined'),
-  withEvent(item({ kind: 'redacted', reason: null }), '$redacted'),
+  withEvent(item({ kind: 'redacted', reason: null, redacted_by: null }), '$redacted'),
   withEvent(divider, null),
   withEvent(message, '$second'),
   withEvent(message, null),
@@ -235,6 +235,15 @@ test('a reply to a row that is not shown restarts from the latest message', () =
 test('hides profile changes and raw state events by default, keeping joins', () => {
   const visible = visibleTimelineItems([joined, renamed, topic, message], defaults);
   expect(visible.map((entry) => entry.content.kind)).toEqual(['membership', 'message']);
+});
+
+test('a receipt on a join moves to the message before it, which can show it', () => {
+  const before = withEvent(message, '$before');
+  const join = { ...withEvent(joined, '$join'), read_by: ['@bob:example.org'] };
+
+  const visible = visibleTimelineItems([before, join], defaults);
+
+  expect(visible.map((entry) => entry.read_by)).toEqual([['@bob:example.org'], []]);
 });
 
 test('shows an event the SDK left in the timeline twice only once, where it first appears', () => {
@@ -279,7 +288,7 @@ test('honours each toggle independently', () => {
   expect(shown.map((entry) => entry.content.kind)).toEqual(['profile_change', 'state_event']);
 });
 
-const removed = item({ kind: 'redacted', reason: null });
+const removed = item({ kind: 'redacted', reason: null, redacted_by: null });
 
 test('keeps tombstones out unless the preference asks for them', () => {
   expect(visibleTimelineItems([removed, message], defaults)).toEqual([message]);
@@ -365,8 +374,7 @@ test("keeps a persona message out of the account's collapsed run", () => {
       kind: 'message',
       body: 'a',
       html: 'a',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -377,8 +385,7 @@ test("keeps a persona message out of the account's collapsed run", () => {
       kind: 'message',
       body: 'b',
       html: 'b',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -443,27 +450,13 @@ test('only a connected reply preview starts a new message group', () => {
   expect(isCollapsed(run, 1, 'expanded')).toBe(true);
 });
 
-test('drops a divider whose whole run was filtered out', () => {
-  expect(visibleTimelineItems([divider, renamed, divider, message], defaults)).toEqual([
-    divider,
-    message,
-  ]);
-  expect(visibleTimelineItems([divider, renamed], defaults)).toEqual([]);
+test('leaves date dividers to withDateDividers', () => {
+  expect(visibleTimelineItems([divider, renamed, divider, message], defaults)).toEqual([message]);
 });
 
 test('shows read markers only before unread messages', () => {
   expect(visibleTimelineItems([message, readMarker], defaults)).toEqual([message]);
   expect(visibleTimelineItems([readMarker, message, readMarker], defaults)).toEqual([
-    readMarker,
-    message,
-  ]);
-  expect(visibleTimelineItems([readMarker, divider, message], defaults)).toEqual([
-    readMarker,
-    divider,
-    message,
-  ]);
-  expect(visibleTimelineItems([divider, readMarker, message], defaults)).toEqual([
-    divider,
     readMarker,
     message,
   ]);
@@ -516,43 +509,57 @@ test('slots aggregation rows into the timeline by timestamp', () => {
   expect(mergeAggregations([sent, before], [before], whole)).toEqual([sent, before]);
 });
 
-test('date dividers keep aggregations in chronological order across history pages', () => {
+test('date dividers open each day after aggregations are merged', () => {
   const at = (day: number, hour: number) => new Date(2026, 9, day, hour).getTime();
-  const dateDivider = (day: number): TimelineItemView => {
-    const timestamp = at(day, 20);
-    return {
-      ...item({ kind: 'date_divider', timestamp }, `day-${day}`),
-      event_id: null,
-      timestamp,
-    };
-  };
   const first = { ...message, id: 'first', event_id: '$first', timestamp: at(6, 10) };
   const second = { ...message, id: 'second', event_id: '$second', timestamp: at(6, 20) };
   const third = { ...message, id: 'third', event_id: '$third', timestamp: at(7, 20) };
-  const firstDay = dateDivider(6);
-  const secondDay = dateDivider(7);
   const aggregations = [at(6, 12), at(6, 23), at(7, 0), at(7, 12)].map((timestamp, index) => ({
     ...aggregation('m.reaction', `reaction-${index}`),
     event_id: `$reaction-${index}`,
     timestamp,
   }));
 
-  expect(
-    mergeAggregations([firstDay, first, second, secondDay, third], aggregations, {
-      start: false,
-      end: true,
-    })
-  ).toEqual([
-    firstDay,
-    first,
-    aggregations[0],
-    second,
-    aggregations[1],
-    secondDay,
-    aggregations[2],
-    aggregations[3],
-    third,
+  const dated = withDateDividers(
+    mergeAggregations([first, second, third], aggregations, { start: false, end: true })
+  );
+
+  expect(dated.map((item) => item.event_id ?? item.content.kind)).toEqual([
+    'date_divider',
+    '$first',
+    '$reaction-0',
+    '$second',
+    '$reaction-1',
+    'date_divider',
+    '$reaction-2',
+    '$reaction-3',
+    '$third',
   ]);
+});
+
+test('a date divider carries the timestamp of the event it opens', () => {
+  const event = { ...message, id: 'first', event_id: '$first', timestamp: 1_700_000_000_000 };
+  const [dateDivider] = withDateDividers([event]);
+  expect(dateDivider.timestamp).toBe(event.timestamp);
+});
+
+test('date dividers follow the chosen time zone', () => {
+  const lateUtc = {
+    ...message,
+    id: 'late',
+    event_id: '$late',
+    timestamp: Date.UTC(2026, 9, 6, 23),
+  };
+  const nextUtc = { ...message, id: 'next', event_id: '$next', timestamp: Date.UTC(2026, 9, 7, 1) };
+  const zone = preferences.timeZone;
+  try {
+    preferences.timeZone = 'UTC';
+    expect(withDateDividers([lateUtc, nextUtc]).length).toBe(4);
+    preferences.timeZone = 'America/New_York';
+    expect(withDateDividers([lateUtc, nextUtc]).length).toBe(3);
+  } finally {
+    preferences.timeZone = zone;
+  }
 });
 
 test('drops aggregation rows outside the loaded range', () => {
@@ -717,6 +724,7 @@ test('anything you sent is yours to redact, not only your text', () => {
     kind: 'image',
     html: null,
     source: 'mxc://example.org/p',
+    external_url: null,
     filename: 'photo.png',
     caption: null,
     mime: null,
@@ -739,11 +747,13 @@ test('anything you sent is yours to redact, not only your text', () => {
   expect(canRedact(own(joined.content), true, false)).toBe(true);
   expect(canRedact(theirs(joined.content), true, true)).toBe(true);
   expect(canRedact(own(divider.content), true, true)).toBe(false);
-  expect(canRedact(own({ kind: 'redacted', reason: null }), true, true)).toBe(false);
+  expect(canRedact(own({ kind: 'redacted', reason: null, redacted_by: null }), true, true)).toBe(
+    false
+  );
 });
 
 test('a room whose every event is redacted is not blank at the shipped default', () => {
-  const deleted = item({ kind: 'redacted', reason: null }, 'gone');
+  const deleted = item({ kind: 'redacted', reason: null, redacted_by: null }, 'gone');
 
   // A room can be all-redacted — delete every poll in it and this is what is
   // left — and hiding those rows left nothing on screen at all.

@@ -12,6 +12,7 @@
   color: var(--button-on-container);
   cursor: pointer;
   display: inline-flex;
+  flex-shrink: 0;
   font: inherit;
   font-size: var(--font-size-label);
   font-weight: var(--font-weight-600);
@@ -35,6 +36,13 @@
 
 .btn-medium:not(.icon-button) {
   --button-default-height: var(--control-height-medium);
+}
+
+.btn-large:not(.icon-button) {
+  --button-default-height: var(--control-height-large);
+
+  border-radius: var(--radius-inner);
+  border-width: var(--border-width);
 }
 
 .btn > svg {
@@ -172,7 +180,7 @@
 }
 
 .icon-button-large {
-  --button-height: var(--control-height-500);
+  --button-height: var(--control-height-large);
   --button-icon-size: var(--size-x500);
 }
 

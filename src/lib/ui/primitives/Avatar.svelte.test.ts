@@ -92,13 +92,34 @@ test('an undecodable picture falls back to the initials', async () => {
     props: { src: 'mxc://example.org/undecodable-avatar', name: 'Sable' },
   });
 
-  for (let step = 0; step < 2; step += 1) {
+  for (let step = 0; step < 6; step += 1) {
     await vi.advanceTimersByTimeAsync(0);
     picture()?.querySelector('img')?.dispatchEvent(new Event('error'));
   }
   await vi.advanceTimersByTimeAsync(0);
 
   expect(fallback()?.style.display).toBe('');
+});
+
+test('a plain image url shows the initials until it loads, and again if it fails', async () => {
+  const { rerender } = render(Avatar, {
+    props: { src: 'https://example.org/a.png', name: 'Sable' },
+  });
+  const image = () => root().querySelector<HTMLImageElement>('img.avatar-image');
+
+  expect(fallback()?.style.display).toBe('');
+  expect(image()?.style.display).toBe('none');
+
+  image()?.dispatchEvent(new Event('load'));
+  await tick();
+  expect(fallback()?.style.display).toBe('none');
+  expect(image()?.style.display).toBe('');
+
+  await rerender({ src: 'https://example.org/broken.png', name: 'Sable' });
+  image()?.dispatchEvent(new Event('error'));
+  await tick();
+  expect(fallback()?.style.display).toBe('');
+  expect(image()?.style.display).toBe('none');
 });
 
 test('leaves a picture on a transparent box, so a transparent png keeps its own shape', () => {
@@ -168,4 +189,30 @@ test('a touch on the row does not fetch the original', async () => {
   await tick();
 
   expect(root().querySelectorAll('.avatar-image')).toHaveLength(1);
+});
+
+test('add button when openable prop is set to true', () => {
+  render(Avatar, {
+    props: {
+      src: 'mxc://example.org/avatar',
+      name: 'Sable',
+      id: '@sable:example.org',
+      openable: true,
+    },
+  });
+
+  expect(root().parentElement).toHaveClass('avatar-button');
+});
+
+test("don't add button when openable prop is set to false", () => {
+  render(Avatar, {
+    props: {
+      src: 'mxc://example.org/avatar',
+      name: 'Sable',
+      id: '@sable:example.org',
+      openable: false,
+    },
+  });
+
+  expect(root().parentElement).not.toHaveClass('avatar-button');
 });

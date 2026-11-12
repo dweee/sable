@@ -1,8 +1,8 @@
 import { rememberScreenAudioChoice, screenAudioSupported } from '#lib/platform/screen-audio.js';
 import type { ScreenAudioChoice } from '#lib/platform/screen-audio-stream.js';
 import { createContext } from 'svelte';
-
-import { hdrShareSupported, listHdrMonitors, type HdrMonitor } from '#lib/platform/hdr-share.js';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+import type { DesktopCallShortcutBackend } from '#lib/platform/call-shortcut-types.js';
 
 import type { CallMemberView, CoreEvent } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
@@ -14,22 +14,29 @@ import type {
   CallTransport,
   CallTransportCapabilities,
   CallTransportState,
-  ScreenSource,
 } from './call-transport';
-import { decodeCallKey, idleTransportState, ignoreError, ScreenAudioError } from './call-transport';
+import {
+  decodeCallKey,
+  idleTransportState,
+  ignoreError,
+  ScreenAudioError,
+  NativeCallFailure,
+  TransportDisconnectError,
+} from './call-transport';
 import { acquireCallOwner, type CallOwnerLease } from './call-owner';
 import type { LivekitTransport } from './livekit-transport';
 import { createNativeTransport } from './native-transport';
-import { hasNativeCalls } from '#lib/platform/calls.js';
+import { hasNativeCalls, nativeCallOwnsAudio, setNativeCallAudio } from '#lib/platform/calls.js';
 import { commandErrorCode } from './command-error';
 import { CallTelemetry } from './call-telemetry';
-import { recordCallDebug } from './call-debug.svelte.js';
+import { recordCallDebug, type CallDebug } from './call-debug.svelte.js';
 import { cameraVisible, screenShareVisible, type CallPin } from './call-layout';
 import { participantKeys } from './participant-keys';
 import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+import { type CallInputMode } from '#lib/settings/definitions.js';
 import { DEVICE_PREFERENCE } from './devices';
 import type { CallBackendGrant, CallRemoteVideoOverlay, CallVideoOverlay } from './call-transport';
-import { playSound } from '../notifications/sound';
+import { playSound, releaseNotificationAudio } from '../notifications/sound';
 
 export type CallLifecycle = 'idle' | 'joining' | 'connecting' | 'active' | 'leaving' | 'failed';
 
@@ -49,6 +56,7 @@ export type CallDeviceError = 'microphone' | 'camera' | 'screen' | 'screenAudio'
 
 const OWN_KEY_TIMEOUT_MS = 10_000;
 const DEVICE_ERROR_TIMEOUT_MS = 5_000;
+export const TALK_RELEASE_DELAY_MS = 150;
 
 type PendingEvent = Extract<
   CoreEvent,
@@ -98,6 +106,7 @@ const isLivekit = (transport: CallTransport): transport is LivekitTransport =>
 export type CallSessionDeps = {
   createTransport?: (encryptMedia: boolean) => CallTransport;
   e2eeSupported?: () => boolean;
+  roomName?: (roomId: string) => string | null | undefined;
 };
 
 export class CallSession {
@@ -109,6 +118,11 @@ export class CallSession {
   mediaReady = $state(false);
   encryptsMedia = $state(false);
   deafened = $state(false);
+  microphoneEnabled = $state(false);
+  inputMode = $state<CallInputMode>(
+    hasNativeCalls() ? 'voice-activity' : preferences.callInputMode
+  );
+  desktopShortcutStatus = $state<'inactive' | 'error' | DesktopCallShortcutBackend>('inactive');
   connectedAt = $state<number | null>(null);
   layout = $state.raw<CallPin>({ pinned: null, gridForced: false });
   watchedScreenShareIds = $state.raw<string[]>([]);
@@ -117,8 +131,6 @@ export class CallSession {
   listenOnly = $state(false);
   #deviceErrorTimer: ReturnType<typeof setTimeout> | undefined;
   choosingScreenAudio = $state(false);
-  choosingScreenSource = $state.raw<HdrMonitor[] | null>(null);
-  #pendingScreenSource: ScreenSource | null = null;
 
   toggleWatchScreenShare(trackId: string): void {
     this.watchedScreenShareIds = this.watchedScreenShareIds.includes(trackId)
@@ -157,13 +169,19 @@ export class CallSession {
     | { revision: number; publisherId: string; backends: CallBackendGrant[] }
     | undefined;
   #transportConnection: CallTransportState['connection'] | undefined;
+  #transportErrorCode: string | undefined;
   #teardownPromise: Promise<void> | undefined;
   #attemptGeneration = 0;
   #backendEnded = false;
   #ownKey: { resolve: () => void; reject: (error: Error) => void } | undefined;
   #telemetry: CallTelemetry | undefined;
   #lastJoin: { roomId: string; media: CallMedia; serviceUrl: string | null } | undefined;
-  #micBeforeDeafen: boolean | undefined;
+  #talkSources = new SvelteSet<string>();
+  #talkReleases = new SvelteMap<
+    string,
+    { timer: ReturnType<typeof setTimeout>; done: () => void }
+  >();
+  #microphoneUpdate = Promise.resolve();
 
   constructor(client: CoreClient, deps: CallSessionDeps = {}) {
     this.#client = client;
@@ -238,6 +256,8 @@ export class CallSession {
 
     this.#lease = lease;
     this.#lastJoin = { roomId, media, serviceUrl };
+    this.microphoneEnabled = media.microphone;
+    this.inputMode = hasNativeCalls() ? 'voice-activity' : preferences.callInputMode;
     setPreference('callMicrophoneMuted', !media.microphone);
     this.layout = { pinned: null, gridForced: false };
     this.watchedScreenShareIds = [];
@@ -246,6 +266,7 @@ export class CallSession {
     const telemetry = new CallTelemetry({
       'call.microphone_requested': media.microphone,
       'call.camera_requested': media.camera,
+      'call.native_expected': hasNativeCalls(),
     });
     this.#telemetry = telemetry;
     this.roomId = roomId;
@@ -282,30 +303,50 @@ export class CallSession {
       const supported =
         this.#deps.e2eeSupported ?? (await import('./key-provider')).isCallE2eeSupported;
       if (attempt !== this.#attemptGeneration) return;
-      if (grant.encryptMedia && !supported()) {
-        telemetry.failure('call.encryption.unsupported', new Error('OperationError'));
+      if (grant.encrypt_media && !supported()) {
+        telemetry.terminal('call.encryption.unsupported', new Error('e2ee-unsupported'));
         await this.#teardown();
         this.#fail('e2ee-unsupported');
         telemetry.finish('failed');
         return;
       }
 
-      const transport = await telemetry.step(
+      const { transport, kind: transportKind } = await telemetry.step(
         'call.transport.create',
-        async () =>
-          this.#deps.createTransport?.(grant.encryptMedia) ??
-          (grant.mode === undefined || grant.mode === 'legacy'
-            ? await createNativeTransport(String(grant.session), grant.identity)
-            : null) ??
-          (grant.backends?.length
-            ? (await import('./multi-sfu-transport')).createMultiSfuTransport(
-                grant.encryptMedia,
-                telemetry
-              )
-            : (await import('./livekit-transport')).createLivekitTransport({
-                encryptMedia: grant.encryptMedia,
-                telemetry,
-              }))
+        async (): Promise<{ transport: CallTransport; kind: CallDebug['transport'] }> => {
+          const injected = this.#deps.createTransport?.(grant.encrypt_media);
+          if (injected) {
+            const kind = isLivekit(injected)
+              ? 'livekit-web'
+              : grant.backends.length
+                ? 'livekit-multi'
+                : 'native';
+            return { transport: injected, kind };
+          }
+          if (grant.mode === 'legacy') {
+            const native = await createNativeTransport(
+              String(grant.session),
+              grant.identity,
+              this.#deps.roomName?.(roomId) ?? roomId
+            );
+            if (native) return { transport: native, kind: 'native' };
+          }
+          if (grant.backends.length) {
+            const multi = await import('./multi-sfu-transport');
+            return {
+              transport: multi.createMultiSfuTransport(grant.encrypt_media, telemetry),
+              kind: 'livekit-multi',
+            };
+          }
+          const web = await import('./livekit-transport');
+          return {
+            transport: web.createLivekitTransport({
+              encryptMedia: grant.encrypt_media,
+              telemetry,
+            }),
+            kind: 'livekit-web',
+          };
+        }
       );
       if (attempt !== this.#attemptGeneration) {
         await transport.disconnect().catch(ignoreError);
@@ -313,30 +354,33 @@ export class CallSession {
       }
       this.#media = transport;
       this.#livekit = isLivekit(transport) ? transport : undefined;
-      const transportKind = this.#livekit
-        ? 'livekit-web'
-        : grant.backends?.length
-          ? 'livekit-multi'
-          : 'native';
+      setNativeCallAudio(transportKind === 'native');
+      if (nativeCallOwnsAudio()) releaseNotificationAudio();
+      if (hasNativeCalls() && transportKind !== 'native') {
+        telemetry.degraded('call.native.skipped', new Error('native-transport-skipped'), {
+          'call.mode': grant.mode,
+          'call.transport': transportKind,
+        });
+      }
       recordCallDebug({
         requested: preferences.callMode,
         nativeForced: hasNativeCalls(),
-        mode: grant.mode ?? 'legacy',
-        reason: grant.modeReason,
-        stickyAvailable: grant.stickyAvailable,
-        peerModes: grant.peerModes ?? [],
+        mode: grant.mode,
+        reason: grant.mode_reason,
+        stickyAvailable: grant.sticky_available,
+        peerModes: grant.peer_modes,
         transport: transportKind,
-        backendCount: grant.backends?.length ?? 0,
-        encrypted: grant.encryptMedia,
+        backendCount: grant.backends.length,
+        encrypted: grant.encrypt_media,
       });
       telemetry.event('call.transport.selected', {
         'call.transport': transportKind,
-        'call.mode': grant.mode ?? 'legacy',
-        'call.mode_reason': grant.modeReason ?? 'unknown',
-        'call.sticky_available': grant.stickyAvailable ?? false,
-        'call.peer_modes': (grant.peerModes ?? []).join(',') || 'none',
-        'call.backend_count': grant.backends?.length ?? 0,
-        'call.encryption_requested': grant.encryptMedia,
+        'call.mode': grant.mode,
+        'call.mode_reason': grant.mode_reason,
+        'call.sticky_available': grant.sticky_available,
+        'call.peer_modes': grant.peer_modes.join(',') || 'none',
+        'call.backend_count': grant.backends.length,
+        'call.encryption_requested': grant.encrypt_media,
       });
       this.#unsubscribeTransport = transport.subscribe((state) => {
         this.transport = state;
@@ -351,8 +395,20 @@ export class CallSession {
           this.#transportConnection = state.connection;
           telemetry.event('call.transport.state', { 'call.connection': state.connection });
         }
+        if (state.errorCode !== this.#transportErrorCode) {
+          this.#transportErrorCode = state.errorCode;
+          if (state.errorCode !== undefined) {
+            telemetry.degraded('call.native.error', new NativeCallFailure(state.errorCode), {
+              'call.connection': state.connection,
+              'call.microphone_effective': state.microphoneEnabled,
+            });
+          }
+        }
         if (state.connection === 'disconnected' && this.lifecycle === 'active') {
-          telemetry.failure('call.transport.disconnected', new Error('OperationError'));
+          telemetry.terminal(
+            'call.transport.disconnected',
+            new TransportDisconnectError(state.disconnectReason ?? 'UNKNOWN')
+          );
           this.lifecycle = 'leaving';
           void this.#teardown().then(() => {
             if (this.lifecycle === 'leaving') {
@@ -369,7 +425,7 @@ export class CallSession {
           telemetry.event('call.encryption.key_import', {
             'call.key_import_failure': keyState.lastFailure,
           });
-          telemetry.failure('call.encryption.key_import', new Error('OperationError'));
+          telemetry.failure('call.encryption.key_import', new Error('key-import-failed'));
           this.#ownKey?.reject(new Error('own-key-failed'));
           this.#ownKey = undefined;
           return;
@@ -378,13 +434,13 @@ export class CallSession {
       });
 
       this.#grant = grant;
-      this.listenOnly = grant.canPublish === false;
+      this.listenOnly = !grant.can_publish;
 
-      this.encryptsMedia = grant.encryptMedia;
+      this.encryptsMedia = grant.encrypt_media;
       this.mediaReady = false;
       this.#drain();
 
-      if (grant.encryptMedia) {
+      if (grant.encrypt_media) {
         await telemetry.step('call.encryption.wait_for_key', () => this.#waitForOwnKey());
       }
       if (attempt !== this.#attemptGeneration) return;
@@ -392,13 +448,15 @@ export class CallSession {
       this.lifecycle = 'connecting';
       const encryptionKeys = this.#pendingKeys.splice(0, this.#pendingKeys.length);
       const connectBackends = this.#latestBackends?.backends ?? grant.backends;
-      const connectPublisherId = this.#latestBackends?.publisherId ?? grant.publisherId;
+      const connectPublisherId = this.#latestBackends?.publisherId ?? grant.publisher_id;
       this.#keysAccepted = true;
       await telemetry.step('call.transport.connect', async () => {
         await transport.connect({
           url: grant.url,
           token: grant.jwt,
-          microphoneEnabled: media.microphone && !this.listenOnly,
+          microphoneEnabled: this.#canTransmit(),
+          microphoneStandby:
+            this.microphoneEnabled && !this.listenOnly && this.inputMode === 'push-to-talk',
           cameraEnabled: media.camera && !this.listenOnly,
           encryptionKeys: encryptionKeys.map(({ key }) => key),
           publisherId: connectPublisherId,
@@ -424,12 +482,16 @@ export class CallSession {
       this.mediaReady = true;
 
       this.lifecycle = 'active';
+      if (this.transport.microphoneEnabled !== this.#canTransmit()) {
+        await this.#setMicrophone(this.#canTransmit());
+        if (attempt !== this.#attemptGeneration) return;
+      }
       this.connectedAt = Date.now();
-      void playSound('call_join');
+      this.#cue('call_join');
       telemetry.finish('connected');
     } catch (error) {
       if (attempt !== this.#attemptGeneration) return;
-      telemetry.failure('call.join', error);
+      telemetry.terminal('call.join', error);
       await this.#teardown();
       this.#fail(this.#classify(error));
       telemetry.finish('failed');
@@ -447,7 +509,7 @@ export class CallSession {
     this.roomId = null;
     this.connectedAt = null;
     this.clearDeviceError();
-    void playSound('call_leave');
+    this.#cue('call_leave');
   }
 
   clearFailure(): void {
@@ -469,51 +531,136 @@ export class CallSession {
     this.deviceError = null;
   }
 
-  async #device(kind: CallDeviceError, action: () => Promise<void> | undefined): Promise<void> {
-    if (this.listenOnly) return;
+  async #device(kind: CallDeviceError, action: () => Promise<void> | undefined): Promise<boolean> {
+    if (this.listenOnly) return false;
+    const attempt = this.#attemptGeneration;
     try {
       await action();
       if (this.deviceError === kind) this.clearDeviceError();
+      return true;
     } catch (error) {
-      if (kind === 'screen' && error instanceof Error && error.name === 'NotAllowedError') return;
+      if (attempt !== this.#attemptGeneration || !this.active || this.lifecycle === 'leaving')
+        return false;
+      // A cancelled screen picker: WebView2 and browsers reject with NotAllowedError, Electron with AbortError.
+      if (
+        kind === 'screen' &&
+        error instanceof Error &&
+        (error.name === 'NotAllowedError' || error.name === 'AbortError')
+      )
+        return false;
       this.clearDeviceError();
       this.deviceError = error instanceof ScreenAudioError ? 'screenAudio' : kind;
       this.#deviceErrorTimer = setTimeout(() => {
         this.clearDeviceError();
       }, DEVICE_ERROR_TIMEOUT_MS);
+      return error instanceof ScreenAudioError;
     }
   }
 
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
+    this.microphoneEnabled = enabled;
     if (enabled && this.deafened) {
       this.deafened = false;
-      this.#micBeforeDeafen = undefined;
     }
     setPreference('callMicrophoneMuted', !enabled);
-    await this.#device('microphone', () => this.#media?.setMicrophoneEnabled(enabled));
-    void playSound(enabled ? 'mic_on' : 'mic_off');
+    await this.#setMicrophone(this.#canTransmit());
+    this.#cue(enabled ? 'mic_on' : 'mic_off');
   }
 
-  async setParticipantVolume(identity: string, volume: number): Promise<void> {
-    await this.#media?.setParticipantVolume?.(identity, volume);
+  toggleMicrophone(): Promise<void> {
+    return this.setMicrophoneEnabled(!this.microphoneEnabled || this.deafened);
+  }
+
+  async setTalking(held: boolean, source = 'keyboard'): Promise<void> {
+    const release = this.#talkReleases.get(source);
+    if (held) {
+      if (release) {
+        clearTimeout(release.timer);
+        this.#talkReleases.delete(source);
+        release.done();
+        return;
+      }
+      if (
+        this.lifecycle !== 'active' ||
+        !this.mediaReady ||
+        this.listenOnly ||
+        this.deafened ||
+        this.inputMode !== 'push-to-talk'
+      )
+        return;
+      if (this.#talkSources.has(source)) return;
+      this.#talkSources.add(source);
+    } else {
+      if (!this.#talkSources.has(source) || release) return;
+      const released = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => {
+          this.#talkReleases.delete(source);
+          resolve(this.#talkSources.delete(source));
+        }, TALK_RELEASE_DELAY_MS);
+        this.#talkReleases.set(source, {
+          timer,
+          done: () => {
+            resolve(false);
+          },
+        });
+      });
+      if (!released) return;
+    }
+    if (this.microphoneEnabled) await this.#setMicrophone(this.#canTransmit());
+  }
+
+  setInputMode(mode: CallInputMode): void {
+    if (hasNativeCalls() || this.inputMode === mode) return;
+    this.inputMode = mode;
+    this.#clearTalking();
+    if (this.lifecycle === 'active') void this.#setMicrophone(this.#canTransmit());
+  }
+
+  #clearTalking(): void {
+    for (const { timer, done } of this.#talkReleases.values()) {
+      clearTimeout(timer);
+      done();
+    }
+    this.#talkReleases.clear();
+    this.#talkSources.clear();
+  }
+
+  #canTransmit(): boolean {
+    return (
+      this.microphoneEnabled &&
+      !this.listenOnly &&
+      !this.deafened &&
+      (this.inputMode !== 'push-to-talk' || this.#talkSources.size > 0)
+    );
+  }
+
+  #setMicrophone(enabled: boolean): Promise<void> {
+    const media = this.#media;
+    const attempt = this.#attemptGeneration;
+    this.#microphoneUpdate = this.#microphoneUpdate.then(async () => {
+      if (
+        media !== this.#media ||
+        attempt !== this.#attemptGeneration ||
+        this.lifecycle !== 'active' ||
+        enabled !== this.#canTransmit()
+      )
+        return;
+      await this.#device('microphone', () => media?.setMicrophoneEnabled(enabled));
+    });
+    return this.#microphoneUpdate;
+  }
+
+  async setParticipantVolume(identity: string, volume: number, screen = false): Promise<void> {
+    await this.#media?.setParticipantVolume?.(identity, volume, screen);
   }
 
   setDeafened(deafened: boolean): void {
     if (deafened === this.deafened) return;
+    this.#clearTalking();
     this.deafened = deafened;
     if (!this.#media) return;
-
-    void playSound(deafened ? 'deafen_on' : 'deafen_off');
-    if (deafened) {
-      this.#micBeforeDeafen = this.transport.microphoneEnabled;
-      if (this.#micBeforeDeafen) {
-        void this.#device('microphone', () => this.#media?.setMicrophoneEnabled(false));
-      }
-      return;
-    }
-    const restore = this.#micBeforeDeafen;
-    this.#micBeforeDeafen = undefined;
-    if (restore) void this.#device('microphone', () => this.#media?.setMicrophoneEnabled(true));
+    this.#cue(deafened ? 'deafen_on' : 'deafen_off');
+    if (this.microphoneEnabled) void this.#setMicrophone(this.#canTransmit());
   }
 
   async switchDevice(kind: MediaDeviceKind, deviceId: string): Promise<void> {
@@ -532,48 +679,30 @@ export class CallSession {
 
   async setCameraEnabled(enabled: boolean): Promise<void> {
     await this.#device('camera', () => this.#media?.setCameraEnabled(enabled));
-    void playSound(enabled ? 'camera_on' : 'camera_off');
+    this.#cue(enabled ? 'camera_on' : 'camera_off');
   }
 
   async toggleScreenShare(): Promise<void> {
     if (this.transport.screenShareEnabled) {
       await this.#stopScreenShare();
-      void playSound('screenshare_stop');
+      this.#cue('screenshare_stop');
       return;
     }
-    const monitors = hdrShareSupported()
-      ? await listHdrMonitors().catch((error: unknown) => {
-          console.debug('[sable call] could not list HDR monitors', error);
-          return [];
-        })
-      : [];
-    if (monitors.length > 0) this.choosingScreenSource = monitors;
-    else await this.shareScreenFrom(null);
-    void playSound('screenshare_start');
-  }
-
-  async shareScreenFrom(source: ScreenSource | null): Promise<void> {
-    this.choosingScreenSource = null;
-    if (screenAudioSupported()) {
-      this.#pendingScreenSource = source;
-      this.choosingScreenAudio = true;
-      return;
-    }
-    await this.#shareScreen(undefined, source);
+    if (screenAudioSupported()) this.choosingScreenAudio = true;
+    else await this.#shareScreen(undefined);
   }
 
   async shareScreenWith(audio: ScreenAudioChoice): Promise<void> {
     this.choosingScreenAudio = false;
     rememberScreenAudioChoice(audio);
-    const source = this.#pendingScreenSource;
-    this.#pendingScreenSource = null;
-    await this.#shareScreen(audio, source);
+    await this.#shareScreen(audio);
   }
 
-  async #shareScreen(audio: ScreenAudioChoice | undefined, source: ScreenSource | null) {
-    await this.#device('screen', () =>
-      this.#media?.capabilities.screenShare?.setEnabled(true, audio, source ?? undefined)
+  async #shareScreen(audio: ScreenAudioChoice | undefined) {
+    const shared = await this.#device('screen', () =>
+      this.#media?.capabilities.screenShare?.setEnabled(true, audio)
     );
+    if (shared) this.#cue('screenshare_start');
   }
 
   async #stopScreenShare(): Promise<void> {
@@ -610,8 +739,12 @@ export class CallSession {
     if (this.#session === undefined || event.session !== this.#session) return;
 
     if (event.type === 'call_signaling_error') {
-      this.#telemetry?.failure(`call.signaling.${event.stage}`, new Error('OperationError'));
-      if (!event.fatal || this.lifecycle === 'idle' || this.lifecycle === 'leaving') return;
+      const signalingError = new Error('signaling-error');
+      if (!event.fatal || this.lifecycle === 'idle' || this.lifecycle === 'leaving') {
+        this.#telemetry?.failure(`call.signaling.${event.stage}`, signalingError);
+        return;
+      }
+      this.#telemetry?.terminal(`call.signaling.${event.stage}`, signalingError);
       ++this.#attemptGeneration;
       this.#backendEnded = true;
       this.lifecycle = 'leaving';
@@ -683,8 +816,8 @@ export class CallSession {
       () => {
         if (event.own) this.#markReady();
       },
-      () => {
-        this.#telemetry?.failure('call.encryption.key_import', new Error('OperationError'));
+      (error: unknown) => {
+        this.#telemetry?.failure('call.encryption.key_import', error);
         this.#ownKey?.reject(new Error('own-key-failed'));
         this.#ownKey = undefined;
       }
@@ -725,6 +858,12 @@ export class CallSession {
     });
   }
 
+  #cue(name: Parameters<typeof playSound>[0]): void {
+    void playSound(name).catch((error: unknown) => {
+      console.warn('[sable call] sound not played', name, error);
+    });
+  }
+
   async #teardown(): Promise<void> {
     if (this.#teardownPromise) return this.#teardownPromise;
 
@@ -737,6 +876,9 @@ export class CallSession {
   }
 
   async #performTeardown(): Promise<void> {
+    this.desktopShortcutStatus = 'inactive';
+    this.#clearTalking();
+    this.#microphoneUpdate = Promise.resolve();
     this.#ownKey?.reject(new Error('cancelled'));
     this.#ownKey = undefined;
 
@@ -748,6 +890,7 @@ export class CallSession {
     } catch (error) {
       this.#telemetry?.failure('call.transport.disconnect', error);
     }
+    setNativeCallAudio(false);
 
     const session = this.#session;
     if (session !== undefined && !this.#backendEnded) {
@@ -772,6 +915,7 @@ export class CallSession {
     this.#livekit = undefined;
     this.#grant = undefined;
     this.listenOnly = false;
+    this.choosingScreenAudio = false;
     this.#session = undefined;
     this.#screenSharing = false;
     this.#buffer = [];
@@ -784,8 +928,10 @@ export class CallSession {
     this.#connected = false;
     this.#backendEnded = false;
     this.#transportConnection = undefined;
+    this.#transportErrorCode = undefined;
     this.members = [];
     this.transport = idleTransportState();
+    this.deafened = false;
     this.mediaReady = false;
     this.encryptsMedia = false;
     this.#telemetry?.event('call.cleanup');

@@ -1,14 +1,17 @@
 import { defineConfig, devices } from '@playwright/test';
+import { initializeHomeserverRunId } from './tests/e2e/fixtures/runtime';
+
+initializeHomeserverRunId();
 
 const port = process.env.SABLE_PREVIEW_PORT ?? '4173';
 const origin = `http://127.0.0.1:${port}`;
-const migrationOrigin = 'http://127.0.0.1:4186';
+const dragListOrigin = 'http://127.0.0.1:4186';
 const SCRIPTED_TIMELINE_SPECS =
   /(?:^|\/)(?:timeline-(?:anchoring|stability|gap|keyboard|lifecycle|media)|thread-links)\.spec\.ts$/;
 
 const build = process.env.SABLE_E2E_PREBUILT
   ? ''
-  : 'SABLE_SKIP_DEEPFILTERNET=1 SABLE_WASM_OUTPUT=src/generated/wasm-e2e pnpm run build && ';
+  : 'SABLE_WASM_OUTPUT=src/generated/wasm-e2e pnpm run build && ';
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -38,7 +41,7 @@ export default defineConfig({
     {
       name: 'chromium',
       dependencies: ['setup'],
-      testIgnore: /(?:global\.(?:setup|teardown)|v1-migration\.spec|\.browser\.test)\.ts/,
+      testIgnore: /(?:global\.(?:setup|teardown)|drag-list\.spec|ws-server\.spec|\.test)\.ts/,
       use: devices['Desktop Chrome'],
     },
     {
@@ -47,14 +50,14 @@ export default defineConfig({
       name: 'webkit',
       dependencies: ['setup'],
       testMatch:
-        /(?:^|\/)(?:app-shell|login|navigation|window-activity|thread-links|last-room)\.spec\.ts$/,
+        /(?:^|\/)(?:a11y-auth|app-shell|login|navigation|window-activity|thread-links|last-room|csp|reaction-history)\.spec\.ts$/,
       use: devices['Desktop Safari'],
     },
     {
-      name: 'migration',
+      name: 'drag-list',
       dependencies: ['setup'],
-      testMatch: 'v1-migration.spec.ts',
-      use: { ...devices['Desktop Chrome'], baseURL: migrationOrigin },
+      testMatch: 'drag-list.spec.ts',
+      use: { ...devices['Desktop Chrome'], baseURL: dragListOrigin },
     },
     {
       name: 'ios',
@@ -77,7 +80,7 @@ export default defineConfig({
     {
       command:
         'SABLE_WASM_OUTPUT=src/generated/wasm pnpm exec vite dev --host 127.0.0.1 --port 4186 --strictPort',
-      url: migrationOrigin,
+      url: dragListOrigin,
       reuseExistingServer: !process.env.CI,
       timeout: 600_000,
     },

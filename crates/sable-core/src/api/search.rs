@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::Handler;
 use crate::search::MAX_SEARCH_RESULTS;
-use crate::protocol::{RpcError, SearchCoverageView, SearchFilter, SearchHitView, SearchMetricsView};
+use crate::protocol::{
+    RpcError, SearchCoverageView, SearchFilter, SearchHitView, SearchMetricsView,
+};
 use crate::{Core, view};
 
 const MAX_SEARCH_CONTEXT: usize = 3;
@@ -13,6 +15,44 @@ domain! {
     messages,
     coverage,
     metrics,
+    peer_start,
+    peer_find,
+    peer_reset,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PeerStartParams {}
+
+impl Handler for PeerStartParams {
+    type Ok = ();
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.start_search_peers().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PeerFindParams {}
+
+impl Handler for PeerFindParams {
+    type Ok = ();
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.find_search_peers().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PeerResetParams {}
+
+impl Handler for PeerResetParams {
+    type Ok = ();
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        let client = core.client().await?;
+        core.forget_search_sharing(&client).await;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -62,6 +102,7 @@ impl Handler for MessagesParams {
             older,
         } = self;
         let filter = crate::search::IndexFilter::try_from(filter)?;
+        core.prepare_search_query(&query).await?;
         let limit = (limit as usize).min(MAX_SEARCH_RESULTS);
         let context = (context as usize).min(MAX_SEARCH_CONTEXT);
         let (hits, older) = if let Some(cursor) = older {

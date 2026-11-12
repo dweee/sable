@@ -5,14 +5,18 @@ import type { RoomListItemView } from '#src/generated/protocol';
 
 import { countNotifications, notifications } from '#lib/features/inbox/inbox.js';
 
-import { setQuiet } from './quiet-rooms.svelte.js';
-import { RoomList, hasDirectRoom, roomPathId } from './room-list.svelte.js';
+import { RoomList, hasDirectRoom, roomListOptions, roomPathId } from './room-list.svelte.js';
 import { withCounts } from './summary-fixtures.js';
+import { badgeView, sectionsUpdate, sectionView } from '#lib/test-support/room-sections.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+
+function snapshotOf(rooms: unknown[], extra: object = {}): string {
+  return JSON.stringify({ rooms, sections: [], badges: [], quiet_rooms: [], ...extra });
+}
 
 function stubLocalStorage(): Map<string, string> {
   const stored = new Map<string, string>();
@@ -34,7 +38,11 @@ test("reads a room's mode off its summary", async () => {
       room_id: '!muted:example.org',
       notification: { room: 'mute', default: 'all' },
     } as RoomListItemView),
-    withCounts({ room_id: '!plain:example.org', is_direct: false } as RoomListItemView),
+    withCounts({
+      room_id: '!plain:example.org',
+      is_direct: false,
+      display_name: '!plain:example.org',
+    } as RoomListItemView),
   ];
   const core = {
     subscribeEvents: vi.fn(() => () => {}),
@@ -89,19 +97,26 @@ test('inbox counts follow badge defaults, and a mute silences it at once', async
   } as unknown as CoreClient;
   const roomList = new RoomList(core);
   await roomList.start();
+  expect(countNotifications(roomList.rooms, roomList.badgeUnreadFor)).toBe(0);
+
+  const emit = (event: object) => {
+    for (const listener of listeners)
+      listener({ type: 'room_list_diff', subscription: 1, ...event });
+  };
+  emit({
+    diffs: [],
+    sections: sectionsUpdate([], { badges: [badgeView('!loud', { unread: 2, notifying: 2 })] }),
+  });
   expect(countNotifications(roomList.rooms, roomList.badgeUnreadFor)).toBe(2);
   expect(
     notifications(roomList.rooms, 'all', roomList.badgeUnreadFor).map((room) => room.room_id)
-  ).toEqual(['!loud', '!quiet']);
+  ).toEqual(['!loud']);
 
   const muted = withCounts({ ...loud, notification: { room: 'mute', default: 'all' } });
-  for (const listener of listeners) {
-    listener({
-      type: 'room_list_diff',
-      subscription: 1,
-      diffs: [{ op: 'set', index: 0, value: muted }],
-    });
-  }
+  emit({
+    diffs: [{ op: 'set', index: 0, value: muted }],
+    sections: sectionsUpdate([], { badges: [] }),
+  });
   expect(countNotifications(roomList.rooms, roomList.badgeUnreadFor)).toBe(0);
   roomList.stop();
 });
@@ -110,6 +125,7 @@ test('clears a room avatar when a room-list diff supplies null', async () => {
   const room = {
     room_id: '!room:example.org',
     avatar_url: 'mxc://example.org/avatar',
+    display_name: '!room:example.org',
   } as RoomListItemView;
   const clearedRoom = { ...room, avatar_url: null };
   const eventListeners: ((event: unknown) => void)[] = [];
@@ -139,7 +155,10 @@ test('clears a room avatar when a room-list diff supplies null', async () => {
 });
 
 test('holds the typing user ids so a room opened later reads them', async () => {
-  const room = { room_id: '!room:example.org' } as RoomListItemView;
+  const room = {
+    room_id: '!room:example.org',
+    display_name: '!room:example.org',
+  } as RoomListItemView;
   const eventListeners: ((event: unknown) => void)[] = [];
   const core = {
     subscribeEvents: vi.fn((listener: (event: unknown) => void) => {
@@ -171,6 +190,49 @@ test('holds the typing user ids so a room opened later reads them', async () => 
   roomList.stop();
 });
 
+test('stops a user typing once their message arrives in the room list', async () => {
+  const room = {
+    room_id: '!room:example.org',
+    display_name: '!room:example.org',
+    latest_event: { sender: '@bob:example.org', body: 'old', event_id: '$1', sending: false },
+  } as RoomListItemView;
+  const eventListeners: ((event: unknown) => void)[] = [];
+  const core = {
+    subscribeEvents: vi.fn((listener: (event: unknown) => void) => {
+      eventListeners.push(listener);
+      return () => {};
+    }),
+    rpc: {
+      timeline: {
+        subscribeRoomList: vi.fn(() => Promise.resolve({ subscription: 1, rooms: [room] })),
+        unsubscribe: vi.fn(() => Promise.resolve()),
+      },
+    },
+  } as unknown as CoreClient;
+  const roomList = new RoomList(core);
+
+  await roomList.start();
+  for (const listener of eventListeners) {
+    listener({
+      type: 'typing',
+      room_id: room.room_id,
+      user_ids: ['@alice:example.org', '@bob:example.org'],
+    });
+  }
+  const sent = { ...room, latest_event: { ...room.latest_event, event_id: '$2' } };
+  for (const listener of eventListeners) {
+    listener({
+      type: 'room_list_diff',
+      subscription: 1,
+      diffs: [{ op: 'set', index: 0, value: sent }],
+      sections: null,
+    });
+  }
+
+  expect(roomList.typingUserIds(room.room_id)).toEqual(['@alice:example.org']);
+  roomList.stop();
+});
+
 test('paints the persisted room list before the subscription answers', async () => {
   const room = withCounts({
     room_id: '!persisted:example.org',
@@ -179,8 +241,17 @@ test('paints the persisted room list before the subscription answers', async () 
     notifying: 0,
     highlight: 0,
     marked_unread: false,
+    display_name: 'Persisted',
   } as RoomListItemView);
-  stubLocalStorage().set('sable.room-list.acct', JSON.stringify([room]));
+  const home = sectionView('home', { rooms: [room.room_id] });
+  stubLocalStorage().set(
+    'sable.room-list.v2.acct',
+    snapshotOf([room], {
+      sections: [home],
+      badges: [badgeView(room.room_id, { unread: 2, notifying: 2 })],
+      quiet_rooms: [room.room_id],
+    })
+  );
   let resolveSubscription: (value: {
     subscription: number;
     rooms: RoomListItemView[];
@@ -204,6 +275,14 @@ test('paints the persisted room list before the subscription answers', async () 
 
   const started = roomList.start();
   expect(roomList.rooms).toEqual([room]);
+  expect(roomList.section('home')).toEqual(home);
+  expect(roomList.badgeUnreadFor(room)).toEqual({
+    unread: 2,
+    notifying: 2,
+    highlight: 0,
+    marked: false,
+  });
+  expect(roomList.quietRoomIds).toEqual(new Set([room.room_id]));
 
   resolveSubscription({ subscription: 1, rooms: [] });
   await started;
@@ -214,8 +293,8 @@ test('paints the persisted room list before the subscription answers', async () 
 
 test('a snapshot from a build before resolved counts paints nothing', () => {
   stubLocalStorage().set(
-    'sable.room-list.acct',
-    JSON.stringify([{ room_id: '!old:example.org', unread: 4 }])
+    'sable.room-list.v2.acct',
+    snapshotOf([{ room_id: '!old:example.org', unread: 4 }])
   );
   const core = {
     session: { account_id: 'acct' },
@@ -235,8 +314,11 @@ test('a snapshot from a build before resolved counts paints nothing', () => {
 });
 
 test('is not settled on a painted snapshot', async () => {
-  const room = withCounts({ room_id: '!room:example.org' } as RoomListItemView);
-  stubLocalStorage().set('sable.room-list.acct', JSON.stringify([room]));
+  const room = withCounts({
+    room_id: '!room:example.org',
+    display_name: '!room:example.org',
+  } as RoomListItemView);
+  stubLocalStorage().set('sable.room-list.v2.acct', snapshotOf([room]));
   let resolveSubscription: (value: {
     subscription: number;
     rooms: RoomListItemView[];
@@ -268,9 +350,15 @@ test('is not settled on a painted snapshot', async () => {
 });
 
 test('a diff after an empty first answer replaces the painted snapshot rather than joining it', async () => {
-  const first = withCounts({ room_id: '!first:example.org' } as RoomListItemView);
-  const second = withCounts({ room_id: '!second:example.org' } as RoomListItemView);
-  stubLocalStorage().set('sable.room-list.acct', JSON.stringify([first, second]));
+  const first = withCounts({
+    room_id: '!first:example.org',
+    display_name: '!first:example.org',
+  } as RoomListItemView);
+  const second = withCounts({
+    room_id: '!second:example.org',
+    display_name: '!second:example.org',
+  } as RoomListItemView);
+  stubLocalStorage().set('sable.room-list.v2.acct', snapshotOf([first, second]));
   const eventListeners: ((event: unknown) => void)[] = [];
   const core = {
     session: { account_id: 'acct' },
@@ -301,8 +389,14 @@ test('a diff after an empty first answer replaces the painted snapshot rather th
 });
 
 test('waits for a room to be listed, and gives up after the timeout', async () => {
-  const listed = { room_id: '!listed:example.org' } as RoomListItemView;
-  const late = { room_id: '!late:example.org' } as RoomListItemView;
+  const listed = {
+    room_id: '!listed:example.org',
+    display_name: '!listed:example.org',
+  } as RoomListItemView;
+  const late = {
+    room_id: '!late:example.org',
+    display_name: '!late:example.org',
+  } as RoomListItemView;
   const eventListeners: ((event: unknown) => void)[] = [];
   const core = {
     subscribeEvents: vi.fn((listener: (event: unknown) => void) => {
@@ -348,7 +442,11 @@ test('waits for a room to be listed, and gives up after the timeout', async () =
 test('persists the live room list for the next launch', async () => {
   vi.useFakeTimers();
   const stored = stubLocalStorage();
-  const room = { room_id: '!live:example.org', name: 'Live' } as RoomListItemView;
+  const room = {
+    room_id: '!live:example.org',
+    name: 'Live',
+    display_name: 'Live',
+  } as RoomListItemView;
   const core = {
     session: { account_id: 'acct' },
     subscribeEvents: vi.fn(() => () => {}),
@@ -362,9 +460,14 @@ test('persists the live room list for the next launch', async () => {
   const roomList = new RoomList(core);
 
   await roomList.start();
-  expect(stored.has('sable.room-list.acct')).toBe(false);
+  expect(stored.has('sable.room-list.v2.acct')).toBe(false);
   vi.advanceTimersByTime(1_000);
-  expect(JSON.parse(stored.get('sable.room-list.acct') ?? '[]')).toEqual([room]);
+  expect(JSON.parse(stored.get('sable.room-list.v2.acct') ?? '{}')).toEqual({
+    rooms: [room],
+    sections: [],
+    badges: [],
+    quiet_rooms: [],
+  });
 
   roomList.stop();
   vi.useRealTimers();
@@ -373,7 +476,11 @@ test('persists the live room list for the next launch', async () => {
 test('defers room-list snapshot writes until presentation resumes', async () => {
   vi.useFakeTimers();
   const stored = stubLocalStorage();
-  const room = { room_id: '!live:example.org', name: 'Live' } as RoomListItemView;
+  const room = {
+    room_id: '!live:example.org',
+    name: 'Live',
+    display_name: 'Live',
+  } as RoomListItemView;
   const core = {
     session: { account_id: 'acct' },
     subscribeEvents: vi.fn(() => () => {}),
@@ -389,21 +496,26 @@ test('defers room-list snapshot writes until presentation resumes', async () => 
   roomList.setPresentationActive(false);
   await roomList.start();
   vi.advanceTimersByTime(1_000);
-  expect(stored.has('sable.room-list.acct')).toBe(false);
+  expect(stored.has('sable.room-list.v2.acct')).toBe(false);
 
   roomList.setPresentationActive(true);
-  expect(JSON.parse(stored.get('sable.room-list.acct') ?? '[]')).toEqual([room]);
+  expect(JSON.parse(stored.get('sable.room-list.v2.acct') ?? '{}')).toEqual({
+    rooms: [room],
+    sections: [],
+    badges: [],
+    quiet_rooms: [],
+  });
 
   roomList.stop();
   vi.useRealTimers();
 });
 
-test('looks rooms up by id and labels them by name, then alias, then id', () => {
+test('looks rooms up by id and labels them by what the core shows', () => {
   const roomList = new RoomList({} as CoreClient);
   roomList.rooms = [
-    { room_id: '!named:example.org', name: 'Named', canonical_alias: '#named:example.org' },
-    { room_id: '!aliased:example.org', name: null, canonical_alias: '#aliased:example.org' },
-    { room_id: '!bare:example.org', name: null, canonical_alias: null },
+    { room_id: '!named:example.org', display_name: 'Named' },
+    { room_id: '!aliased:example.org', display_name: '#aliased:example.org' },
+    { room_id: '!bare:example.org', display_name: '!bare:example.org' },
   ] as RoomListItemView[];
 
   expect(roomList.byId('!aliased:example.org')).toBe(roomList.rooms[1]);
@@ -414,22 +526,27 @@ test('looks rooms up by id and labels them by name, then alias, then id', () => 
   expect(roomList.labelFor('!bare:example.org')).toBe('!bare:example.org');
   expect(roomList.labelFor('!missing:example.org')).toBe('!missing:example.org');
 
-  roomList.rooms = [{ room_id: '!missing:example.org', name: 'Arrived' }] as RoomListItemView[];
+  roomList.rooms = [
+    { room_id: '!missing:example.org', display_name: 'Arrived' },
+  ] as RoomListItemView[];
   expect(roomList.labelFor('!missing:example.org')).toBe('Arrived');
 });
 
-test('a hidden room keeps its unread state and badges only its mentions', async () => {
+test('badges, quiet rooms and sections come from the core and replace each other', async () => {
   const quiet = withCounts({
     room_id: '!quiet:example.org',
     unread: 4,
     notifying: 4,
     highlight: 1,
     marked_unread: false,
-    space_children: [],
     notification: { room: null, default: 'all' },
   } as unknown as RoomListItemView);
+  const listeners: ((event: unknown) => void)[] = [];
   const core = {
-    subscribeEvents: vi.fn(() => () => {}),
+    subscribeEvents: vi.fn((listener: (event: unknown) => void) => {
+      listeners.push(listener);
+      return () => {};
+    }),
     rpc: {
       timeline: {
         subscribeRoomList: vi.fn(() => Promise.resolve({ subscription: 1, rooms: [quiet] })),
@@ -440,7 +557,19 @@ test('a hidden room keeps its unread state and badges only its mentions', async 
   const roomList = new RoomList(core);
 
   await roomList.start();
-  setQuiet(quiet.room_id, true);
+  expect(roomList.badgeUnreadFor(quiet)).toEqual({ unread: 0, highlight: 0, marked: false });
+  expect(roomList.section('home')).toBeUndefined();
+
+  const emit = (sections: ReturnType<typeof sectionsUpdate>) => {
+    for (const listener of listeners)
+      listener({ type: 'room_list_diff', subscription: 1, diffs: [], sections });
+  };
+  emit(
+    sectionsUpdate([sectionView('home', { rooms: [quiet.room_id] }), sectionView('direct')], {
+      badges: [badgeView(quiet.room_id, { unread: 1, highlight: 1 })],
+      quiet_rooms: [quiet.room_id],
+    })
+  );
 
   expect(roomList.unreadFor(quiet)).toEqual({
     unread: 4,
@@ -454,37 +583,30 @@ test('a hidden room keeps its unread state and badges only its mentions', async 
     marked: false,
     notifying: 0,
   });
+  expect(roomList.quietRoomIds).toEqual(new Set([quiet.room_id]));
+  expect(roomList.section('home')?.rooms).toEqual([quiet.room_id]);
 
-  setQuiet(quiet.room_id, false);
+  emit(sectionsUpdate([sectionView('home', { rooms: [] })], { removed: ['direct'] }));
+  expect(roomList.section('home')?.rooms).toEqual([]);
+  expect(roomList.section('direct')).toBeUndefined();
+  expect(roomList.badgeUnreadFor(quiet).unread).toBe(1);
+
+  emit(sectionsUpdate([], { badges: [], quiet_rooms: [] }));
+  expect(roomList.badgeUnreadFor(quiet).unread).toBe(0);
+  expect(roomList.quietRoomIds.size).toBe(0);
+
   roomList.stop();
 });
 
-test('badge defaults quiet group rooms while push stays all', async () => {
-  const group = withCounts({
-    room_id: '!group:example.org',
-    is_direct: false,
-    unread: 5,
-    notifying: 5,
-    highlight: 0,
-    marked_unread: false,
-    space_children: [],
-    notification: { room: null, default: 'all' },
-  } as unknown as RoomListItemView);
-  const dm = withCounts({
-    room_id: '!dm:example.org',
-    is_direct: true,
-    unread: 3,
-    notifying: 3,
-    highlight: 0,
-    marked_unread: false,
-    space_children: [],
-    notification: { room: null, default: 'all' },
-  } as unknown as RoomListItemView);
+test('subscribes with the room list options and resends them when they change', async () => {
+  const subscribeRoomList = vi.fn(() => Promise.resolve({ subscription: 1, rooms: [] }));
+  const setRoomListOptions = vi.fn(() => Promise.resolve());
   const core = {
     subscribeEvents: vi.fn(() => () => {}),
     rpc: {
       timeline: {
-        subscribeRoomList: vi.fn(() => Promise.resolve({ subscription: 1, rooms: [group, dm] })),
+        subscribeRoomList,
+        setRoomListOptions,
         unsubscribe: vi.fn(() => Promise.resolve()),
       },
     },
@@ -492,20 +614,12 @@ test('badge defaults quiet group rooms while push stays all', async () => {
   const roomList = new RoomList(core);
 
   await roomList.start();
+  const options = roomListOptions();
+  expect(subscribeRoomList).toHaveBeenCalledWith({ options });
+  expect(setRoomListOptions).not.toHaveBeenCalled();
 
-  expect(roomList.badgeUnreadFor(group)).toEqual({
-    unread: 5,
-    highlight: 0,
-    marked: false,
-    notifying: 0,
-  });
-  expect(roomList.badgeUnreadFor(dm)).toEqual({
-    unread: 3,
-    highlight: 0,
-    marked: false,
-    notifying: 3,
-  });
-
+  roomList.setOptions({ ...options, subspace_depth: options.subspace_depth + 1 });
+  expect(setRoomListOptions).toHaveBeenCalledTimes(1);
   roomList.stop();
 });
 

@@ -1,20 +1,29 @@
 // @vitest-environment happy-dom
 
-import { render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen } from '@testing-library/svelte';
 import { userEvent } from '@testing-library/user-event';
-import { expect, test, vi } from 'vitest';
+import { afterEach, expect, onTestFinished, test, vi } from 'vitest';
 
 vi.mock('#lib/core/context.js');
 
+import { core } from '#lib/core/__mocks__/context.js';
 import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
 import { formatMessageTimestamp } from '#lib/ui/date-time.js';
 
+import { mockStillFrames, STILL } from '#lib/test-support/still-frame.js';
 import ReadReceiptStack from './ReadReceiptStack.svelte';
+
+afterEach(() => {
+  core.fetchMedia.mockReset();
+  vi.restoreAllMocks();
+});
 
 const members = [
   {
     user_id: '@bob:example.org',
     display_name: 'Bob',
+    real_name: 'Bob',
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership: 'join' as const,
@@ -25,6 +34,8 @@ const members = [
   {
     user_id: '@carol:example.org',
     display_name: 'Carol',
+    real_name: 'Carol',
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership: 'join' as const,
@@ -33,6 +44,69 @@ const members = [
     service: false,
   },
 ];
+
+test.each(['article', 'div'])('receipt avatars play only on hover inside <%s>', async (tag) => {
+  const gif = new TextEncoder().encode('GIF89a');
+  core.fetchMedia.mockResolvedValue(gif);
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+    blob: () => Promise.resolve(new Blob([gif])),
+  } as Response);
+  mockStillFrames(URL.createObjectURL.bind(URL));
+  vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(32);
+  vi.spyOn(HTMLImageElement.prototype, 'naturalHeight', 'get').mockReturnValue(32);
+  const container = document.body.appendChild(document.createElement(tag));
+  onTestFinished(() => {
+    container.remove();
+  });
+  const source = `mxc://example.org/receipt-${tag}`;
+  render(
+    ReadReceiptStack,
+    {
+      target: container,
+      props: {
+        readers: [members[0].user_id],
+        members: [{ ...members[0], avatar_url: source }],
+        onOpen: () => {},
+      },
+    },
+    { wrapper: TooltipProvider }
+  );
+
+  const layers = () => container.querySelectorAll<HTMLElement>('.avatar-image');
+  await vi.waitFor(() => {
+    expect(layers()[0]?.querySelector('img')).not.toBeNull();
+  });
+  const thumbnail = layers()[0].querySelector('img');
+  if (!thumbnail) throw new Error('receipt picture not rendered');
+  await fireEvent.load(thumbnail);
+  await vi.waitFor(() => {
+    expect(thumbnail.getAttribute('src')).toBe(STILL);
+  });
+  expect(layers()).toHaveLength(1);
+  expect(core.fetchMedia).not.toHaveBeenCalledWith(source, 0, 0);
+
+  const hoverTarget = tag === 'article' ? container : container.querySelector('.avatar-root');
+  if (!hoverTarget) throw new Error('receipt hover target not rendered');
+  await fireEvent.pointerEnter(hoverTarget, { pointerType: 'touch' });
+  expect(layers()).toHaveLength(1);
+
+  await fireEvent.pointerEnter(hoverTarget, { pointerType: 'mouse' });
+  expect(layers()).toHaveLength(2);
+  expect(core.fetchMedia).toHaveBeenCalledWith(source, 0, 0);
+  await vi.waitFor(() => {
+    expect(layers()[1]?.querySelector('img')).not.toBeNull();
+  });
+  const animated = layers()[1].querySelector('img');
+  if (!animated) throw new Error('animated receipt picture not rendered');
+  await fireEvent.load(animated);
+  await vi.waitFor(() => {
+    expect(layers()[1]?.style.opacity).toBe('');
+  });
+
+  await fireEvent.pointerLeave(hoverTarget, { pointerType: 'mouse' });
+  expect(layers()).toHaveLength(1);
+  expect(thumbnail.getAttribute('src')).toBe(STILL);
+});
 
 test('opens profiles from each face', async () => {
   const user = userEvent.setup();
@@ -48,8 +122,8 @@ test('opens profiles from each face', async () => {
     { wrapper: TooltipProvider }
   );
 
-  const bob = screen.getByRole('button', { name: "Open Bob's profile" });
-  expect(screen.getByRole('button', { name: "Open Carol's profile" })).toBeInTheDocument();
+  const bob = screen.getByRole('button', { name: 'Open Bob’s profile' });
+  expect(screen.getByRole('button', { name: 'Open Carol’s profile' })).toBeInTheDocument();
   expect(screen.queryByText(/^\+/)).not.toBeInTheDocument();
 
   await user.click(bob);
@@ -94,6 +168,8 @@ test('caps faces and opens the list from overflow', async () => {
       members: many.map((user_id) => ({
         user_id,
         display_name: user_id,
+        real_name: user_id,
+        real_avatar_url: null,
         avatar_url: null,
         power_level: 0,
         membership: 'join' as const,
@@ -108,9 +184,9 @@ test('caps faces and opens the list from overflow', async () => {
     { wrapper: TooltipProvider }
   );
 
-  expect(document.querySelectorAll('.read-receipt-stack .avatar-root')).toHaveLength(3);
+  expect(document.querySelectorAll('.read-receipt-stack .avatar-root')).toHaveLength(2);
   const overflow = screen.getByRole('button', { name: /Open the list/ });
-  expect(overflow).toHaveTextContent('+9');
+  expect(overflow).toHaveTextContent('+10');
 
   await user.click(overflow);
   expect(anchor).toBe(overflow);
@@ -150,9 +226,9 @@ test('uses a single chip that opens the list on coarse pointers', async () => {
     { wrapper: TooltipProvider }
   );
 
-  const chip = screen.getByRole('button', { name: 'Seen by Bob, Carol. Open the list.' });
+  const chip = screen.getByRole('button', { name: 'Seen by Bob and Carol. Open the list.' });
   expect(chip).toHaveClass('chip');
-  expect(screen.queryByRole('button', { name: "Open Bob's profile" })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Open Bob’s profile' })).not.toBeInTheDocument();
 
   await user.click(chip);
   expect(anchor).toBe(chip);

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({ back: vi.fn() }));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 
+import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
 import { afterNavigate, goto } from '#lib/test-support/app-navigation.js';
 import { page, visit } from '#lib/test-support/app-state.js';
 vi.mock('$app/paths', () => ({
@@ -14,6 +15,7 @@ vi.mock('$app/paths', () => ({
 }));
 vi.mock('#lib/rooms/room-list.svelte.js', () => ({
   roomPathParamFromId: (roomId: string) => `param:${roomId}`,
+  roomPathParam: (room: RoomListItemView) => `param:${room.room_id}`,
   findRoomByPathId: (rooms: readonly RoomListItemView[], pathId: string | undefined) =>
     rooms.find((room) => room.room_id === pathId),
 }));
@@ -21,6 +23,7 @@ vi.mock('#lib/rooms/room-list.svelte.js', () => ({
 import {
   backToRoomList,
   contextSearchPath,
+  createRoomPath,
   goToPage,
   leaveRoomView,
   scopedSearchPath,
@@ -43,6 +46,7 @@ function enter(from: string | null, type = 'link', delta?: number): void {
 }
 
 test.each([
+  ['/home/room', {}, '/home'],
   ['/direct/room', {}, 'direct'],
   ['/space/space/room', { spaceId: '!space' }, '/space/param:!space'],
   ['/space/space/room', {}, '/rooms'],
@@ -57,7 +61,9 @@ test.each([
 });
 
 test('leaving a space room on desktop opens the lobby rather than the index', async () => {
-  vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+  vi.stubGlobal('window', {
+    matchMedia: (query: string) => ({ matches: query === BREAKPOINTS.wide }),
+  });
   page.url = new URL('https://app.test/space/space/room');
   page.params = { spaceId: '!space' };
 
@@ -146,30 +152,130 @@ test('the back arrow on a phone opens the drawer over the room rather than leavi
   expect(goto).toHaveBeenCalledExactlyOnceWith('', {
     shallow: true,
     replace: true,
-    state: { mobileDrawer: 'open' },
+    state: { mobileDrawer: 'open', mobileDrawerBack: false },
+    persistState: true,
   });
 });
 
-test.each([
-  ['/rooms/other', true],
-  ['/direct/other', true],
-  ['/space/space/other', true],
-  ['/space/space/lobby', false],
-  ['/rooms', false],
-])('on a phone, opening %s from a room replaces the entry: %s', (href, replaced) => {
+test.each(['/space/space/lobby', '/rooms'])('on a phone, opening %s from a room pushes', (href) => {
   page.url = new URL('https://app.test/rooms/room');
   page.params = { roomId: 'room' };
 
   goToPage(href);
 
-  expect(goto).toHaveBeenLastCalledWith(href, { replace: replaced });
+  expect(goto).toHaveBeenLastCalledWith(href, { replace: false, state: {}, persistState: true });
 });
 
-test('on a phone, opening a room from the room list pushes', () => {
-  page.url = new URL('https://app.test/rooms');
-  page.params = {};
+test.each([
+  ['/rooms', {}, '/rooms/room'],
+  ['/direct', {}, '/direct/room'],
+  ['/space/space', {}, '/space/space/room'],
+  ['/space/space/lobby', { mobileDrawer: 'open' as const }, '/space/space/room'],
+])('on a phone, opening a room from %s keeps it behind the drawer', async (from, state, href) => {
+  visit(from);
+  Object.assign(page.state, state);
+  goto.mockImplementationOnce((path, options) => {
+    visit(path, { roomId: 'room' });
+    Object.assign(page.state, options?.state);
+    return Promise.resolve();
+  });
+
+  goToPage(href);
+  await vi.waitFor(() => {
+    expect(goto).toHaveBeenCalledTimes(2);
+  });
+
+  expect(goto).toHaveBeenNthCalledWith(1, href, {
+    replace: false,
+    state: { mobileDrawer: 'open' },
+    persistState: true,
+  });
+  expect(goto).toHaveBeenNthCalledWith(2, '', {
+    shallow: true,
+    replace: false,
+    state: { mobileDrawer: 'closed', mobileDrawerBack: true },
+    persistState: true,
+  });
+});
+
+test.each([
+  ['the drawer over a room', { mobileDrawer: 'open' as const }, '/home/room'],
+  ['the drawer over a room', { mobileDrawer: 'open' as const }, '/rooms/room'],
+  ['the drawer over a room', { mobileDrawer: 'open' as const }, '/direct/room'],
+  ['the drawer over a room', { mobileDrawer: 'open' as const }, '/space/space/room'],
+  ['a room above the list', { mobileDrawerBack: true }, '/rooms/room'],
+  ['a room with no list behind it', {}, '/direct/room'],
+])('switching rooms from %s points the list entry at %s', async (_from, state, href) => {
+  visit('/space/space/previous', { spaceId: 'space', roomId: 'previous' });
+  Object.assign(page.state, state);
+  goto.mockImplementationOnce((path, options) => {
+    visit(path, { roomId: 'room' });
+    Object.assign(page.state, options?.state);
+    return Promise.resolve();
+  });
+
+  goToPage(href);
+  await vi.waitFor(() => {
+    expect(goto).toHaveBeenCalledTimes(2);
+  });
+
+  expect(goto).toHaveBeenNthCalledWith(1, href, {
+    replace: true,
+    state: { mobileDrawer: 'open' },
+    persistState: true,
+  });
+  expect(goto).toHaveBeenNthCalledWith(2, '', {
+    shallow: true,
+    replace: false,
+    state: { mobileDrawer: 'closed', mobileDrawerBack: true },
+    persistState: true,
+  });
+});
+
+test('a room switch that is superseded leaves the drawer alone', async () => {
+  visit('/rooms/previous', { roomId: 'previous' });
+  page.state.mobileDrawer = 'open';
+  goto.mockImplementationOnce(() => {
+    visit('/rooms/elsewhere', { roomId: 'elsewhere' });
+    return Promise.resolve();
+  });
 
   goToPage('/rooms/other');
+  await vi.waitFor(() => {
+    expect(goto).toHaveBeenCalledOnce();
+  });
+  await Promise.resolve();
 
-  expect(goto).toHaveBeenLastCalledWith('/rooms/other', { replace: false });
+  expect(goto).toHaveBeenCalledOnce();
+});
+
+test('opening the current room preserves the list entry', () => {
+  page.state.mobileDrawer = 'open';
+  page.state.overlay = 0;
+
+  goToPage('/rooms/room');
+
+  expect(goto).toHaveBeenCalledExactlyOnceWith('', {
+    shallow: true,
+    replace: false,
+    state: { mobileDrawer: 'closed', mobileDrawerBack: true, overlay: 0 },
+    persistState: true,
+  });
+});
+
+test('the back arrow reuses the list entry', () => {
+  page.state.mobileDrawerBack = true;
+
+  backToRoomList();
+
+  expect(mocks.back).toHaveBeenCalledOnce();
+  expect(goto).not.toHaveBeenCalled();
+});
+
+test('a room is created inside the open space only where you may add its children', () => {
+  const space = { room_id: '!space:example.org' } as RoomListItemView;
+
+  expect(createRoomPath([space], space, true)).toBe('/space/param:!space:example.org/create-room');
+  expect(createRoomPath([space], space, false)).toBe('create-room');
+  expect(createRoomPath([space], null, true)).toBe('create-room');
 });

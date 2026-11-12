@@ -1,6 +1,7 @@
 <script lang="ts">
   import QrCodeIcon from 'phosphor-svelte/lib/QrCodeIcon';
   import { fade } from 'svelte/transition';
+  import { page } from '$app/state';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
@@ -92,7 +93,9 @@
     offeredFlows?.password === true && (showAllLoginMethods || preferredLoginMethod === 'password')
   );
   let forgotPasswordHref = $derived(
-    offeredFlows?.password && !offeredFlows.oidc ? resetPasswordHref(displayedHomeserver) : null
+    offeredFlows?.password && !offeredFlows.oidc
+      ? resetPasswordHref(displayedHomeserver, page.url.searchParams.has('addAccount'))
+      : null
   );
   let hasLoginAction = $derived(loginFlows === null || preferredLoginMethod !== null);
   let userServerError = $state<string | null>(null);
@@ -114,6 +117,7 @@
   );
 
   const methodSlotId = $props.id();
+  const titleId = `${methodSlotId}-title`;
   // A combobox pick and the blur it causes both validate, so only the latest
   // answer may release the controls.
   let latestValidation = 0;
@@ -161,13 +165,13 @@
 <form
   class="login-form auth-card-surface"
   out:fade={{ duration: motionMs(MOTION_MS.quick) }}
-  aria-busy={isAuthenticating}
   novalidate
   onsubmit={(event) => {
     event.preventDefault();
     void submit();
   }}
 >
+  <h2 class="screen-reader-only" id={titleId}>{i18n.t('auth.signInTitle')}</h2>
   <FormField dense fieldId="homeserver" label={i18n.t('auth.accountProvider')}>
     <HomeserverPicker
       id="homeserver"
@@ -191,15 +195,18 @@
   </FormField>
 
   <AuthStatusSlot
-    loading={isCheckingHomeserver}
-    loadingMessage={i18n.t('auth.checkingProvider')}
+    loading={isCheckingHomeserver || isAuthenticating || isLaunchingLogin}
+    loadingMessage={i18n.t(isCheckingHomeserver ? 'auth.checkingProvider' : 'auth.signingIn')}
     message={statusMessage}
     tone={statusError ? 'error' : 'muted'}
   />
 
-  <div class="login-methods">
+  <div
+    class="login-methods"
+    aria-busy={isCheckingHomeserver || isAuthenticating || isLaunchingLogin}
+  >
     <div class={['method-slot', { 'action-slot': hasLoginAction }]} id={methodSlotId}>
-      {#if !loginFlows}
+      {#if !loginFlows && homeserver.trim() && !isCheckingHomeserver}
         <div class="actions">
           <Button
             type="submit"
@@ -306,9 +313,10 @@
       {i18n.t('auth.cancelAddingAccount')}
     </Button>
   {:else if onCreateAccount}
-    <span>{i18n.t('auth.noAccountYet')}</span>
+    <span id="login-no-account">{i18n.t('auth.noAccountYet')}</span>
     <Button
       variant="ghost"
+      aria-describedby="login-no-account"
       type="button"
       disabled={isLoginControlsDisabled}
       onclick={onCreateAccount}

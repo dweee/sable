@@ -42,10 +42,12 @@ for (const entry of ['sidebar', 'header'] as const) {
       await trigger.press('ArrowRight');
     }
 
-    await expect(page.getByRole('menuitem', { name: 'All messages', exact: true })).toBeVisible();
-    await expect(page.getByRole('menuitem', { name: 'Mentions and keywords' })).toBeVisible();
-    await expect(page.getByRole('menuitem', { name: 'Mute', exact: true })).toBeVisible();
-    await page.getByRole('menuitem', { name: 'All messages', exact: true }).click();
+    await expect(
+      page.getByRole('menuitemradio', { name: 'All messages', exact: true })
+    ).toBeVisible();
+    await expect(page.getByRole('menuitemradio', { name: 'Mentions and keywords' })).toBeVisible();
+    await expect(page.getByRole('menuitemradio', { name: 'Mute', exact: true })).toBeVisible();
+    await page.getByRole('menuitemradio', { name: 'All messages', exact: true }).click();
     await expect(trigger).not.toBeVisible();
   });
 }

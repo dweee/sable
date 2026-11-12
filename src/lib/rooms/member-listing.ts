@@ -1,7 +1,5 @@
 import type { MemberView, MembershipView } from '#src/generated/protocol';
 
-import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
-
 export type MemberSort = 'name-asc' | 'name-desc' | 'newest' | 'oldest';
 export type MembershipFilter = 'join' | 'invite' | 'knock' | 'leave' | 'kick' | 'ban';
 
@@ -35,12 +33,21 @@ export const MEMBERSHIP_FILTER_LABELS: Record<MembershipFilter, string> = {
   ban: 'timeline.memberFilterBanned',
 };
 
+export const MEMBERSHIP_FILTER_EMPTY_MESSAGES: Record<MembershipFilter, string> = {
+  join: 'timeline.noJoinedMembers',
+  invite: 'timeline.noInvitedMembers',
+  knock: 'timeline.noJoinRequests',
+  leave: 'timeline.noLeftMembers',
+  kick: 'timeline.noKickedMembers',
+  ban: 'timeline.noBannedMembers',
+};
+
 export function membershipFor(filter: MembershipFilter): MembershipView {
   return filter === 'kick' ? 'leave' : filter;
 }
 
 export function memberName(member: MemberView): string {
-  return profileOverrides.name(member.user_id, member.display_name ?? member.user_id);
+  return member.display_name ?? member.user_id;
 }
 
 export function matchesFilter(member: MemberView, filter: MembershipFilter): boolean {
@@ -63,8 +70,10 @@ function compare(sort: MemberSort): (left: MemberView, right: MemberView) => num
   }
 }
 
+const nameCollator = new Intl.Collator(undefined, { sensitivity: 'base' });
+
 function byName(left: MemberView, right: MemberView): number {
-  return memberName(left).localeCompare(memberName(right), undefined, { sensitivity: 'base' });
+  return nameCollator.compare(memberName(left), memberName(right));
 }
 
 export interface MemberGroup {
@@ -100,8 +109,8 @@ export function groupMembers(
   return groups;
 }
 
-export function limitGroups(groups: readonly MemberGroup[], limit: number): MemberGroup[] {
-  const limited: MemberGroup[] = [];
+export function limitGroups<T extends MemberGroup>(groups: readonly T[], limit: number): T[] {
+  const limited: T[] = [];
   let taken = 0;
   for (const group of groups) {
     if (taken >= limit) break;

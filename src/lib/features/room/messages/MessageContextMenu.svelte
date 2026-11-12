@@ -5,6 +5,7 @@
   import { i18n } from '#lib/i18n.js';
   import '#lib/ui/primitives/menu.css';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
   import { messageMenuRows } from './message-menu-items';
   import type { OpenMessageMenu } from './message-menu-open.svelte.js';
@@ -35,40 +36,41 @@
         class="menu-surface message-menu"
         {...overlayLayer()}
         loop
-        collisionPadding={8}
+        collisionPadding={collisionPadding(8)}
         customAnchor={anchor}
         preventScroll={false}
-        {@attach scrollHint}
       >
-        <IconContext values={{ 'aria-hidden': 'true' }}>
-          {#if actions.onReact}
-            {@const react = actions.onReact}
-            <MessageQuickReactions
-              count={4}
-              onReact={(emoji) => {
-                react(emoji);
-                menu.close();
-              }}
-              roomId={actions.roomId}
-            />
-          {/if}
-          {#each messageMenuRows(actions) as row (row.key)}
-            {@const RowIcon = row.icon}
-            {#if row.separated}
-              <ContextMenu.Separator class="menu-separator" />
+        <div class="menu-scroll-content" {@attach scrollHint}>
+          <IconContext values={{ 'aria-hidden': 'true' }}>
+            {#if actions.onReact}
+              {@const react = actions.onReact}
+              <MessageQuickReactions
+                count={4}
+                onReact={(emoji) => {
+                  react(emoji);
+                  menu.close();
+                }}
+                roomId={actions.roomId}
+              />
             {/if}
-            <ContextMenu.Item
-              class={[
-                'menu-item menu-item-trailing-icon',
-                row.destructive && 'menu-item-destructive',
-              ]}
-              onclick={row.run}
-            >
-              <RowIcon />
-              <span>{i18n.t(row.label)}</span>
-            </ContextMenu.Item>
-          {/each}
-        </IconContext>
+            {#each messageMenuRows(actions) as row (row.key)}
+              {@const RowIcon = row.icon}
+              {#if row.separated}
+                <ContextMenu.Separator class="menu-separator" />
+              {/if}
+              <ContextMenu.Item
+                class={[
+                  'menu-item menu-item-trailing-icon',
+                  row.destructive && 'menu-item-destructive',
+                ]}
+                onclick={row.run}
+              >
+                <RowIcon />
+                <span>{i18n.t(row.label)}</span>
+              </ContextMenu.Item>
+            {/each}
+          </IconContext>
+        </div>
       </ContextMenu.Content>
     </ContextMenu.Portal>
   {/if}

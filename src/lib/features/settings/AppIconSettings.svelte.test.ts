@@ -23,11 +23,11 @@ beforeEach(() => {
 });
 const user = userEvent.setup();
 
-const selectorTrigger = () => screen.getByRole('button', { name: 'App icon' });
+const selectorTrigger = () => screen.getByRole('combobox', { name: 'App icon' });
 
 async function setup(): Promise<HTMLElement> {
   render(AppIconSettings);
-  return screen.findByRole('button', { name: 'App icon' });
+  return screen.findByRole('combobox', { name: 'App icon' });
 }
 
 async function options(trigger: HTMLElement): Promise<HTMLElement[]> {
@@ -118,6 +118,26 @@ test('uses the current native icon on iOS', async () => {
   const trigger = await setup();
   expect(trigger).toHaveTextContent('Pride');
   expect(document.querySelector('.app-icons.android')).toBeNull();
+});
+
+test.each([
+  ['ukraine', 'Ukraine'],
+  ['palestine', 'Palestine'],
+  ['cuba', 'Cuba'],
+])('selects the %s app icon', async (icon, label) => {
+  vi.mocked(invoke).mockImplementation((command) =>
+    Promise.resolve(command === 'plugin:app-icon|get_available_icons' ? [icon] : null)
+  );
+  const trigger = await setup();
+  await user.click(trigger);
+  const choice = await screen.findByRole('option', { name: label });
+  await user.click(choice);
+  await vi.waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith('plugin:app-icon|set_icon', {
+      request: { icon },
+    });
+  });
+  expect(trigger).toHaveTextContent(label);
 });
 
 test('shows Default for an unknown native icon without resetting it', async () => {

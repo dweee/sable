@@ -1,6 +1,6 @@
-import type { RoomListItemView } from '#src/generated/protocol';
+import type { DirectoryRoomType, RoomListItemView } from '#src/generated/protocol';
 
-export type AddExistingKind = 'rooms' | 'spaces';
+export type AddExistingKind = DirectoryRoomType;
 
 export function addableChildren(
   rooms: readonly RoomListItemView[],
@@ -30,9 +30,9 @@ export function addableChildren(
     .filter(
       (room) =>
         needle === '' ||
-        [room.name, room.canonical_alias, room.room_id].some((field) =>
+        [room.display_name, room.canonical_alias, room.room_id].some((field) =>
           field?.toLowerCase().includes(needle)
         )
     )
-    .sort((left, right) => (left.name ?? left.room_id).localeCompare(right.name ?? right.room_id));
+    .sort((left, right) => left.display_name.localeCompare(right.display_name));
 }

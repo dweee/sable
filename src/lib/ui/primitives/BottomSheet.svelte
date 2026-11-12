@@ -212,7 +212,7 @@
       previousY = touch.clientY;
       previousTime = event.timeStamp;
       moved = deltaY;
-      dragOffset = Math.max(0, deltaY);
+      dragOffset = expandable ? deltaY : Math.max(0, deltaY);
     }
 
     function end(): void {
@@ -267,13 +267,13 @@
     : dismissing
       ? 'sheet-dismissing'
       : 'sheet-settling'}
-  contentStyle={`${background ? `background: ${background};` : ''} ${fullHeight || expanded ? 'height: calc(100dvh - var(--safe-top) - var(--space-300) * 2);' : ''} transform: translateY(${dismissing ? '100%' : `${String(dragOffset)}px`})`}
+  contentStyle={`${background ? `background: ${background};` : ''} ${fullHeight || expanded ? 'height: calc(100dvh - var(--safe-top) - var(--keyboard-overlap) - var(--space-300) * 2); overflow: hidden;' : ''} transform: translateY(${dismissing ? '100%' : `${String(dragOffset)}px`})`}
   {onOpenChange}
   {onOpenAutoFocus}
 >
   <div
     bind:this={body}
-    class={{ 'content-inset': contentInset, expanded }}
+    class={{ 'content-inset': contentInset, expanded, collapsed: !expanded && expandable }}
     role="presentation"
     onclickcapture={contentClick}
     onpointerdown={startContentDrag}
@@ -352,12 +352,21 @@
     padding: var(--control-height-large) 0 var(--space-400);
   }
 
+  .collapsed {
+    height: 16rem;
+  }
+
+  .collapsed,
   .expanded {
     display: flex;
     flex-direction: column;
+  }
+
+  .expanded {
     height: 100%;
   }
 
+  .collapsed > :global(*),
   .expanded > :global(*) {
     flex: 1 1 0;
     min-height: 0;

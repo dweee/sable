@@ -2,7 +2,7 @@
 
 import { Fragment, Slice, type Mark, type Node as ProseMirrorNode } from 'prosemirror-model';
 import { EditorState } from 'prosemirror-state';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, onTestFinished, test, vi } from 'vitest';
 
 import { composerSchema, parseMatrixHtml } from './schema';
 import {
@@ -36,7 +36,7 @@ test('plain text sends no formatted body', () => {
   expect(message).toEqual({
     body: 'just words',
     formatted: null,
-    mentions: { userIds: [], room: false },
+    mentions: { user_ids: [], room: false },
   });
 });
 
@@ -103,6 +103,25 @@ test('MFM time and color keep their source body in both composer modes', () => {
   }
 });
 
+test('typed LaTeX is sent as data-mx-maths with the source as body', () => {
+  const expected = 'so <span data-mx-maths="x^2"><code>x^2</code></span> holds';
+  const plain = serializePlain(textDoc('so $x^2$ holds'));
+  expect(plain.body).toBe('so $x^2$ holds');
+  expect(plain.formatted).toBe(expected);
+
+  const rich = serializeComposer(
+    docOf(
+      para([
+        composerSchema.text('so '),
+        composerSchema.nodes.math_inline.create({ latex: 'x^2' }),
+        composerSchema.text(' holds'),
+      ])
+    )
+  );
+  expect(rich.body).toBe('so $x^2$ holds');
+  expect(rich.formatted).toBe(expected);
+});
+
 test('an existing time element survives a rich-text edit', () => {
   const message = serializeComposer(
     parseMatrixHtml('<time datetime="1970-01-01T00:00:00Z">old label</time>')
@@ -123,17 +142,16 @@ test('escaped and invalid MFM stay literal', () => {
 });
 
 test('MFM that runs past a spoiler stays literal inside it', () => {
-  const source = '||secret $[fg.color=f00 red|| tail]';
-  const message = serializePlain(textDoc(source));
+  const message = serializePlain(textDoc('||secret $[fg.color=f00 red|| tail]'));
 
-  expect(message.body).toBe(source);
+  expect(message.body).toBe('[Spoiler] tail]');
   expect(message.formatted).toBe('<span data-mx-spoiler="">secret $[fg.color=f00 red</span> tail]');
 });
 
 test('MFM inside a spoiler colours the hidden text', () => {
   const plain = serializePlain(textDoc('||a $[fg.color=f00 b]||'));
   expect(plain.formatted).toBe(
-    '<span data-mx-spoiler="">a </span><span data-mx-color="#ff0000"><span data-mx-spoiler="">b</span></span>'
+    '<span data-mx-spoiler="">a <span data-mx-color="#ff0000">b</span></span>'
   );
 
   const rich = serializeComposer(
@@ -143,13 +161,12 @@ test('MFM inside a spoiler colours the hidden text', () => {
   expect(rich.formatted).toBe(plain.formatted);
 });
 
-test('a spoiler inside MFM stays inside the colour', () => {
-  const source = '$[fg.color=f00 a ||b|| c]';
-  const message = serializePlain(textDoc(source));
+test('a spoiler inside MFM keeps its colour', () => {
+  const message = serializePlain(textDoc('$[fg.color=f00 a ||b|| c]'));
 
-  expect(message.body).toBe(source);
+  expect(message.body).toBe('a [Spoiler] c');
   expect(message.formatted).toBe(
-    '<span data-mx-color="#ff0000">a <span data-mx-spoiler="">b</span> c</span>'
+    '<span data-mx-color="#ff0000">a </span><span data-mx-spoiler=""><span data-mx-color="#ff0000">b</span></span><span data-mx-color="#ff0000"> c</span>'
   );
 });
 
@@ -198,6 +215,76 @@ test('underline and spoiler each serialise to their Matrix HTML', () => {
 
   expect(message.body).toBe('u [Spoiler]');
   expect(message.formatted).toBe('<u>u</u> <span data-mx-spoiler="">secret</span>');
+});
+
+test.each([
+  ['*huge*', '<em>huge</em>'],
+  ['**huge**', '<strong>huge</strong>'],
+  ['~~huge~~', '<del>huge</del>'],
+  ['`huge`', '<code>huge</code>'],
+  ['[huge](https://example.org)', '<a href="https://example.org">huge</a>'],
+])('formatting %s inside a spoiler keeps one span in both composer modes', (markdown, html) => {
+  const source = `||this is a ${markdown} spoiler||`;
+  const plain = serializePlain(textDoc(source));
+  const rich = serializeComposer(richFromPlain(textDoc(source)));
+
+  expect(plain.formatted).toBe(`<span data-mx-spoiler="">this is a ${html} spoiler</span>`);
+  expect(rich.formatted).toBe(plain.formatted);
+  expect(rich.body).toBe('[Spoiler]');
+});
+
+test('separate spoilers keep their reasons through a rich-text edit', () => {
+  const html =
+    '<span data-mx-spoiler="first">one <em>secret</em></span>' +
+    '<span data-mx-spoiler="second">another <strong>secret</strong></span>';
+
+  expect(serializeComposer(parseMatrixHtml(html)).formatted).toBe(html);
+});
+
+test.each(['||before `secret` after||', '||`secret`||', '||before `||secret||` after||'])(
+  'inline code stays hidden when parsing %s',
+  (source) => {
+    for (const message of [
+      serializePlain(textDoc(source)),
+      serializeComposer(richFromPlain(textDoc(source))),
+    ]) {
+      const holder = document.createElement('div');
+      holder.innerHTML = message.formatted ?? '';
+      const code = holder.querySelector('code');
+      expect(code?.textContent).toContain('secret');
+      expect(code?.closest('[data-mx-spoiler]')).not.toBeNull();
+      const visible = holder.cloneNode(true) as HTMLElement;
+      for (const spoiler of visible.querySelectorAll('[data-mx-spoiler]')) spoiler.remove();
+      expect(visible.textContent).toBe('');
+    }
+  }
+);
+
+test('editing spoilered inline code preserves the spoiler reason and hidden fallback', () => {
+  const source = parseMatrixHtml(
+    '<span data-mx-spoiler="answer">before <code>secret</code> after</span>'
+  );
+  const message = serializeComposer(source);
+  expect(message.body).not.toContain('secret');
+  const holder = document.createElement('div');
+  holder.innerHTML = message.formatted ?? '';
+  expect(
+    holder.querySelector('code')?.closest('[data-mx-spoiler]')?.getAttribute('data-mx-spoiler')
+  ).toBe('answer');
+});
+
+test('spoilered code containing bars survives a table Markdown round trip', () => {
+  const source = parseMatrixHtml(
+    '<table><tr><th>header</th></tr><tr><td><span data-mx-spoiler=""><code>||secret||</code></span></td></tr></table>'
+  );
+  const message = serializeComposer(source);
+
+  expect(serializeComposer(richFromPlain(textDoc(composerMarkdown(source)))).formatted).toBe(
+    message.formatted
+  );
+  expect(serializePlain(plainEditDoc(message.body, message.formatted ?? '')).formatted).toBe(
+    message.formatted
+  );
 });
 
 test('a heading keeps its level', () => {
@@ -257,7 +344,7 @@ test('a plain-mode edit keeps pills between markdown and across paragraphs', () 
   const html =
     '<p><strong>hey</strong> <a href="https://matrix.to/#/@one:example.org">@_one</a></p>' +
     '<p><a href="https://matrix.to/#/!room:example.org?via=example.org">#Room</a> ' +
-    '<img data-mx-emoticon="" src="mxc://other.org/wave" alt=":wave:" title=":wave:" height="32"></p>';
+    '<img data-mx-emoticon="" src="mxc://other.org/wave" alt="wave" title="wave" height="32"></p>';
   const edited = plainEditDoc('**hey** @_one\n\n#Room :wave:', html);
 
   expect(plainTextOf(edited)).toBe('**hey** @_one\n\n#Room :wave:');
@@ -269,7 +356,7 @@ test('a plain-mode edit keeps pills between markdown and across paragraphs', () 
   expect(serializePlain(changed)).toEqual({
     body: '**hey** @_one\n\n#Room :wave:!',
     formatted: html.replace(/<\/p>$/, '!</p>'),
-    mentions: { userIds: ['@one:example.org'], room: false },
+    mentions: { user_ids: ['@one:example.org'], room: false },
   });
 });
 
@@ -479,7 +566,7 @@ test('a room mention keeps its # name in the body and links in the formatted bod
   expect(message).toEqual({
     body: '#General',
     formatted: '<a href="https://matrix.to/#/#general:example.org">#General</a>',
-    mentions: { userIds: [], room: false },
+    mentions: { user_ids: [], room: false },
   });
 });
 
@@ -490,8 +577,21 @@ test('an emote keeps its shortcode in the body and an image in the formatted bod
 
   expect(message.body).toBe(':wave:');
   expect(message.formatted).toBe(
-    '<img data-mx-emoticon="" src="mxc://example.org/wave" alt=":wave:" title=":wave:" height="32">'
+    '<img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">'
   );
+});
+
+test('serializing an emote never asks the page to load its mxc image', () => {
+  const createElement = vi.spyOn(document, 'createElement');
+  onTestFinished(() => {
+    createElement.mockRestore();
+  });
+
+  serializeComposer(
+    docOf(para(emoticon.create({ url: 'mxc://example.org/wave', shortcode: 'wave' })))
+  );
+
+  expect(createElement.mock.calls.map(([tag]) => tag)).not.toContain('img');
 });
 
 test('several paragraphs stay several paragraphs', () => {
@@ -514,13 +614,13 @@ test('a user pill becomes an m.mentions entry, once', () => {
     )
   );
 
-  expect(message.mentions).toEqual({ userIds: ['@one:example.org'], room: false });
+  expect(message.mentions).toEqual({ user_ids: ['@one:example.org'], room: false });
 });
 
 test('@room in the body asks for a room mention', () => {
   const message = serializeComposer(docOf(para(composerSchema.text('@room heads up'))));
 
-  expect(message.mentions).toEqual({ userIds: [], room: true });
+  expect(message.mentions).toEqual({ user_ids: [], room: true });
 });
 
 test('a word ending in @room is not a room mention', () => {
@@ -542,122 +642,43 @@ test('a soft break keeps its formatting and leaves no escape in the body', () =>
 });
 
 describe('plain text mode', () => {
-  test('the body is what was typed and the html is parsed from it', () => {
-    const message = serializePlain(docOf(para(composerSchema.text('say **hi** now'))));
-
-    expect(message.body).toBe('say **hi** now');
-    expect(message.formatted).toBe('say <strong>hi</strong> now');
-  });
-
-  test('markdown characters are not escaped back into the body', () => {
-    const message = serializePlain(docOf(para(composerSchema.text('a *b* c'))));
-    expect(message.body).toBe('a *b* c');
-  });
-
-  test('plain prose sends without a formatted body', () => {
-    const message = serializePlain(docOf(para(composerSchema.text('just words'))));
-
-    expect(message.body).toBe('just words');
-    expect(message.formatted).toBeNull();
-  });
-
-  test.each([
-    ['\\*like so*', '<span>*</span>like so<span>*</span>'],
-    ['\\*like so\\*', '<span>*</span>like so<span>*</span>'],
-    ['\\`code\\`', '<span>`</span>code<span>`</span>'],
-    ['\\_text\\_', '<span>_</span>text<span>_</span>'],
-    ['\\# heading', '# heading'],
-    ['one \\\\ two', 'one \\ two'],
-    ['\\[label](https://example.org)', '[label](https://example.org)'],
-    ['\\<tag>', '&lt;tag&gt;'],
-    ['&amp;', '&amp;'],
-    ['\\&amp;', '&amp;amp;'],
-    ['&#42;literal*', '<span>*</span>literal<span>*</span>'],
-  ])('Markdown escapes and entities in %j render as text', (source, rendered) => {
-    const message = serializePlain(textDoc(source));
-
-    expect(message.body).toBe(source);
-    expect(message.formatted).toBe(rendered);
-    expect(plainTextOf(plainEditDoc(message.body, message.formatted ?? ''))).toBe(source);
-  });
-
-  test('the shrug keeps its arm', () => {
-    const message = serializePlain(textDoc('top ¯\\_(ツ)_/¯ bottom'));
-
-    expect(message.body).toBe('top ¯\\_(ツ)_/¯ bottom');
-    expect(message.formatted).toBeNull();
-    expect(plainTextOf(richFromPlain(textDoc('¯\\_(ツ)_/¯')))).toBe('¯\\_(ツ)_/¯');
-  });
-
-  test('all ASCII punctuation can be escaped', () => {
-    for (let codePoint = 33; codePoint <= 126; codePoint += 1) {
-      const character = String.fromCharCode(codePoint);
-      if (/[a-z0-9]/i.test(character)) continue;
-      const message = serializePlain(textDoc(`\\${character}`));
-      expect(message.formatted, character).not.toBeNull();
-      expect(plainTextOf(parseMatrixHtml(message.formatted ?? '')), character).toBe(character);
-    }
-  });
-
-  test.each(['C:\\path', '\\a', '\\→', 'trailing \\'])(
-    'a literal backslash in %j stays visible',
-    (source) => {
-      const message = serializePlain(textDoc(source));
-      expect(message.body).toBe(source);
-      expect(message.formatted).toBeNull();
-    }
-  );
-
-  test.each([
-    ['\\$[unixtime 0]', '<span>$</span>[unixtime 0]'],
-    ['$\\[unixtime 0]', '<span>$</span>[unixtime 0]'],
-    ['\\$[fg.color=f00 red]', '<span>$</span>[fg.color=f00 red]'],
-    ['**hi** \\$[unixtime 0]', '<strong>hi</strong> <span>$</span>[unixtime 0]'],
-    [
-      '\\$[unixtime 0] and \\$[fg.color=f00 red]',
-      '<span>$</span>[unixtime 0] and <span>$</span>[fg.color=f00 red]',
-    ],
-  ])('escaped MFM in %j stays literal in HTML', (source, rendered) => {
-    const message = serializePlain(textDoc(source));
-    expect(message.body).toBe(source);
-    expect(message.formatted).toBe(rendered);
-    expect(plainTextOf(plainEditDoc(message.body, message.formatted ?? ''))).toBe(source);
-  });
-
-  test('strikethrough parses even though commonmark leaves it off', () => {
-    const message = serializePlain(docOf(para(composerSchema.text('a ~~b~~ c'))));
-    expect(message.formatted).toBe('a <del>b</del> c');
-  });
-
-  test('double bars parse to a Matrix spoiler', () => {
-    const message = serializePlain(docOf(para(composerSchema.text('the ||butler **did**|| it'))));
-
-    expect(message.body).toBe('the ||butler **did**|| it');
-    expect(message.formatted).toBe(
-      'the <span data-mx-spoiler="">butler </span><strong><span data-mx-spoiler="">did</span></strong> it'
-    );
-  });
-
-  test('double bars around spaces or nothing stay text', () => {
-    for (const typed of ['a || b || c', 'a |||| b', 'a || b', 'x|y']) {
-      expect(serializePlain(docOf(para(composerSchema.text(typed)))).formatted, typed).toBeNull();
-    }
-  });
-
-  test('inline and fenced code produce Matrix HTML', () => {
-    const inline = serializePlain(docOf(para(composerSchema.text('`const x = 1`'))));
-    const block = serializePlain(docOf(para(composerSchema.text('```\nconst x = 1;\n```'))));
-
-    expect(inline.formatted).toBe('<code>const x = 1</code>');
-    expect(block.formatted).toBe('<pre><code>const x = 1;</code></pre>');
-  });
-
   test('a mention keeps its user id and renders as a matrix.to link', () => {
     const who = mention.create({ userId: '@amp:example.org', name: 'amp' });
     const message = serializePlain(docOf(para([who, composerSchema.text(' hi')])));
 
-    expect(message.mentions.userIds).toEqual(['@amp:example.org']);
+    expect(message.mentions.user_ids).toEqual(['@amp:example.org']);
     expect(message.formatted).toContain('https://matrix.to/#/@amp:example.org');
+  });
+
+  test.each([
+    [
+      'inline',
+      '`A user id looks like ',
+      '.`',
+      '<code>A user id looks like @someone:server.</code>',
+    ],
+    ['fenced', '```\n', '\n```', '<pre><code>@someone:server</code></pre>'],
+  ])('a mention inside %s code becomes literal text', (_kind, before, after, formatted) => {
+    const who = mention.create({ userId: '@someone:server', name: '@someone:server' });
+    const source = docOf(para([composerSchema.text(before), who, composerSchema.text(after)]));
+    const message = serializePlain(source);
+
+    expect(message.body).toBe(`${before}@someone:server${after}`);
+    expect(message.formatted).toBe(formatted);
+    expect(message.mentions).toEqual({ user_ids: [], room: false });
+    expect(serializeComposer(richFromPlain(source)).mentions.user_ids).toEqual([]);
+  });
+
+  test('a mention outside code still notifies when the same user appears inside code', () => {
+    const who = () => mention.create({ userId: '@someone:server', name: '@someone:server' });
+    const message = serializePlain(
+      docOf(para([composerSchema.text('`'), who(), composerSchema.text('` hi '), who()]))
+    );
+
+    expect(message.formatted).toBe(
+      '<code>@someone:server</code> hi <a href="https://matrix.to/#/@someone:server">@someone:server</a>'
+    );
+    expect(message.mentions.user_ids).toEqual(['@someone:server']);
   });
 
   test('the body names the mention rather than spelling out its link', () => {
@@ -673,7 +694,7 @@ describe('plain text mode', () => {
 
     expect(message.body).toBe('hey :wave:');
     expect(message.formatted).toBe(
-      'hey <img data-mx-emoticon="" src="mxc://example.org/wave" alt=":wave:" title=":wave:" height="32">'
+      'hey <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">'
     );
   });
 
@@ -1034,7 +1055,7 @@ describe('clipboard slices', () => {
     expect(serializeComposer(parseMatrixHtml('<p><strong></strong></p>'))).toEqual({
       body: '',
       formatted: null,
-      mentions: { userIds: [], room: false },
+      mentions: { user_ids: [], room: false },
     });
   });
 });

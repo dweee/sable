@@ -23,7 +23,7 @@
     "joinConversationDescription": "ระบุที่อยู่ของห้องหรือ ID ผู้ใช้ Matrix เพื่อเริ่มแชท"
   },
   "auth": {
-    "welcome": "ยินดีต้อนรับสู่ Sable",
+    "welcome": "ยินดีต้อนรับสู่ {{appName}}",
     "welcomeBack": "ยินดีต้อนรับกลับ",
     "accountProvider": "ผู้ให้บริการบัญชี",
     "checkingProvider": "กำลังตรวจสอบผู้ให้บริการ…",
@@ -79,7 +79,6 @@
   },
   "direct": {
     "description": "เริ่มการแชทแบบส่วนตัวที่มีการเข้ารหัสโดยระบุ ID ผู้ใช้",
-    "userIdLabel": "ID ผู้ใช้",
     "submit": "เริ่มแชท"
   },
   "room": {
@@ -240,22 +239,22 @@
     "addAccount": "เพิ่มบัญชี",
     "directMessages": "ข้อความส่วนตัว",
     "markAsRead": "ทำเครื่องหมายว่าอ่านแล้ว",
-    "createSpace": "สร้างห้อง",
     "viewSource": "ดูซอร์สโค้ด",
-    "startingSable": "กำลังเริ่ม Sable…",
+    "startingSable": "กำลังเริ่ม {{appName}}…",
     "sourceCode": "ซอร์สโค้ด",
     "searchMessages": "ค้นหาข้อความ",
     "searchRooms": "ค้นหาห้อง",
     "createARoom": "สร้างห้อง",
-    "endtoendEncryption": "การเข้ารหัสแบบต้นทางถึงปลายทาง",
+    "endToEndEncryption": "การเข้ารหัสแบบต้นทางถึงปลายทาง",
     "askToJoin": "ขอเข้าร่วม",
     "invitePeople": "เชิญผู้คน",
     "join": "เข้าร่วม",
-    "theRoomCouldNotBeJoined": "ไม่สามารถเข้าร่วมห้องได้",
+    "roomJoinFailed": "ไม่สามารถเข้าร่วมห้องได้",
     "back": "กลับ",
     "copy": "คัดลอก",
     "copied": "คัดลอกแล้ว",
     "download": "ดาวน์โหลด",
-    "iUnderstandThisCannotBeUndone": "ฉันเข้าใจว่าการดำเนินการนี้ไม่สามารถย้อนกลับได้"
+    "confirmIrreversible": "ฉันเข้าใจว่าการดำเนินการนี้ไม่สามารถย้อนกลับได้",
+    "createSpace": "สร้างพื้นที่"
   }
 }

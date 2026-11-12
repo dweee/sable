@@ -28,6 +28,7 @@
   import SignOutWarningDialog from './SignOutWarningDialog.svelte';
   import '#lib/ui/primitives/nav-tab.css';
   import './sidebar-tools.css';
+  import QrLinkDialog from '../qr-login/QrLinkDialog.svelte';
 
   type Mode = 'mobile' | 'compact' | 'desktop';
 
@@ -42,6 +43,7 @@
   const signOut = new SignOutGuard(core);
   let switching = $state(false);
   let accountSwitching = $state(true);
+  let linkingDevice = $state(false);
   let logoutAccountId = $state<string | null>(null);
   let accountToLogout = $derived(
     core.accounts.find((account) => account.account_id === logoutAccountId) ?? null
@@ -94,6 +96,10 @@
     void goto(resolve(`settings/${section}`), { shallow: true, state: { settings: { section } } });
   }
 
+  function linkDevice(): void {
+    linkingDevice = true;
+  }
+
   async function logoutAccount(accountId: string): Promise<void> {
     if (switching) return;
 
@@ -133,7 +139,7 @@
 </script>
 
 {#snippet ownAvatar()}
-  <Avatar size="small" src={avatarUrl} name={displayName} alt={displayName} />
+  <Avatar size="small" src={avatarUrl} name={displayName} alt={displayName} refreshOnResume />
   {#if ownPresence}
     <PresenceDot
       presence={ownPresence}
@@ -174,6 +180,7 @@
             : 'desktop-tool nav-tab-bottom'}"
           aria-label={i18n.t('nav.switchAccount')}
         >
+          <span class="nav-tab-hit-area" aria-hidden="true"></span>
           {@render ownAvatar()}
         </button>
       {/snippet}
@@ -203,7 +210,8 @@
                   >{userStatus?.emoji}</span
                 >{/if}
               {#if userStatus?.text}{userStatus?.text}{:else}<span
-                  class="account-profile-status-placeholder">{i18n.t('common.whatAreYouUpTo')}</span
+                  class="account-profile-status-placeholder"
+                  >{i18n.t('common.statusPlaceholder')}</span
                 >{/if}
             </p>
           </button>
@@ -216,6 +224,7 @@
         {switching}
         onSwitch={switchAccount}
         onProfile={openProfile}
+        onLinkDevice={linkDevice}
         onLogoutAccount={requestLogout}
         onReauth={reauthenticate}
         onLogout={logout}
@@ -231,6 +240,8 @@
     trigger={profileTrigger}
   />
 {/if}
+
+<QrLinkDialog bind:open={linkingDevice} mode="grant" />
 
 <DialogFrame
   open={accountToLogout !== null}

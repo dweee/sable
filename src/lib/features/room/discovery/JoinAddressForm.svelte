@@ -1,10 +1,9 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { resolve } from '$app/paths';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
-  import { joinOrOfferKnock, knockPagePath } from '#lib/rooms/join-or-knock.js';
-  import { roomPathParamFromId } from '#lib/rooms/room-list.svelte.js';
+  import { joinErrorMessage } from '#lib/rooms/join-errors.js';
+  import { joinOrKnockPath, joinOrOfferKnock } from '#lib/rooms/join-or-knock.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import FormField from '#lib/ui/primitives/FormField.svelte';
@@ -17,7 +16,7 @@
   let address = $state('');
   let joining = $state(false);
   let invalid = $state(false);
-  let failed = $state(false);
+  let failed = $state<string | null>(null);
 
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
@@ -25,20 +24,17 @@
 
     const parsed = parseJoinAddress(address);
     invalid = parsed === null;
-    failed = false;
+    failed = null;
     if (!parsed) return;
 
     joining = true;
     try {
       const result = await joinOrOfferKnock(core.rpc, parsed.address, parsed.via);
-      await goto(
-        result.kind === 'knock'
-          ? knockPagePath(result.address, result.via)
-          : resolve('/(app)/rooms/[roomId]', { roomId: roomPathParamFromId(result.roomId) })
-      );
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- joinOrKnockPath() resolves the route itself
+      await goto(joinOrKnockPath(result));
     } catch (error) {
       console.warn('[sable room] join failed', error);
-      failed = true;
+      failed = joinErrorMessage(error);
     } finally {
       joining = false;
     }
@@ -73,7 +69,7 @@
   </FormField>
 
   {#if failed}
-    <Alert variant="critical" role="alert">{i18n.t('common.theRoomCouldNotBeJoined')}</Alert>
+    <Alert variant="critical" role="alert">{failed}</Alert>
   {/if}
 
   <Button type="submit" variant="primary" loading={joining} disabled={address.trim() === ''}>

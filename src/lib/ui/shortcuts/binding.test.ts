@@ -14,6 +14,7 @@ import {
 function event(overrides: Partial<Parameters<typeof matchesBinding>[1]> = {}) {
   return {
     key: 'a',
+    code: 'KeyA',
     ctrlKey: false,
     metaKey: false,
     altKey: false,
@@ -141,11 +142,11 @@ test('an overlay that only carries the dialog role is detected', () => {
   dialog.remove();
 });
 
-test('identical bindings in the same scope conflict', () => {
+test('identical bindings conflict', () => {
   const conflicts = findShortcutConflicts(
     [
-      { id: 'a', binding: 'mod+shift+n', scope: 'global' },
-      { id: 'b', binding: 'shift+mod+n', scope: 'global' },
+      { id: 'a', binding: 'mod+shift+n' },
+      { id: 'b', binding: 'shift+mod+n' },
     ],
     false
   );
@@ -155,23 +156,11 @@ test('identical bindings in the same scope conflict', () => {
   expect(conflicts[0]?.[1].id).toBe('b');
 });
 
-test('the same binding in different scopes does not conflict', () => {
-  const conflicts = findShortcutConflicts(
-    [
-      { id: 'a', binding: 'mod+f', scope: 'global' },
-      { id: 'b', binding: 'mod+f', scope: 'composer' },
-    ],
-    false
-  );
-
-  expect(conflicts).toHaveLength(0);
-});
-
 test('mod resolves to the platform modifier before comparing', () => {
   const conflicts = findShortcutConflicts(
     [
-      { id: 'a', binding: 'mod+k', scope: 'global' },
-      { id: 'b', binding: 'ctrl+k', scope: 'global' },
+      { id: 'a', binding: 'mod+k' },
+      { id: 'b', binding: 'ctrl+k' },
     ],
     false
   );
@@ -207,6 +196,19 @@ test('reports a modifier-only event as unbindable', () => {
 
 test('keeps a mac control press distinct from the command modifier', () => {
   expect(bindingFromEvent(event({ key: 'p', ctrlKey: true }), true)).toBe('ctrl+p');
+});
+
+test('keeps numpad keys apart from their main-row twins', () => {
+  const numpadDot = event({ key: '.', code: 'NumpadDecimal' });
+  expect(bindingFromEvent(numpadDot, false)).toBe('numdec');
+  expect(matchesBinding('numdec', numpadDot, false)).toBe(true);
+  expect(matchesBinding('.', numpadDot, false)).toBe(false);
+  expect(matchesBinding('numdec', event({ key: '.', code: 'Period' }), false)).toBe(false);
+});
+
+test('formats numpad keys', () => {
+  expect(formatBinding('numdec', false)).toBe('Num .');
+  expect(formatBinding('mod+num7', false)).toBe('Ctrl+Num 7');
 });
 
 describe('toProseMirrorKey', () => {

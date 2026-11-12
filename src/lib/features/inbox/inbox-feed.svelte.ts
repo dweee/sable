@@ -10,6 +10,7 @@ export class InboxFeed {
   loaded = $state(false);
   backfilling = $state(false);
   checked = $state(false);
+  olderHistory = $state(true);
   #loadFailed = $state(false);
   #backfillFailed = $state(false);
   failed = $derived(this.#loadFailed || this.#backfillFailed);
@@ -18,21 +19,32 @@ export class InboxFeed {
   #running: Promise<void> | null = null;
   #disposed = false;
 
-  constructor(private readonly commands: InboxFeedCommands) {}
+  /** A feed for `roomId` counts `limit` in events instead of rooms. */
+  constructor(
+    private readonly commands: InboxFeedCommands,
+    private readonly roomId: string | null = null
+  ) {}
 
-  async load(filter: InboxFilter, includeRead: boolean, limit: number): Promise<void> {
+  async load(filter: InboxFilter, includeRead: boolean, limit: number, query = ''): Promise<void> {
     if (this.#disposed) return;
     const revision = ++this.#revision;
     try {
-      let queryLimit = limit * NOTIFICATION_GROUP_LIMIT;
+      let queryLimit = this.roomId === null ? limit * NOTIFICATION_GROUP_LIMIT : limit;
       for (;;) {
         const page = await this.commands.inbox({
           filter,
           include_read: includeRead,
           limit: queryLimit,
           before_ts: null,
+          room_id: this.roomId,
+          query: query === '' ? null : query,
         });
         if (revision !== this.#revision) return;
+        if (this.roomId !== null) {
+          this.items = page.items;
+          this.hasMore = page.has_more;
+          break;
+        }
         const groups = new SvelteSet(page.items.map((item) => item.room_id)).size;
         if (page.has_more && groups < limit && page.items.length >= queryLimit) {
           queryLimit *= 2;
@@ -75,7 +87,11 @@ export class InboxFeed {
     try {
       let more: boolean;
       do {
-        const page = await this.commands.backfillInbox({ include_read: includeRead });
+        const page = await this.commands.backfillInbox({
+          include_read: includeRead,
+          room_id: this.roomId,
+        });
+        if (includeRead) this.olderHistory = page.has_more;
         more = !includeRead && page.has_more;
       } while (more && !this.#disposed);
     } catch (error) {

@@ -62,13 +62,88 @@ test('mobile reports current when the manifest is not newer', async () => {
   await expect(checkForMobileUpdate()).resolves.toBe(false);
 });
 
-test('fork builds never request or install upstream updates', async () => {
-  vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '1');
-  const fetch = vi.fn();
-  vi.stubGlobal('fetch', fetch);
-  const { checkForMobileUpdate, checkForUpdate, supportsAutoUpdate } = await load();
-  expect(supportsAutoUpdate()).toBe(false);
-  await expect(checkForMobileUpdate()).resolves.toBe(false);
-  await expect(checkForUpdate()).resolves.toBeNull();
-  expect(fetch).not.toHaveBeenCalled();
+test.each([
+  ['1.2.3-nightly.9', '1.2.3-nightly.10', true],
+  ['1.2.3-nightly.10', '1.2.3', true],
+  ['1.2.3', '1.2.3-nightly.10', false],
+  ['1.2.3', 'v1.2.4', true],
+  ['1.2.3', '1.2', false],
+])('mobile compares %s with %s using SemVer precedence', async (current, latest, newer) => {
+  vi.stubEnv('VITE_APP_VERSION', current);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({ ok: true, json: () => ({ version: latest }) })
+  );
+  const { checkForMobileUpdate } = await load();
+  await expect(checkForMobileUpdate()).resolves.toBe(newer);
 });
+
+test.each([
+  ['1.2.3', '1.2.4', true],
+  ['1.2.3', '1.2.3', false],
+  ['1.2.3-nightly.261102101830.g1f8e484fbccb', '1.2.3-nightly.261102225045.g31a82d40d5f4', true],
+  ['1.2.3', null, false],
+])('a packaged desktop build on %s compares against %s', async (current, latest, newer) => {
+  vi.stubEnv('VITE_APP_VERSION', current);
+  vi.stubGlobal('sableElectron', { latestVersion: () => Promise.resolve(latest) });
+
+  const { checkForPackagedUpdate } = await load();
+
+  await expect(checkForPackagedUpdate()).resolves.toBe(newer ? latest : null);
+});
+
+test.each([
+  ['linux', false, true],
+  ['darwin', false, false],
+  ['win32', true, true],
+])('desktop checks on %s with self updates %s are %s', async (platform, automatic, supported) => {
+  vi.stubGlobal('sableElectron', { platform });
+  vi.stubGlobal('__SABLE_AUTO_UPDATE__', automatic);
+
+  const { supportsDesktopUpdateChecks } = await load();
+
+  expect(supportsDesktopUpdateChecks()).toBe(supported);
+});
+
+test.each(['android', 'ios'])(
+  'fork %s builds never request upstream mobile releases',
+  async (os) => {
+    mocks.osType.mockReturnValue(os);
+    vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '1');
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const { checkForMobileUpdate } = await load();
+    await expect(checkForMobileUpdate()).resolves.toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  }
+);
+
+test.each(['linux', 'darwin', 'win32'])(
+  'fork %s builds do not query, download or install upstream desktop updates',
+  async (platform) => {
+    vi.stubEnv('VITE_SABLE_DISABLE_UPDATER', '1');
+    const bridge = {
+      platform,
+      latestVersion: vi.fn(),
+      checkForUpdate: vi.fn(),
+      downloadUpdate: vi.fn(),
+      installUpdate: vi.fn(),
+    };
+    const fetch = vi.fn();
+    vi.stubGlobal('sableElectron', bridge);
+    vi.stubGlobal('__SABLE_AUTO_UPDATE__', true);
+    vi.stubGlobal('fetch', fetch);
+    const updater = await load();
+    expect(updater.supportsAutoUpdate()).toBe(false);
+    expect(updater.supportsDesktopUpdateChecks()).toBe(false);
+    await expect(updater.checkForMobileUpdate()).resolves.toBe(false);
+    await expect(updater.checkForPackagedUpdate()).resolves.toBeNull();
+    await expect(updater.checkForUpdate()).resolves.toBeNull();
+    await updater.relaunchApp();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(bridge.latestVersion).not.toHaveBeenCalled();
+    expect(bridge.checkForUpdate).not.toHaveBeenCalled();
+    expect(bridge.downloadUpdate).not.toHaveBeenCalled();
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+  }
+);

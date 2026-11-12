@@ -1,25 +1,37 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import { Popover } from 'bits-ui';
   import UserSwitchIcon from 'phosphor-svelte/lib/UserSwitchIcon';
 
-  import type { PerMessageProfileView, PersonaView } from '#src/generated/protocol';
+  import type {
+    PerMessageProfileView,
+    PersonaView,
+    PersonaAlternateAvatarView,
+  } from '#src/generated/protocol';
 
   import { page } from '$app/state';
+  import { useCoreClient } from '#lib/core/context.js';
   import MessageReproxyDialog from '#lib/features/room/messages/MessageReproxyDialog.svelte';
   import { i18n } from '#lib/i18n.js';
-  import { resolvePersona } from '#lib/personas/persona.js';
+  import {
+    alternateAvatarId,
+    heldSelection,
+    resolvePersona,
+    type ProxyMatch,
+    type SelectionScope,
+  } from '#lib/personas/persona.js';
   import { usePersonaStore } from '#lib/personas/personas.svelte.js';
+  import { UserProfile } from '#lib/profile/user-profile.svelte.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import BottomSheet from '#lib/ui/primitives/BottomSheet.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
 
-  import PersonaMenu, { type PersonaScope } from './PersonaMenu.svelte';
+  import PersonaMenu from './PersonaMenu.svelte';
   import { personaSpaces } from './persona-spaces.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
 
@@ -30,41 +42,40 @@
       current: PerMessageProfileView | null;
       onChoose: (persona: PersonaView | null) => void;
     };
+    shorthandHint?: ProxyMatch;
   }
 
-  let { roomId, onBeforeOpen, edit }: Props = $props();
+  let { roomId, onBeforeOpen, edit, shorthandHint }: Props = $props();
   const personas = usePersonaStore();
+  const core = useCoreClient();
+  const ownProfile = new UserProfile(core, () => core.session?.user_id);
+  let account = $derived.by(() => {
+    const id = core.session?.user_id;
+    if (!id) return null;
+    const profile = ownProfile.current;
+    return { id, name: profile?.display_name ?? id, avatarUrl: profile?.avatar_url ?? null };
+  });
   const roomList = useRoomList();
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
 
   let desktop = $derived(appLayout.current);
   let open = $state(false);
   let spaces = $derived(personaSpaces(roomList.rooms, roomId, page.params.spaceId));
   let hasSpace = $derived(spaces.target !== null);
 
-  function getScopeToOpen() {
-    if (personas.associationFor(roomId) !== undefined) {
-      return 'room';
-    } else if (hasSpace && spaces?.target && personas.associationFor(spaces.target) !== undefined) {
-      return 'space';
-    } else {
-      return 'account';
-    }
-  }
+  let scopeChoice = $derived(preferences.personaSelectionScope === 'picker');
 
-  let scope = $state<PersonaScope>(getScopeToOpen());
-  let scopeTarget = $derived(scope === 'room' ? roomId : scope === 'space' ? spaces.target : null);
-  let selected = $derived(personas.selectionFor(scopeTarget));
-  let disabled = $derived(scopeTarget !== null && personas.disabledIn(scopeTarget));
-  let active = $derived(
-    resolvePersona({
-      personas: personas.personas,
-      room: personas.associationFor(roomId),
-      spaces: spaces.order.map((id) => personas.associationFor(id)),
-      account: personas.selectionFor(null) ?? undefined,
-      now: Date.now(),
-    }) ?? null
-  );
+  let scope = $state<SelectionScope>('account');
+  let scopeSelections = $derived({
+    personas: personas.personas,
+    room: personas.associationFor(roomId),
+    spaces: spaces.order.map((id) => personas.associationFor(id)),
+    account: personas.selectionFor(null) ?? undefined,
+    now: Date.now(),
+  });
+  let held = $derived(heldSelection(scopeSelections));
+  let selected = $derived(held && held !== 'account' ? held : null);
+  let active = $derived(shorthandHint?.persona ?? resolvePersona(scopeSelections) ?? null);
   let sortedPersonas = $derived(
     preferences.personaPickerSortOrder === 'recent'
       ? personas.personas.slice().sort((a, b) => (b.last_used ?? 0) - (a.last_used ?? 0))
@@ -78,14 +89,21 @@
   let label = $derived(
     shown
       ? i18n.t('personas.sendingAs', { name: shown.display_name })
-      : i18n.t('personas.pickerLabel')
+      : account
+        ? i18n.t('personas.sendingAs', { name: account.name })
+        : i18n.t('personas.pickerLabel')
   );
   let editOpen = $state(false);
+  let activeAvatarId = $derived(active && alternateAvatarId(active, shorthandHint?.trigger, held));
+  let activeAvatarUrl = $derived(
+    active?.alternate_avatars?.find((avatar) => avatar.id === activeAvatarId)?.avatar_url ??
+      active?.avatar_url
+  );
 
   function handleOpenChange(next: boolean): void {
     open = next;
     if (next) {
-      scope = getScopeToOpen();
+      scope = personas.scopeFor(preferences.personaSelectionScope, roomId, spaces);
       void personas.load();
     }
   }
@@ -95,27 +113,54 @@
     handleOpenChange(true);
   }
 
-  function setScope(next: PersonaScope): void {
+  function setScope(next: SelectionScope): void {
     scope = next;
   }
 
-  function choose(persona: PersonaView | null): void {
+  function remember(personaId: string | null, alternateAvatarId: string | null = null): void {
     open = false;
-    personas.select(scopeTarget, persona?.id ?? null).catch((cause: unknown) => {
-      console.warn('[sable personas] the selection could not be saved', cause);
-      toasts.error(i18n.t('errors.actionFailed'));
-    });
+    personas
+      .remember(scope, roomId, spaces, personaId, alternateAvatarId)
+      .catch((cause: unknown) => {
+        console.warn('[sable personas] the selection could not be saved', cause);
+        toasts.error(i18n.t('errors.actionFailed'));
+      });
   }
 
-  function disable(): void {
-    open = false;
-    if (scopeTarget === null) return;
-    personas.disable(scopeTarget).catch((cause: unknown) => {
-      console.warn('[sable personas] the selection could not be saved', cause);
-      toasts.error(i18n.t('errors.actionFailed'));
-    });
+  function choose(persona: PersonaView | null): void {
+    remember(persona?.id ?? null);
+  }
+
+  function alternateAvatarChoose(
+    avatar: PersonaAlternateAvatarView | null,
+    persona: PersonaView
+  ): void {
+    remember(persona.id, avatar?.id ?? null);
   }
 </script>
+
+{#snippet buttonContent(
+  persona: PerMessageProfileView | PersonaView | null,
+  personaAvatarOverride: string | null | undefined
+)}
+  {#if persona}
+    <Avatar
+      id={persona.id ?? null}
+      src={personaAvatarOverride ?? persona.avatar_url ?? null}
+      name={persona.display_name ?? null}
+      size="small"
+    />
+  {:else if !preferences.personaPickerShowAccountWhenDeselected}
+    <UserSwitchIcon />
+  {:else}
+    <Avatar
+      id={account?.id ?? null}
+      src={account?.avatarUrl}
+      name={account?.name ?? null}
+      size="small"
+    />
+  {/if}
+{/snippet}
 
 {#if edit}
   <IconButton
@@ -131,11 +176,7 @@
       editOpen = true;
     }}
   >
-    {#if shown}
-      <Avatar id={shown.id} src={shown.avatar_url ?? null} name={shown.display_name} size="small" />
-    {:else}
-      <UserSwitchIcon />
-    {/if}
+    {@render buttonContent(shown, null)}
   </IconButton>
   <MessageReproxyDialog
     bind:open={editOpen}
@@ -156,16 +197,7 @@
               class="persona-button-format selection-open"
               {label}
             >
-              {#if active}
-                <Avatar
-                  id={active?.id ?? null}
-                  src={active?.avatar_url ?? null}
-                  name={active?.display_name ?? null}
-                  size="small"
-                />
-              {:else}
-                <UserSwitchIcon />
-              {/if}
+              {@render buttonContent(active, activeAvatarUrl)}
             </IconButton>
           {/snippet}
         </Popover.Trigger>
@@ -178,7 +210,7 @@
         side="top"
         align="start"
         sideOffset={10}
-        collisionPadding={12}
+        collisionPadding={collisionPadding(12)}
         onOpenAutoFocus={(e) => {
           e.preventDefault();
           const searchInput = document.getElementById('persona-search');
@@ -191,12 +223,14 @@
         <PersonaMenu
           personas={sortedPersonas}
           {selected}
-          {disabled}
           {scope}
+          {scopeChoice}
           {hasSpace}
+          variant="popover"
           onScope={setScope}
           onChoose={choose}
-          onDisable={disable}
+          onAlternateAvatarChoose={alternateAvatarChoose}
+          {account}
         />
       </Popover.Content>
     </Popover.Portal>
@@ -212,16 +246,7 @@
     data-state={open ? 'open' : 'closed'}
     onclick={openSheet}
   >
-    {#if active}
-      <Avatar
-        id={active?.id ?? null}
-        src={active?.avatar_url ?? null}
-        name={active?.display_name ?? null}
-        size="small"
-      />
-    {:else}
-      <UserSwitchIcon />
-    {/if}
+    {@render buttonContent(active, activeAvatarUrl)}
   </IconButton>
   <BottomSheet
     bind:open
@@ -232,12 +257,14 @@
     <PersonaMenu
       personas={sortedPersonas}
       {selected}
-      {disabled}
       {scope}
+      {scopeChoice}
       {hasSpace}
+      variant="sheet"
       onScope={setScope}
       onChoose={choose}
-      onDisable={disable}
+      onAlternateAvatarChoose={alternateAvatarChoose}
+      {account}
     />
   </BottomSheet>
 {/if}
@@ -250,7 +277,7 @@
     box-shadow: var(--shadow-float);
     color: var(--surface-on-container);
     padding: var(--space-200);
-    width: min(18rem, calc(100vw - 2rem));
+    width: min(19rem, calc(100vw - 2rem));
   }
 
   :global(.persona-button-format) {

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { PresenceView, SessionInfo } from '#src/generated/protocol';
+  import type { SessionInfo } from '#src/generated/protocol';
+  import { signOutServer } from '#lib/platform/server-session.js';
   import { i18n } from '#lib/i18n.js';
   import type { AccountDirectory } from './account-directory.svelte.js';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -14,9 +15,14 @@
   import SignOutIcon from 'phosphor-svelte/lib/SignOutIcon';
   import PresenceDot from '#lib/ui/primitives/PresenceDot.svelte';
   import { useActionMenuSurface } from '#lib/ui/primitives/action-menu.js';
-  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
-
-  const PRESENCE_OPTIONS: readonly PresenceView[] = ['online', 'unavailable', 'offline'];
+  import { preferences } from '#lib/settings/preferences.svelte.js';
+  import {
+    ownPresence,
+    presenceChoices,
+    setOwnPresence,
+  } from '#lib/rooms/presence-override.svelte.js';
+  import { useCoreClient } from '#lib/core/context.js';
+  import QrCodeIcon from 'phosphor-svelte/lib/QrCodeIcon';
 
   interface Props {
     accounts: readonly SessionInfo[];
@@ -25,6 +31,7 @@
     switching: boolean;
     onSwitch: (accountId: string) => void;
     onProfile: () => void;
+    onLinkDevice: () => void;
     onLogoutAccount: (accountId: string) => void;
     onReauth: (account: SessionInfo) => void;
     onLogout: () => void;
@@ -39,14 +46,27 @@
     switching,
     onSwitch,
     onProfile,
+    onLinkDevice,
     onLogoutAccount,
     onReauth,
     onLogout,
     onAddAccount,
     accountSwitching = true,
   }: Props = $props();
-  let presence = $derived(preferences.presence);
+
+  const core = useCoreClient();
+  let presence = $derived(ownPresence());
   const surface = useActionMenuSurface();
+
+  let serverSignOutFailed = $state(false);
+  async function requestServerSignOut(): Promise<void> {
+    serverSignOutFailed = false;
+    try {
+      await signOutServer();
+    } catch {
+      serverSignOutFailed = true;
+    }
+  }
 </script>
 
 {#if preferences.sendPresence}
@@ -55,11 +75,13 @@
       <PresenceDot {presence} size="large" label={i18n.t(`presence.${presence}`)} />
       <span class="presence-name">{i18n.t(`presence.${presence}`)}</span>
     {/snippet}
-    {#each PRESENCE_OPTIONS as option (option)}
+    {#each presenceChoices() as option (option)}
       <ActionMenuItem
         checked={option === presence}
         onSelect={() => {
-          setPreference('presence', option);
+          void setOwnPresence(option).catch((error: unknown) => {
+            console.warn('[sable presence] presence not saved', error);
+          });
         }}
       >
         <PresenceDot presence={option} label={i18n.t(`presence.${option}`)} size="medium" />
@@ -73,6 +95,12 @@
   <span>{i18n.t('nav.editProfile')}</span>
 </ActionMenuItem>
 <ActionMenuSeparator />
+{#if core.oauthMetadata !== null}
+  <ActionMenuItem onSelect={onLinkDevice}>
+    <QrCodeIcon aria-hidden="true" />
+    <span>{i18n.t('qrLogin.titleGrant')}</span>
+  </ActionMenuItem>
+{/if}
 {#if accountSwitching}
   <ActionMenuSub label={i18n.t('nav.switchAccount')} class="account-switcher-popover">
     {#snippet trigger()}
@@ -141,6 +169,13 @@
       <span>{i18n.t('common.addAccount')}</span>
     </ActionMenuItem>
   </ActionMenuSub>
+{/if}
+{#if import.meta.env.VITE_SABLE_SERVER_URL}
+  <ActionMenuItem onSelect={() => void requestServerSignOut()}>
+    <SignOutIcon aria-hidden="true" />
+    <span>{i18n.t('settings.logoutServer')}</span>
+  </ActionMenuItem>
+  {#if serverSignOutFailed}<span role="alert">{i18n.t('settings.logoutServerFailed')}</span>{/if}
 {/if}
 <ActionMenuItem destructive onSelect={onLogout}>
   <SignOutIcon aria-hidden="true" />

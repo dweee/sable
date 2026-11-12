@@ -2,7 +2,7 @@ use crate::api::auth::QrCheckCodeParams;
 use crate::api::auth::QrGrantContinueParams;
 use crate::api::auth::StartQrGrantParams;
 use crate::api::auth::StartQrLoginParams;
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt, pin_mut};
 use matrix_sdk::authentication::oauth::qrcode::{
@@ -14,44 +14,32 @@ use matrix_sdk::executor::{JoinHandleExt, spawn};
 use url::Url;
 
 use crate::ResultExt;
-use crate::protocol::{CoreEvent, QrLoginFailureView, QrLoginProgressView, RpcError};
+use crate::protocol::{CoreEvent, QrLoginFailureView, QrLoginProgressView, RpcCode, RpcError};
 use crate::session::{self, Credentials, PersistedSession};
 use crate::verification::level_h_code;
 use crate::{Core, Task};
 
 #[derive(Default)]
 pub(crate) struct QrSlots {
-    check_code: std::sync::Mutex<Option<CheckCodeSender>>,
-    continuation: std::sync::Mutex<Option<ContinuationMessageSender>>,
+    check_code: parking_lot::Mutex<Option<CheckCodeSender>>,
+    continuation: parking_lot::Mutex<Option<ContinuationMessageSender>>,
 }
 
 impl QrSlots {
     fn set_check_code(&self, sender: CheckCodeSender) {
-        *self
-            .check_code
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(sender);
+        *self.check_code.lock() = Some(sender);
     }
 
     fn set_continuation(&self, sender: ContinuationMessageSender) {
-        *self
-            .continuation
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(sender);
+        *self.continuation.lock() = Some(sender);
     }
 
     fn take_check_code(&self) -> Option<CheckCodeSender> {
-        self.check_code
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        self.check_code.lock().take()
     }
 
     fn take_continuation(&self) -> Option<ContinuationMessageSender> {
-        self.continuation
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        self.continuation.lock().take()
     }
 }
 
@@ -61,7 +49,7 @@ pub(crate) struct QrFlow {
 }
 
 fn decode(data: &str) -> Result<QrCodeData, RpcError> {
-    QrCodeData::from_base64(data).map_err(|_| RpcError::Denied)
+    QrCodeData::from_base64(data).map_err(|_| RpcCode::Denied.into())
 }
 
 fn reciprocating_homeserver(data: &QrCodeData) -> Option<String> {
@@ -117,6 +105,14 @@ fn grant_failure(error: &QRCodeGrantLoginError) -> QrLoginFailureView {
         QRCodeGrantLoginError::LoginFailure { .. } => QrLoginFailureView::Declined,
         _ => QrLoginFailureView::Other,
     }
+}
+
+async fn msc_4388_supported(oauth: &matrix_sdk::authentication::oauth::OAuth) -> bool {
+    oauth
+        .msc_4388_rendezvous_server_supported()
+        .await
+        .inspect_err(|error| tracing::debug!("MSC4388 rendezvous discovery failed: {error}"))
+        .unwrap_or(false)
 }
 
 fn shown(data: &QrCodeData) -> QrLoginProgressView {
@@ -212,8 +208,8 @@ impl Core {
     ) -> Result<(), RpcError> {
         let scanned_code = scanned_code.as_deref().map(decode).transpose()?;
         let homeserver = match &scanned_code {
-            Some(data) => reciprocating_homeserver(data).ok_or(RpcError::Denied)?,
-            None => homeserver.ok_or(RpcError::Denied)?,
+            Some(data) => reciprocating_homeserver(data).ok_or(RpcCode::Denied)?,
+            None => homeserver.ok_or(RpcCode::Denied)?,
         };
         let redirect_uri =
             Url::parse(&redirect_uri).or_failed(self, "start_qr_login_redirect_uri")?;
@@ -238,7 +234,10 @@ impl Core {
                 });
                 login.await
             } else {
-                let login = builder.generate();
+                let mut login = builder.generate();
+                if msc_4388_supported(&oauth).await {
+                    login.with_msc4388_support();
+                }
                 let _watch = core.watch(false, login.subscribe_to_progress(), move |update| {
                     login_view(update, |state| generated(&flow_slots, state))
                 });
@@ -310,7 +309,7 @@ impl Core {
             .as_ref()
             .is_some_and(|data| data.intent() != QrCodeIntent::Login)
         {
-            return Err(RpcError::Denied);
+            return Err(RpcCode::Denied.into());
         }
         let client = self.client().await?;
 
@@ -326,7 +325,10 @@ impl Core {
                 });
                 grant.await
             } else {
-                let grant = oauth.grant_login_with_qr_code().generate();
+                let mut grant = oauth.grant_login_with_qr_code().generate();
+                if msc_4388_supported(&oauth).await {
+                    grant.with_msc4388_support();
+                }
                 let _watch = core.watch(true, grant.subscribe_to_progress(), move |update| {
                     grant_view(&flow_slots, update, |state| generated(&flow_slots, state))
                 });
@@ -359,7 +361,7 @@ impl Core {
             .qr_slots()
             .await?
             .take_check_code()
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         sender.send(code).await.or_failed(self, "qr_check_code")
     }
 
@@ -371,7 +373,7 @@ impl Core {
             .qr_slots()
             .await?
             .take_continuation()
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         let sent = if confirm {
             sender.confirm().await
         } else {
@@ -390,14 +392,14 @@ impl Core {
             .await
             .as_ref()
             .map(|flow| flow.slots.clone())
-            .ok_or(RpcError::Unavailable)
+            .ok_or_else(|| RpcCode::Unavailable.into())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use matrix_sdk::authentication::oauth::qrcode::{
-        Msc4108IntentData, QRCodeGrantLoginError, QRCodeLoginError, QrCodeData,
+        Msc4108IntentData, QRCodeGrantLoginError, QRCodeLoginError, QrCodeData, QrCodeIntent,
     };
     use matrix_sdk::encryption::vodozemac::Curve25519PublicKey;
     use url::Url;
@@ -429,6 +431,21 @@ mod tests {
         assert_eq!(
             reciprocating_homeserver(&code(Msc4108IntentData::Login)),
             None
+        );
+    }
+
+    #[test]
+    fn a_2025_code_from_a_signed_in_device_names_its_homeserver() {
+        let data = QrCodeData::new_msc4388(
+            Curve25519PublicKey::from_bytes([7; 32]),
+            "session".to_owned(),
+            Url::parse("https://example.org/").unwrap(),
+            QrCodeIntent::Reciprocate,
+        )
+        .unwrap();
+        assert_eq!(
+            reciprocating_homeserver(&data).as_deref(),
+            Some("https://example.org/")
         );
     }
 

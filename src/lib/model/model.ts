@@ -6,9 +6,16 @@ import type {
   CalendarEntryView,
   CalendarItem,
   CalendarRsvpView,
+  ComposerContent,
+  ComposerPill,
+  ChildOrderOverride,
+  DropInstruction,
+  LayoutRef,
   InvocationResult,
   EventDraft,
   EventPreview,
+  EmoteRecents,
+  EmoteRecentsInput,
   HierarchyRoomView,
   HierarchySection,
   JoinAddress,
@@ -36,30 +43,61 @@ import type {
   SidebarItemView,
   PronounView,
   SearchOperator,
+  SectionInputs as SectionInputsView,
   SlashParse,
-  SpaceChildEdge,
+  SuggestedOverride,
   TargetSuggestion,
   ViaSplit,
   WebPushValidation,
   ZonedInstant,
 } from '#src/generated/protocol';
 import loadWasm, * as wasm from '#src/generated/wasm/sable_model.js';
+import modelWasm from '#src/generated/wasm/sable_model_bg.wasm?url';
 
 export type ArgumentDrafts = Record<string, ArgumentDraft>;
 
 let loading: Promise<unknown> | null = null;
 
+export class ModelAssetError extends Error {
+  constructor(readonly status: number) {
+    super(`model wasm unavailable: ${String(status)}`);
+    this.name = 'ModelAssetError';
+  }
+}
+
+async function fetchModel(): Promise<Response> {
+  const response = await fetch(modelWasm);
+  if (!response.ok || response.headers.get('content-type')?.includes('text/html')) {
+    throw new ModelAssetError(response.status);
+  }
+  return response;
+}
+
 /** Every call below needs this to have settled once; a failed load is retried. */
-export function loadModel(): Promise<unknown> {
-  const pending = (loading ??= loadWasm().catch((error: unknown) => {
-    loading = null;
-    throw error;
-  }));
+export function loadModel(source?: Promise<Response>): Promise<unknown> {
+  const pending = (loading ??= loadWasm({ module_or_path: source ?? fetchModel() }).catch(
+    (error: unknown) => {
+      loading = null;
+      throw error;
+    }
+  ));
   return pending;
 }
 
 export function parseSearchQuery(input: string): ParsedQuery {
   return JSON.parse(wasm.parseSearchQuery(input)) as ParsedQuery;
+}
+
+export function quickReactions(frequent: readonly string[], limit: number): string[] {
+  return JSON.parse(wasm.quickReactions(JSON.stringify(frequent), limit)) as string[];
+}
+
+export function emoteRecents(input: EmoteRecentsInput): EmoteRecents {
+  return JSON.parse(wasm.emoteRecents(JSON.stringify(input))) as EmoteRecents;
+}
+
+export function visibleName(name: string): string | null {
+  return wasm.visibleName(name) ?? null;
 }
 
 export function searchOperators(): SearchOperator[] {
@@ -82,19 +120,11 @@ export function parseBotCommand(view: BotCommandDescription): BotCommand | null 
   return JSON.parse(wasm.parseBotCommand(JSON.stringify(view))) as BotCommand | null;
 }
 
-export function parseBotCommands(views: readonly BotCommandDescription[]): BotCommand[] {
-  return JSON.parse(wasm.parseBotCommands(JSON.stringify(views))) as BotCommand[];
-}
-
 export function matchBotCommand(
   line: string,
   commands: readonly BotCommand[]
 ): BotCommandMatch | null {
   return JSON.parse(wasm.matchBotCommand(line, JSON.stringify(commands))) as BotCommandMatch | null;
-}
-
-export function emptyDrafts(command: BotCommand): ArgumentDrafts {
-  return JSON.parse(wasm.emptyDrafts(JSON.stringify(command))) as ArgumentDrafts;
 }
 
 export function draftsFromText(command: BotCommand, args: string): ArgumentDrafts {
@@ -125,6 +155,17 @@ export function webPushValidation(raw: string | undefined): WebPushValidation | 
   return JSON.parse(wasm.webPushValidation(raw)) as WebPushValidation | null;
 }
 
+export function validateRtcInviteSnapshot(
+  event: unknown,
+  events: readonly unknown[],
+  userId: string,
+  nowMs: number
+): { expires_at_ms: number; has_video: boolean } | null {
+  return JSON.parse(
+    wasm.validateRtcInviteSnapshot(JSON.stringify(event), JSON.stringify(events), userId, nowMs)
+  ) as { expires_at_ms: number; has_video: boolean } | null;
+}
+
 export function pushContent(content: unknown): PushContent {
   return JSON.parse(wasm.pushContent(JSON.stringify(content ?? null))) as PushContent;
 }
@@ -148,6 +189,10 @@ export function pushAlert(
   return JSON.parse(
     wasm.pushAlert(JSON.stringify(notification), roomName ?? undefined, showContent)
   ) as PushAlert | null;
+}
+
+export function activeElsewhere(content: unknown, ownDeviceId: string, nowMs: number): boolean {
+  return wasm.activeElsewhere(JSON.stringify(content), ownDeviceId, nowMs);
 }
 
 export function slashCommandNames(): string[] {
@@ -230,14 +275,6 @@ export function buildCalendarEvent(
   ) as Record<string, unknown>;
 }
 
-export function parseDuration(value: unknown): number {
-  return typeof value === 'string' ? wasm.parseDuration(value) : 0;
-}
-
-export function formatDuration(ms: number): string {
-  return wasm.formatDuration(ms);
-}
-
 export function lobbyAction(
   joinRule: RoomJoinRuleView,
   invited: boolean,
@@ -271,7 +308,7 @@ export function buildHierarchySections(
   rootId: string,
   inputs: SectionInputs = {}
 ): HierarchySection[] {
-  const sets = {
+  const sets: SectionInputsView = {
     loaded: inputs.loaded === undefined ? null : [...inputs.loaded],
     failed: [...(inputs.failed ?? [])],
     keep_empty: [...(inputs.keepEmpty ?? [])],
@@ -292,7 +329,7 @@ export function joinCandidates(
 
 export function applyChildOverrides(
   rooms: readonly HierarchyRoomView[],
-  overrides: readonly { parent_id: string; children: readonly SpaceChildEdge[] }[]
+  overrides: readonly ChildOrderOverride[]
 ): HierarchyRoomView[] {
   return JSON.parse(
     wasm.applyChildOverrides(JSON.stringify(rooms), JSON.stringify(overrides))
@@ -301,16 +338,12 @@ export function applyChildOverrides(
 
 export function applySuggestedOverrides(
   rooms: readonly HierarchyRoomView[],
-  overrides: readonly { parent_id: string; room_id: string; suggested: boolean }[]
+  overrides: readonly SuggestedOverride[]
 ): HierarchyRoomView[] {
   return JSON.parse(
     wasm.applySuggestedOverrides(JSON.stringify(rooms), JSON.stringify(overrides))
   ) as HierarchyRoomView[];
 }
-
-export type LayoutTarget =
-  | { kind: 'space'; room_id: string; folder_id: string | null }
-  | { kind: 'folder'; folder_id: string };
 
 function items(value: string): SidebarItemView[] {
   return JSON.parse(value) as SidebarItemView[];
@@ -361,6 +394,14 @@ export function renameFolder(
   return items(wasm.renameFolder(JSON.stringify(layout), folderId, name));
 }
 
+export function setFolderIcon(
+  layout: readonly SidebarItemView[],
+  folderId: string,
+  icon: string | null
+): SidebarItemView[] {
+  return items(wasm.setFolderIcon(JSON.stringify(layout), folderId, icon));
+}
+
 export function ungroupFolder(
   layout: readonly SidebarItemView[],
   folderId: string
@@ -378,9 +419,9 @@ export function removeFromFolder(
 
 export function applyLayoutDrop(
   layout: readonly SidebarItemView[],
-  source: LayoutTarget,
-  target: LayoutTarget,
-  instruction: 'above' | 'below' | 'into',
+  source: LayoutRef,
+  target: LayoutRef,
+  instruction: DropInstruction,
   newFolderId: string
 ): SidebarItemView[] {
   return items(
@@ -471,8 +512,16 @@ export function uniqueShortcode(shortcode: string, taken: Iterable<string>): str
   return wasm.uniqueShortcode(shortcode, [...taken]);
 }
 
-export function invalidShortcode(images: readonly PackImageDraftView[]): string | null {
-  return wasm.invalidShortcode(images.map((image) => image.shortcode)) ?? null;
+export function invalidShortcode(
+  images: readonly PackImageDraftView[],
+  original: readonly PackImageDraftView[]
+): string | null {
+  return (
+    wasm.invalidShortcode(
+      images.map((image) => image.shortcode),
+      original.map((image) => image.shortcode)
+    ) ?? null
+  );
 }
 
 export function shortcodeWithoutExtension(fileName: string): string {
@@ -481,4 +530,23 @@ export function shortcodeWithoutExtension(fileName: string): string {
 
 export function reactionKey(content: unknown): string | null {
   return wasm.reactionKey(JSON.stringify(content ?? null)) ?? null;
+}
+
+export function markdownToContent(
+  markdown: string,
+  pills: readonly ComposerPill[]
+): ComposerContent {
+  return JSON.parse(wasm.markdownToContent(markdown, JSON.stringify(pills))) as ComposerContent;
+}
+
+export function markdownToDoc(markdown: string, pills: readonly ComposerPill[]): unknown {
+  return JSON.parse(wasm.markdownToDoc(markdown, JSON.stringify(pills)));
+}
+
+export function topicToHtml(topic: string): string {
+  return wasm.topicToHtml(topic);
+}
+
+export function receiverFormats(text: string): boolean {
+  return wasm.receiverFormats(text);
 }

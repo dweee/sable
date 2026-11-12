@@ -3,6 +3,7 @@
   import { on } from 'svelte/events';
   import { RoomEvent, Track, type Participant, type RemoteTrack } from 'livekit-client';
   import type { Room as LivekitRoom } from 'livekit-client';
+  import type { RnnoiseWorkletNode } from '@sapphi-red/web-noise-suppressor';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import type { CallTelemetry } from './call-telemetry';
   import { ignoreError } from './call-transport';
@@ -23,8 +24,9 @@
   type Filtered = {
     source: AudioNode;
     gain: GainNode;
-    filter?: AudioWorkletNode;
+    filter?: RnnoiseWorkletNode;
     live: boolean;
+    off: () => void;
   };
   type Output = AudioContext & { setSinkId?: (deviceId: string) => Promise<void> };
 
@@ -64,6 +66,10 @@
     const routeToDevice = (context: Output, device: string, failure: string): void => {
       if (!context.setSinkId || !device) return;
       context.setSinkId(device).catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'NotFoundError') {
+          context.setSinkId?.('').catch(ignoreError);
+          return;
+        }
         currentTelemetry?.failure(failure, error);
       });
     };
@@ -76,7 +82,10 @@
     }
 
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- element bookkeeping, never rendered from
-    const attached = new Map<string, { track: RemoteTrack; element: HTMLMediaElement }>();
+    const attached = new Map<
+      string,
+      { track: RemoteTrack; element: HTMLMediaElement; off: () => void }
+    >();
 
     const route = (
       context: AudioContext,
@@ -86,12 +95,16 @@
     ) => {
       const source = context.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
       const gain = context.createGain();
-      const graph: Filtered = { source, gain, live: false };
+      const graph: Filtered = {
+        source,
+        gain,
+        live: false,
+        off: on(element, 'volumechange', () => {
+          if (filtered.get(element) === graph && graph.live && !element.muted) element.muted = true;
+        }),
+      };
       source.connect(gain).connect(context.destination);
       filtered.set(element, graph);
-      on(element, 'volumechange', () => {
-        if (filtered.get(element) === graph && graph.live && !element.muted) element.muted = true;
-      });
       void context
         .resume()
         .then(() => {
@@ -106,6 +119,7 @@
         .create()
         .then((filter) => {
           if (filtered.get(element) !== graph) {
+            filter.destroy();
             filter.disconnect();
             return;
           }
@@ -120,7 +134,9 @@
       const graph = filtered.get(element);
       if (!graph) return;
       filtered.delete(element);
+      graph.off();
       graph.source.disconnect();
+      graph.filter?.destroy();
       graph.filter?.disconnect();
       graph.gain.disconnect();
     };
@@ -138,8 +154,13 @@
         element.autoplay = true;
         element.dataset.identity = identity;
         const screen = track.source === Track.Source.ScreenShareAudio;
-        if (screen) element.dataset.screen = 'true';
-        attached.set(track.sid, { track, element });
+        element.dataset.screen = String(screen);
+        // livekit recycles audio elements across tracks, so a listener left behind would
+        // fight the next call's listeners over `muted` and lock up the page (#1468).
+        const off = on(element, 'volumechange', () => {
+          if (!filtered.get(element)?.live) untrack(() => refresh(element));
+        });
+        attached.set(track.sid, { track, element, off });
         if (bank && !screen) route(bank.context, track, element, bank);
         levelOf(
           element,
@@ -169,6 +190,7 @@
       } catch (error) {
         currentTelemetry?.failure('call.audio.track_detach', error);
       } finally {
+        entry.off();
         unroute(entry.element);
         entry.element.remove();
         attached.delete(sid);

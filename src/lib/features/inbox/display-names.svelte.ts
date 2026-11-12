@@ -14,6 +14,11 @@ export class DisplayNames {
 
   constructor(private readonly core: Pick<CoreClient, 'userProfile'>) {}
 
+  forget = (userId: string): void => {
+    this.#requested.delete(userId);
+    this.#names.delete(userId);
+  };
+
   name(userId: string): string {
     if (!this.#requested.has(userId)) {
       this.#requested.add(userId);

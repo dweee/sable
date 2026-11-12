@@ -4,33 +4,8 @@ import i18next from 'i18next';
 import { flushSync } from 'svelte';
 import { expect, test } from 'vitest';
 
-import { currentLocale, i18n, setLanguage, t } from './i18n.js';
-
-test('a language change re-runs t() and currentLocale() reads', async () => {
-  const seen: string[] = [];
-  const locales: string[] = [];
-  const stop = $effect.root(() => {
-    $effect(() => {
-      seen.push(t('timeline.members'));
-      locales.push(currentLocale());
-    });
-  });
-
-  try {
-    flushSync();
-    expect(seen.at(-1)).toBe('Members');
-    expect(locales.at(-1)).toBe('en');
-
-    await setLanguage('fr');
-    flushSync();
-
-    expect(seen.at(-1)).toBe('Membres');
-    expect(locales.at(-1)).toBe('fr');
-  } finally {
-    stop();
-    await setLanguage('en');
-  }
-});
+import { i18n, setAppName, t } from './i18n.js';
+import { preferences } from './settings/preferences.svelte.js';
 
 test('i18n.t reads re-run when a bundle adds a translation', () => {
   const seen: string[] = [];
@@ -51,5 +26,38 @@ test('i18n.t reads re-run when a bundle adds a translation', () => {
   } finally {
     stop();
     i18next.removeResourceBundle('en', 'zz');
+  }
+});
+
+test('setAppName re-runs t() reads that use {{appName}}', () => {
+  const seen: string[] = [];
+  const stop = $effect.root(() => {
+    $effect(() => {
+      seen.push(t('auth.welcome'));
+    });
+  });
+
+  try {
+    flushSync();
+    expect(seen.at(-1)).toBe('Welcome to Sable');
+
+    setAppName('Acme');
+    flushSync();
+    expect(seen.at(-1)).toBe('Welcome to Acme');
+  } finally {
+    stop();
+    setAppName('Sable');
+  }
+});
+
+test('translation keys only show while developer tools are on', () => {
+  preferences.showTranslationStrings = true;
+  try {
+    expect(i18n.t('timeline.members')).toBe('Members');
+    preferences.developerTools = true;
+    expect(i18n.t('timeline.members')).toBe('timeline.members');
+  } finally {
+    preferences.showTranslationStrings = false;
+    preferences.developerTools = false;
   }
 });

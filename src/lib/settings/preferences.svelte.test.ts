@@ -1,11 +1,14 @@
 import { expect, test } from 'vitest';
 
-import {
-  composerSeparatorCount,
-  preferences,
-  sanitize,
-  withComposerSeparatorCount,
-} from './preferences.svelte.js';
+import { preferences } from './preferences.svelte.js';
+import { composerSeparatorCount, sanitize, withComposerSeparatorCount } from './definitions.js';
+
+test('keeps a saved call input mode and rejects unknown values', () => {
+  expect(sanitize({ callInputMode: 'push-to-talk' }, preferences).callInputMode).toBe(
+    'push-to-talk'
+  );
+  expect(sanitize({ callInputMode: 'unknown' }, preferences).callInputMode).toBe('voice-activity');
+});
 
 test.each([
   [true, 'on'],
@@ -40,6 +43,12 @@ test('keeps the search crawler preference', () => {
 test('defaults to unmetered crawling and keeps the saved preference', () => {
   expect(sanitize({}, preferences).searchUnmeteredOnly).toBe(true);
   expect(sanitize({ searchUnmeteredOnly: false }, preferences).searchUnmeteredOnly).toBe(false);
+});
+
+test('shares directly between devices by default', () => {
+  const defaults = sanitize({}, preferences);
+  expect(defaults.searchSharing).toBe(true);
+  expect(sanitize({ searchSharing: false }, preferences).searchSharing).toBe(false);
 });
 
 test('keeps a notification volume inside its range', () => {

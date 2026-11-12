@@ -14,8 +14,11 @@ use sable_model::bot_commands::{
     self, ArgumentDrafts, BotCommand, BotCommandDescription, LiteralValue,
 };
 use sable_model::calendar::{self, CalendarItem, CalendarRsvpView, EventDraft};
+use sable_model::emote_picker::{self, EmoteRecentsInput};
+use sable_model::markdown::{self, ComposerPill};
 use sable_model::notifications::{self, NotificationModeView, PushNotification};
 use sable_model::power_levels::{self, PowerLevelLocation, RoomPowerLevelsView};
+use sable_model::rtc_invites::{self, InvitePresentation};
 use sable_model::search_filter::{self, SearchDirectory, SearchPerson, SearchRoom};
 use sable_model::sidebar::{self, DropInstruction, LayoutRef, SidebarItemView};
 use sable_model::spaces::{
@@ -39,9 +42,30 @@ fn decode<T: DeserializeOwned>(text: &str) -> Result<T, JsError> {
     serde_json::from_str(text).map_err(|error| JsError::new(&format!("sable-model: {error}")))
 }
 
+#[wasm_bindgen(js_name = quickReactions)]
+pub fn quick_reactions(frequent: &str, limit: usize) -> Result<String, JsError> {
+    json(&emote_picker::quick_reactions(
+        &decode::<Vec<String>>(frequent)?,
+        limit,
+    ))
+}
+
+#[wasm_bindgen(js_name = emoteRecents)]
+pub fn emote_recents(input: &str) -> Result<String, JsError> {
+    json(&emote_picker::emote_recents(&decode::<EmoteRecentsInput>(
+        input,
+    )?))
+}
+
 #[wasm_bindgen(js_name = searchOperators)]
 pub fn search_operators() -> Result<String, JsError> {
     json(&search_query::SearchOperator::ALL)
+}
+
+#[wasm_bindgen(js_name = visibleName)]
+#[must_use]
+pub fn visible_name(name: &str) -> Option<String> {
+    sable_model::text::visible_name(name).map(str::to_owned)
 }
 
 #[wasm_bindgen(js_name = parseSearchQuery)]
@@ -70,22 +94,10 @@ pub fn parse_bot_command(description: &str) -> Result<String, JsError> {
     json(&bot_commands::parse_description(&description))
 }
 
-#[wasm_bindgen(js_name = parseBotCommands)]
-pub fn parse_bot_commands(descriptions: &str) -> Result<String, JsError> {
-    json(&bot_commands::parse_descriptions(&decode::<
-        Vec<BotCommandDescription>,
-    >(descriptions)?))
-}
-
 #[wasm_bindgen(js_name = matchBotCommand)]
 pub fn match_bot_command(line: &str, commands: &str) -> Result<String, JsError> {
     let commands = decode::<Vec<BotCommand>>(commands)?;
     json(&bot_commands::match_bot_command(line, &commands))
-}
-
-#[wasm_bindgen(js_name = emptyDrafts)]
-pub fn empty_drafts(command: &str) -> Result<String, JsError> {
-    json(&bot_commands::empty_drafts(&decode::<BotCommand>(command)?))
 }
 
 #[wasm_bindgen(js_name = draftsFromText)]
@@ -113,6 +125,29 @@ pub fn literal_label(value: &str) -> Result<String, JsError> {
 #[wasm_bindgen(js_name = parsePushPayload)]
 pub fn parse_push_payload(raw: &str) -> Result<String, JsError> {
     json(&notifications::parse_push_payload(raw))
+}
+
+#[wasm_bindgen(js_name = validateRtcInviteSnapshot)]
+pub fn validate_rtc_invite_snapshot(
+    event: &str,
+    events: &str,
+    user_id: &str,
+    now_ms: f64,
+) -> Result<String, JsError> {
+    let event = decode::<serde_json::Value>(event)?;
+    let events = decode::<Vec<serde_json::Value>>(events)?;
+    if !now_ms.is_finite() || now_ms < 0.0 || now_ms.fract() != 0.0 {
+        return json(&Option::<InvitePresentation>::None);
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "validated non-negative whole milliseconds"
+    )]
+    let now_ms = now_ms as u64;
+    let presentation = rtc_invites::validate_snapshot(&event, &events, user_id, now_ms)
+        .and_then(|invite| InvitePresentation::from_invite(&invite, &events));
+    json(&presentation)
 }
 
 #[wasm_bindgen(js_name = webPushValidation)]
@@ -154,6 +189,18 @@ pub fn push_alert(
     ))
 }
 
+#[wasm_bindgen(js_name = activeElsewhere)]
+#[must_use]
+pub fn active_elsewhere(content: &str, own_device_id: &str, now_ms: f64) -> bool {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative whole number of milliseconds from Date.now()"
+    )]
+    let now_ms = now_ms.max(0.0) as u64;
+    notifications::active_elsewhere_json(content, own_device_id, now_ms)
+}
+
 #[wasm_bindgen(js_name = slashCommandNames)]
 pub fn slash_command_names() -> Result<String, JsError> {
     json(&slash::SLASH_COMMANDS.as_slice())
@@ -162,6 +209,34 @@ pub fn slash_command_names() -> Result<String, JsError> {
 #[wasm_bindgen(js_name = parseSlash)]
 pub fn parse_slash(body: &str, formatted: Option<String>, now_ms: f64) -> Result<String, JsError> {
     json(&slash::parse_slash(body, formatted.as_deref(), now_ms))
+}
+
+#[wasm_bindgen(js_name = markdownToContent)]
+pub fn markdown_to_content(markdown: &str, pills: &str) -> Result<String, JsError> {
+    json(&markdown::markdown_to_content(
+        markdown,
+        &decode::<Vec<ComposerPill>>(pills)?,
+    ))
+}
+
+#[wasm_bindgen(js_name = topicToHtml)]
+#[must_use]
+pub fn topic_to_html(topic: &str) -> String {
+    markdown::topic_to_html(topic)
+}
+
+#[wasm_bindgen(js_name = markdownToDoc)]
+pub fn markdown_to_doc(markdown: &str, pills: &str) -> Result<String, JsError> {
+    json(&markdown::markdown_to_doc(
+        markdown,
+        &decode::<Vec<ComposerPill>>(pills)?,
+    ))
+}
+
+#[wasm_bindgen(js_name = receiverFormats)]
+#[must_use]
+pub fn receiver_formats(text: &str) -> bool {
+    markdown::receiver_formats(text)
 }
 
 #[wasm_bindgen(js_name = pronounSets)]
@@ -269,28 +344,6 @@ pub fn build_calendar_event(
         now_ms,
         time_zone,
     ))
-}
-
-#[wasm_bindgen(js_name = parseDuration)]
-#[must_use]
-pub fn parse_duration(value: &str) -> f64 {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a duration in milliseconds is far below 2^53"
-    )]
-    let ms = calendar::parse_duration(value) as f64;
-    ms
-}
-
-#[wasm_bindgen(js_name = formatDuration)]
-#[must_use]
-pub fn format_duration(ms: f64) -> String {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "rounded to whole minutes anyway"
-    )]
-    let ms = ms as i64;
-    calendar::format_duration(ms)
 }
 
 #[wasm_bindgen(js_name = lobbyAction)]
@@ -401,6 +454,19 @@ pub fn rename_folder(items: &str, folder_id: &str, name: &str) -> Result<String,
         &sidebar_items(items)?,
         folder_id,
         name,
+    ))
+}
+
+#[wasm_bindgen(js_name = setFolderIcon)]
+pub fn set_folder_icon(
+    items: &str,
+    folder_id: &str,
+    icon: Option<String>,
+) -> Result<String, JsError> {
+    json(&sidebar::set_folder_icon(
+        &sidebar_items(items)?,
+        folder_id,
+        icon.as_deref(),
     ))
 }
 
@@ -547,8 +613,12 @@ pub fn unique_shortcode(shortcode: &str, taken: Vec<String>) -> String {
 
 #[wasm_bindgen(js_name = invalidShortcode)]
 #[must_use]
-pub fn invalid_shortcode(shortcodes: Vec<String>) -> Option<String> {
-    shortcodes::invalid_shortcode(shortcodes.iter().map(String::as_str)).map(ToOwned::to_owned)
+pub fn invalid_shortcode(shortcodes: Vec<String>, original: Vec<String>) -> Option<String> {
+    shortcodes::invalid_shortcode(
+        shortcodes.iter().map(String::as_str),
+        original.iter().map(String::as_str),
+    )
+    .map(ToOwned::to_owned)
 }
 
 #[wasm_bindgen(js_name = shortcodeWithoutExtension)]

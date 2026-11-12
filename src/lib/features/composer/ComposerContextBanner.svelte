@@ -3,9 +3,12 @@
   import BellSlashIcon from 'phosphor-svelte/lib/BellSlashIcon';
   import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpRightIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
+  import { cubicOut } from 'svelte/easing';
+  import { slide } from 'svelte/transition';
 
   import { i18n } from '#lib/i18n.js';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
+  import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
 
   import type { ComposerContext } from '#lib/composer/composer-context.js';
 
@@ -13,13 +16,14 @@
     context: ComposerContext;
     onCancel?: () => void;
     onToggleSilentReply?: () => void;
+    onJump?: (eventId: string) => void;
   }
 
-  let { context, onCancel, onToggleSilentReply }: Props = $props();
+  let { context, onCancel, onToggleSilentReply, onJump }: Props = $props();
   let silent = $derived(context.silentReply === true);
 </script>
 
-<div class="context">
+<div class="context" transition:slide={{ duration: motionMs(MOTION_MS.quick), easing: cubicOut }}>
   {#if context.kind === 'edit'}
     <span class="context-kind">{i18n.t('composer.editing')}</span>
   {:else if context.kind === 'schedule'}
@@ -33,9 +37,20 @@
       >
     </span>
   {/if}
-  <div class="context-body">
-    {context.body}
-  </div>
+  {#if onJump && context.kind !== 'schedule'}
+    <button
+      type="button"
+      class="context-body context-jump"
+      title={i18n.t('common.jumpToMessage')}
+      onclick={() => onJump(context.eventId)}
+    >
+      {context.body}
+    </button>
+  {:else}
+    <div class="context-body">
+      {context.body}
+    </div>
+  {/if}
   {#if context.kind === 'reply'}
     <IconButton
       size="small"
@@ -112,5 +127,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .context-jump {
+    background: none;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+  }
+
+  .context-jump:hover,
+  .context-jump:focus-visible {
+    color: var(--surface-on-container);
   }
 </style>

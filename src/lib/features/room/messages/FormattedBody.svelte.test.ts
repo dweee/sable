@@ -1,4 +1,4 @@
-import type { RoomPreviewView } from '#src/generated/protocol';
+import type { MatrixLink, RoomPreviewView } from '#src/generated/protocol';
 // @vitest-environment happy-dom
 
 import { fireEvent, render, screen, type RenderResult } from '@testing-library/svelte';
@@ -15,6 +15,8 @@ vi.mock('#lib/rooms/room-list.svelte.js', () => ({
 }));
 
 vi.mock('#lib/core/context.js');
+vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
+import { goto } from '#lib/test-support/app-navigation.js';
 
 import { core as baseCore } from '#lib/core/__mocks__/context.js';
 
@@ -26,10 +28,12 @@ const timeline = Object.assign(baseCore.rpc.timeline, {
 
 import { mediaPreviewSettings } from '#lib/settings/media-previews.svelte.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { markdownToContent } from '#lib/model/model.js';
 
 import FormattedBody from './FormattedBody.svelte';
 import FormattedBodyHarness from './FormattedBodyHarness.test.svelte';
 import FormattedBodyMediaHarness from './FormattedBodyMediaHarness.test.svelte';
+import { mockStillFrames, STILL } from '#lib/test-support/still-frame.js';
 
 const user = userEvent.setup();
 const link = () => screen.getByRole('link');
@@ -91,13 +95,13 @@ test.each([
 });
 
 test.each([
-  ['\u2190', '@ezera'],
-  ['Ana', '@ezera'],
-  ['hello', '@ezera'],
-  ['https://matrix.to/#/@ezera:example.org', '@ezera'],
+  ['\u2190', '@casey'],
+  ['Ana', '@casey'],
+  ['hello', '@casey'],
+  ['https://matrix.to/#/@casey:example.org', '@casey'],
 ])('labels a user mention %s with the member name', async (label, expected) => {
   render(FormattedBody, {
-    props: { html: `<a href="https://matrix.to/#/@ezera:example.org">${label}</a>` },
+    props: { html: `<a href="https://matrix.to/#/@casey:example.org">${label}</a>` },
   });
   await tick();
 
@@ -107,13 +111,13 @@ test.each([
 test('keeps the author text on a user mention when asked to', async () => {
   render(FormattedBody, {
     props: {
-      html: '<a href="https://matrix.to/#/@ezera:example.org">@ezera \u2192</a>',
+      html: '<a href="https://matrix.to/#/@casey:example.org">@casey \u2192</a>',
       keepMentionText: true,
     },
   });
   await tick();
 
-  expect(screen.getByRole('link', { name: '@ezera \u2192' })).toHaveAttribute(
+  expect(screen.getByRole('link', { name: '@casey \u2192' })).toHaveAttribute(
     'data-matrix-link',
     'user'
   );
@@ -153,6 +157,16 @@ test('renders an @room mention as a chip', async () => {
   await tick();
 
   expect(screen.getByText('@room')).toHaveAttribute('data-mx-room-mention');
+});
+
+test('keeps the emoji span out of the copied text', async () => {
+  const { container } = render(FormattedBody, {
+    props: { html: 'nice <span data-emoji>👍</span>' },
+  });
+  await tick();
+
+  expect(screen.getByText('👍')).toHaveAttribute('data-emoji');
+  expect(container.querySelector('.formatted-body')?.textContent).toBe('nice 👍');
 });
 
 test('resolves a room permalink name through its via server', async () => {
@@ -219,6 +233,30 @@ test('applies Matrix colours and keeps spoilers hidden until asked', async () =>
   expect(spoiler.ariaPressed).toBe('false');
 });
 
+test.each(['click', 'keyboard'] as const)(
+  'a formatted spoiler reveals together by %s and leaves the next spoiler hidden',
+  async (input) => {
+    const { formatted_body: html } = markdownToContent(
+      '||this is a *huge* spoiler|| and ||another||',
+      []
+    );
+    render(FormattedBody, { html: html ?? '' });
+    await tick();
+
+    expect(document.querySelectorAll('[data-mx-spoiler]')).toHaveLength(2);
+    const spoiler = screen.getByRole('button', { name: 'this is a huge spoiler' });
+    expect(spoiler.ariaPressed).toBe('true');
+    if (input === 'click') await user.click(screen.getByText('huge'));
+    else {
+      spoiler.focus();
+      await user.keyboard('{Enter}');
+    }
+
+    expect(spoiler.ariaPressed).toBe('false');
+    expect(screen.getByRole('button', { name: 'another' }).ariaPressed).toBe('true');
+  }
+);
+
 test('inline image hiding is local and leaves custom emotes alone', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
   render(FormattedBody, {
@@ -255,11 +293,12 @@ test.each([
 );
 
 test.each([
-  '<a href="https://example.org/photo"><img src="https://example.org/photo.png" alt="Photo"></a>',
-  '<a href="https://example.org/photo">Before <img src="https://example.org/photo.png" alt="Photo"> after</a>',
-  '<a href="https://example.org/photo">Before <img src="https://example.org/photo.png" alt="Photo"></a>',
-  '<a href="https://example.org/photo"><img src="https://example.org/photo.png" alt="Photo"> after</a>',
+  '<a href="https://example.org/photo"><img src="mxc://example.org/photo" alt="Photo"></a>',
+  '<a href="https://example.org/photo">Before <img src="mxc://example.org/photo" alt="Photo"> after</a>',
+  '<a href="https://example.org/photo">Before <img src="mxc://example.org/photo" alt="Photo"></a>',
+  '<a href="https://example.org/photo"><img src="mxc://example.org/photo" alt="Photo"> after</a>',
 ])('inline linked images keep hide controls outside their links: %s', async (html) => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
   const view = render(FormattedBody, { html });
   await tick();
   const hide = screen.getByRole('button', { name: 'Hide image' });
@@ -277,8 +316,9 @@ test.each([
 });
 
 test('every image in an inline spoiler starts hidden and reveals independently', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
   render(FormattedBody, {
-    html: '<span data-mx-spoiler="Ending"><img src="https://example.org/one.png" alt="First secret"><img src="https://example.org/two.png" alt="Second secret"></span>',
+    html: '<span data-mx-spoiler="Ending"><img src="mxc://example.org/one" alt="First secret"><img src="mxc://example.org/two" alt="Second secret"></span>',
   });
   await tick();
   const controls = screen.getAllByRole('button', { name: 'Reveal image' });
@@ -358,10 +398,7 @@ test('defers an mxc emoticon source until its Blob URL is ready', async () => {
 async function paintedEmote(
   source: string
 ): Promise<{ image: HTMLImageElement; instance: RenderResult<typeof FormattedBody> }> {
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-    drawImage: vi.fn(),
-  } as unknown as CanvasRenderingContext2D);
-  vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;still');
+  mockStillFrames(URL.createObjectURL.bind(URL));
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(1)));
   const instance = render(FormattedBody, {
     props: { html: `<img src="${source}" alt="party" data-mx-emoticon="">` },
@@ -390,8 +427,9 @@ test('holds inline emotes still while the window is inactive', async () => {
 
   focused = false;
   window.dispatchEvent(new Event('blur'));
-  await tick();
-  expect(image.src).toBe('data:image/png;still');
+  await vi.waitFor(() => {
+    expect(image.src).toBe(STILL);
+  });
 
   focused = true;
   window.dispatchEvent(new Event('focus'));
@@ -406,7 +444,9 @@ test('an emote that arrives while the window is inactive loads still', async () 
 
   image.dispatchEvent(new Event('load'));
 
-  expect(image.src).toBe('data:image/png;still');
+  await vi.waitFor(() => {
+    expect(image.src).toBe(STILL);
+  });
 });
 
 test('renders maths in place of the sender fallback', async () => {
@@ -446,7 +486,7 @@ test('falls back to the shortcode once an emoticon has run out of retries', asyn
   vi.useRealTimers();
 });
 
-test('leaves a remote image for the browser and drops a source with no scheme behind it', async () => {
+test('replaces external images and unsupported sources with fallback text', async () => {
   render(FormattedBody, {
     props: {
       html:
@@ -456,9 +496,8 @@ test('leaves a remote image for the browser and drops a source with no scheme be
   });
   await tick();
 
-  const images = screen.getAllByRole('img');
-  expect(images).toHaveLength(1);
-  expect(images[0]).toHaveAttribute('src', 'https://example.org/badge.png');
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  expect(screen.getByText(/no-ai/)).toBeInTheDocument();
   expect(core.fetchMedia).not.toHaveBeenCalled();
   expect(screen.getByText(/:party:/)).toBeInTheDocument();
 });
@@ -577,6 +616,21 @@ test('shows a room abbreviation definition in a tooltip on hover', async () => {
   expect(document.querySelector('.tooltip')?.textContent.trim()).toBe(
     'Free and open source software'
   );
+});
+
+test('names a custom emoji by its shortcode, not its alt text, on hover', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(1)));
+  render(FormattedBody, {
+    props: {
+      html: '<img data-mx-emoticon src="mxc://example.org/emoji" alt="😈" title=":pulexFoxPrideMonth:" height="32">',
+    },
+  });
+  await tick();
+
+  await user.hover(screen.getByRole('img', { name: '😈' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(document.querySelector('.tooltip')?.textContent.trim()).toBe(':pulexFoxPrideMonth:');
 });
 
 test('shows the target of a link whose text differs from it on hover', async () => {
@@ -730,11 +784,12 @@ test('a bare event link names the room and quotes the message, with an icon', as
 });
 
 test('inline images wait behind a prompt where the media preview setting says so (MSC4278)', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
   mediaPreviewSettings.global = { media_previews: 'off' };
   render(FormattedBodyMediaHarness, {
     props: {
       html:
-        '<img src="https://example.org/cat.png" alt="cat">' +
+        '<img src="mxc://example.org/cat" alt="cat">' +
         '<img data-mx-emoticon="" src="mxc://example.org/party" alt="party">',
       joinRule: 'invite',
     },
@@ -749,7 +804,9 @@ test('inline images wait behind a prompt where the media preview setting says so
 
   await user.click(screen.getByRole('button', { name: 'Show images' }));
 
-  expect(cat).toHaveAttribute('src', 'https://example.org/cat.png');
+  await vi.waitFor(() => {
+    expect(cat).toHaveAttribute('src', expect.stringMatching(/^blob:/));
+  });
   expect(cat).toBeVisible();
   expect(screen.getByRole('button', { name: 'Hide image' })).toBeInTheDocument();
   expect(screen.queryByText(':party:')).not.toBeInTheDocument();
@@ -758,19 +815,22 @@ test('inline images wait behind a prompt where the media preview setting says so
 });
 
 test('enabling all rooms reveals inline images without refreshing', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
   preferences.mediaAutoLoad = 'private';
   render(FormattedBodyMediaHarness, {
-    props: { html: '<img src="https://example.org/cat.png" alt="cat">', joinRule: 'public' },
+    props: { html: '<img src="mxc://example.org/cat" alt="cat">', joinRule: 'public' },
   });
   await tick();
 
   expect(screen.getByRole('button', { name: 'Show images' })).toBeInTheDocument();
   preferences.mediaAutoLoad = 'on';
   await tick();
-  expect(screen.getByRole('img', { name: 'cat' })).toHaveAttribute(
-    'src',
-    'https://example.org/cat.png'
-  );
+  await vi.waitFor(() => {
+    expect(screen.getByRole('img', { name: 'cat' })).toHaveAttribute(
+      'src',
+      expect.stringMatching(/^blob:/)
+    );
+  });
   expect(screen.queryByRole('button', { name: 'Show images' })).not.toBeInTheDocument();
   mediaPreviewSettings.global = {};
 });
@@ -789,15 +849,43 @@ test.each([
   expect(document.querySelector('pre code')?.querySelector('span')).toBeNull();
 });
 
-test.each(['https://matrix.to/#/@ezera:example.org', 'matrix:u/ezera:example.org'])(
+test.each(['https://matrix.to/#/@casey:example.org', 'matrix:u/casey:example.org'])(
   'labels a user mention the same on %s',
   async (href) => {
     render(FormattedBody, { props: { html: `<a href="${href}">hello</a>` } });
     await tick();
 
-    expect(screen.getByRole('link', { name: '@ezera' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '@casey' })).toHaveAttribute(
       'data-matrix-link',
       'user'
     );
   }
 );
+
+test('a Matrix chat URI opens the confirmation route without a room callback', async () => {
+  render(FormattedBody, {
+    props: { html: '<a href="matrix:u/alice:example.org?action=chat">Chat</a>' },
+  });
+  await tick();
+  await user.click(screen.getByRole('link'));
+  expect(goto).toHaveBeenCalledWith('/to/%40alice%3Aexample.org?action=chat');
+});
+
+test('Matrix URI callbacks retain actions, routing and encoded IDs on the anchor', async () => {
+  const onMatrixLink = vi.fn<(link: MatrixLink, anchor: HTMLAnchorElement) => void>();
+  render(FormattedBody, {
+    props: {
+      html: '<a href="matrix:roomid/a%2Fb?via=example.org&amp;action=join#reserved">Join</a>',
+      onMatrixLink,
+    },
+  });
+  await tick();
+  await user.click(screen.getByRole('link'));
+  expect(onMatrixLink).toHaveBeenCalledWith(
+    { kind: 'room', room_id: '!a/b' },
+    expect.any(HTMLAnchorElement)
+  );
+  expect(onMatrixLink.mock.calls[0]?.[1].href).toBe(
+    'matrix:roomid/a%2Fb?via=example.org&action=join#reserved'
+  );
+});

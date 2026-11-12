@@ -13,7 +13,7 @@ import StickerIcon from 'phosphor-svelte/lib/StickerIcon';
 import SubtitlesIcon from 'phosphor-svelte/lib/SubtitlesIcon';
 import TextAaIcon from 'phosphor-svelte/lib/TextAaIcon';
 import { preferences } from '../preferences.svelte';
-import type { EnterKey } from '../preferences.svelte';
+import type { EnterKey } from '../definitions';
 import type { SettingsCategory } from '../registry';
 
 export function enterSettingLabels(mode: EnterKey): { name: string } {
@@ -82,7 +82,7 @@ export const composerCategory: SettingsCategory = {
         { value: 'newline', label: 'settings.enterForNewlineNewline' },
         { value: 'send', label: 'settings.enterForNewlineSend' },
       ],
-      panel: true,
+      panel: 'composer-enter',
     },
     {
       key: 'richTextComposer',
@@ -121,6 +121,14 @@ export const composerCategory: SettingsCategory = {
       icon: TextAaIcon,
       name: 'settings.composerAutocapitalize',
       description: 'settings.composerAutocapitalizeHint',
+      type: 'boolean',
+    },
+    {
+      key: 'emoticonToEmoji',
+      section: 'writing',
+      icon: SmileyIcon,
+      name: 'settings.emoticonToEmoji',
+      description: 'settings.emoticonToEmojiHint',
       type: 'boolean',
     },
     {
@@ -178,7 +186,7 @@ export const composerCategory: SettingsCategory = {
       icon: TextAaIcon,
       name: 'settings.composerFormatButton',
       type: 'boolean',
-      panel: true,
+      panel: 'composer-buttons',
     },
     {
       key: 'composerGifButton',
@@ -186,7 +194,7 @@ export const composerCategory: SettingsCategory = {
       icon: GifIcon,
       name: 'settings.composerGifButton',
       type: 'boolean',
-      panel: true,
+      panel: 'composer-buttons',
     },
     {
       key: 'composerStickerButton',
@@ -194,7 +202,7 @@ export const composerCategory: SettingsCategory = {
       icon: StickerIcon,
       name: 'settings.composerStickerButton',
       type: 'boolean',
-      panel: true,
+      panel: 'composer-buttons',
     },
     {
       key: 'composerEmoteButton',
@@ -202,7 +210,7 @@ export const composerCategory: SettingsCategory = {
       icon: SmileyIcon,
       name: 'settings.composerEmoteButton',
       type: 'boolean',
-      panel: true,
+      panel: 'composer-buttons',
     },
     {
       key: 'composerVoiceButton',
@@ -210,7 +218,7 @@ export const composerCategory: SettingsCategory = {
       icon: MicrophoneIcon,
       name: 'settings.composerVoiceButton',
       type: 'boolean',
-      panel: true,
+      panel: 'composer-buttons',
     },
   ],
 };

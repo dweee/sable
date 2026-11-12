@@ -25,7 +25,7 @@ const call: IncomingCall = {
 };
 
 beforeEach(() => {
-  core.rpc.room_state.event.mockReset();
+  core.rpc.members.member.mockReset();
   core.userProfile.mockReset();
   core.fetchMedia.mockClear();
   core.userProfile.mockResolvedValue({
@@ -35,7 +35,7 @@ beforeEach(() => {
   const matchMedia = window.matchMedia.bind(window);
   vi.spyOn(window, 'matchMedia').mockImplementation((query) => {
     const media = matchMedia(query);
-    if (query === BREAKPOINTS.appLayout) Object.defineProperty(media, 'matches', { value: false });
+    if (query === BREAKPOINTS.wide) Object.defineProperty(media, 'matches', { value: false });
     return media;
   });
 });
@@ -43,6 +43,21 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+function member(displayName: string | null, avatarUrl: string | null) {
+  return {
+    user_id: call.sender,
+    display_name: displayName,
+    avatar_url: avatarUrl,
+    real_name: displayName,
+    real_avatar_url: avatarUrl,
+    power_level: 0,
+    membership: 'join',
+    member_ts: null,
+    kicked: false,
+    service: false,
+  } as const;
+}
 
 function showCall() {
   return render(IncomingCallDialog, {
@@ -54,22 +69,17 @@ function showCall() {
 }
 
 test('incoming calls show the room profile instead of the global profile', async () => {
-  const request = Promise.withResolvers<unknown>();
-  core.rpc.room_state.event.mockReturnValue(request.promise);
+  const request = Promise.withResolvers<ReturnType<typeof member> | null>();
+  core.rpc.members.member.mockReturnValue(request.promise);
   showCall();
   await tick();
   expect(screen.getByText('Room Alice is calling')).toBeInTheDocument();
   expect(screen.getByRole('dialog')).toHaveClass('dialog-content-fullscreen');
-  expect(core.rpc.room_state.event).toHaveBeenCalledWith({
+  expect(core.rpc.members.member).toHaveBeenCalledWith({
     room_id: call.roomId,
-    event_type: 'm.room.member',
-    state_key: call.sender,
+    user_id: call.sender,
   });
-  request.resolve({
-    membership: 'join',
-    displayname: 'Room Alice',
-    avatar_url: 'mxc://example.org/room-call-avatar',
-  });
+  request.resolve(member('Room Alice', 'mxc://example.org/room-call-avatar'));
 
   await vi.waitFor(() => {
     expect(screen.getByText('Room Alice is calling')).toBeInTheDocument();
@@ -79,11 +89,7 @@ test('incoming calls show the room profile instead of the global profile', async
 });
 
 test('cleared room identity fields do not fall back to the global profile', async () => {
-  core.rpc.room_state.event.mockResolvedValue({
-    membership: 'join',
-    displayname: null,
-    avatar_url: null,
-  });
+  core.rpc.members.member.mockResolvedValue(member(null, null));
   showCall();
 
   expect(await screen.findByText(`${call.sender} is calling`)).toBeInTheDocument();
@@ -92,7 +98,7 @@ test('cleared room identity fields do not fall back to the global profile', asyn
 });
 
 test('retains the call event name when membership cannot be loaded', async () => {
-  core.rpc.room_state.event.mockRejectedValue(new Error('unavailable'));
+  core.rpc.members.member.mockRejectedValue(new Error('unavailable'));
   showCall();
   await tick();
 
@@ -101,12 +107,10 @@ test('retains the call event name when membership cannot be loaded', async () =>
 });
 
 test('a late membership lookup does not replace a newer call from the same sender', async () => {
-  const previous = Promise.withResolvers<unknown>();
-  core.rpc.room_state.event.mockReturnValueOnce(previous.promise).mockResolvedValue({
-    membership: 'join',
-    displayname: 'Other Room Alice',
-    avatar_url: 'mxc://example.org/other-room-call-avatar',
-  });
+  const previous = Promise.withResolvers<ReturnType<typeof member> | null>();
+  core.rpc.members.member
+    .mockReturnValueOnce(previous.promise)
+    .mockResolvedValue(member('Other Room Alice', 'mxc://example.org/other-room-call-avatar'));
   const view = showCall();
   await tick();
   await view.rerender({
@@ -125,7 +129,7 @@ test('a late membership lookup does not replace a newer call from the same sende
     );
   });
 
-  previous.resolve({ membership: 'join', displayname: 'Old Room Alice', avatar_url: null });
+  previous.resolve(member('Old Room Alice', null));
   await tick();
 
   expect(screen.getByText('Other Room Alice is calling')).toBeInTheDocument();
@@ -133,19 +137,32 @@ test('a late membership lookup does not replace a newer call from the same sende
 });
 
 test('closing a call ignores its pending membership lookup', async () => {
-  const request = Promise.withResolvers<unknown>();
-  core.rpc.room_state.event.mockReturnValue(request.promise);
+  const request = Promise.withResolvers<ReturnType<typeof member> | null>();
+  core.rpc.members.member.mockReturnValue(request.promise);
   const view = showCall();
   await tick();
   await view.rerender({ call: null });
 
-  request.resolve({
-    membership: 'join',
-    displayname: 'Room Alice',
-    avatar_url: 'mxc://example.org/closed-call-avatar',
-  });
+  request.resolve(member('Room Alice', 'mxc://example.org/closed-call-avatar'));
   await tick();
 
   expect(screen.queryByText('Room Alice is calling')).not.toBeInTheDocument();
   expect(core.fetchMedia).not.toHaveBeenCalledWith('mxc://example.org/closed-call-avatar', 96, 96);
+});
+
+test('a nickname given while the call rings replaces the caller name', async () => {
+  core.rpc.members.member
+    .mockResolvedValueOnce(member('Room Alice', null))
+    .mockResolvedValue({ ...member('Ally', null), real_name: 'Room Alice' });
+  let notify: ((userId: string) => void) | undefined;
+  vi.mocked(core.onProfileChanged).mockImplementation(((listener: (userId: string) => void) => {
+    notify = listener;
+    return () => {};
+  }) as typeof core.onProfileChanged);
+  showCall();
+  expect(await screen.findByText('Room Alice is calling')).toBeInTheDocument();
+
+  notify?.(call.sender);
+
+  expect(await screen.findByText('Ally is calling')).toBeInTheDocument();
 });

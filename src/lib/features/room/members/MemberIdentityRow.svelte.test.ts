@@ -31,6 +31,8 @@ const members = [
   {
     user_id: '@bob:example.org',
     display_name: 'Bob',
+    real_name: 'Bob',
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership: 'join' as const,
@@ -44,6 +46,8 @@ function profileFor(userId: string) {
   return {
     user_id: userId,
     display_name: 'Bob',
+    real_name: 'Bob',
+    real_avatar_url: null,
     avatar_url: null,
     bio: null,
     hero_color: null,
@@ -87,7 +91,7 @@ test('tints the name from the profile and opens the profile card from the row', 
   const onProfile = vi.fn();
   render(MemberIdentityRow, { userId: '@bob:example.org', members, onProfile });
 
-  const row = screen.getByRole('button', { name: "Open Bob's profile" });
+  const row = screen.getByRole('button', { name: 'Bob' });
   await vi.waitFor(() => {
     expect(within(row).getByText('Bob')).toHaveClass('tinted');
   });

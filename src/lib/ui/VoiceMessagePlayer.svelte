@@ -153,6 +153,7 @@
   .voice-message-player {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-200);
     margin-top: var(--space-100);
     min-height: var(--control-height-medium);
@@ -160,7 +161,7 @@
   }
 
   .voice-track {
-    flex: 1;
+    flex: 1 1 6rem;
     min-width: 0;
     position: relative;
   }

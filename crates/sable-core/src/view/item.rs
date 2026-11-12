@@ -1,13 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use sable_model::text::visible_name;
+
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::room::{PushContext, Room};
 use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::ruma::push::Action;
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{
-    MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedTransactionId, OwnedUserId, TransactionId,
-    UserId,
+    EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedTransactionId, OwnedUserId,
+    TransactionId, UserId,
 };
 use matrix_sdk::send_queue::{LocalEcho, LocalEchoContent, RoomSendQueueUpdate};
 use matrix_sdk_base::store::QueueWedgeError;
@@ -15,25 +18,29 @@ use matrix_sdk_base::store::SerializableEventContent;
 use matrix_sdk_ui::{
     eyeball_im,
     timeline::{
-        EventSendState, EventTimelineItem, MsgLikeKind, Profile, TimelineDetails, TimelineItem,
-        TimelineItemContent, TimelineItemKind, VirtualTimelineItem,
+        EventSendState, EventTimelineItem, MsgLikeKind, Profile, TimelineDetails,
+        TimelineEventShieldState, TimelineEventShieldStateCode, TimelineItem, TimelineItemContent,
+        TimelineItemKind, VirtualTimelineItem,
     },
 };
 
 use crate::protocol::{
-    MembershipChangeView, MentionView, PerMessageProfileView, ReactionGroup, SendBlockView,
-    SendStateView, TimelineItemContentView, TimelineItemView, TimelineRowKind, TimelineVisibility,
-    UploadProgressView,
+    MembershipChangeView, MentionView, MessageShieldCode, MessageShieldView, PerMessageProfileView,
+    ReactionGroup, SendBlockView, SendStateView, ThreadSummaryView, TimelineItemContentView,
+    TimelineItemView, TimelineRowKind, TimelineVisibility, UploadProgressView,
 };
 
 use super::content::{content, raw_formatted_body};
 use super::diff::diff_values;
-use super::forward::{forward_meta, forwarded};
+use super::forward::{forward_meta, forwarded, original_content};
+use super::media::spoiler_reason;
 use super::previews::{bundled_link_previews, link_previews_removed};
-use super::profile::{per_message_profile, relay_profile};
+use super::profile::per_message_profile;
 use super::raw::RawFields;
 use super::state::forum_title;
-use super::thread::{bundled_thread_summary, in_reply_to, msg_like, thread_summary};
+use super::thread::{
+    bundled_thread_summary, in_reply_to, merge_thread_summary, msg_like, thread_summary,
+};
 
 #[derive(Default)]
 pub struct Highlights(HashMap<String, bool>);
@@ -87,10 +94,22 @@ impl Highlights {
 struct LocalFields {
     profile: Option<PerMessageProfileView>,
     formatted_body: Option<String>,
+    spoiler: Option<String>,
+    gallery_spoilers: Vec<Option<String>>,
 }
 
 #[derive(Default)]
-pub struct LocalContent(HashMap<OwnedTransactionId, LocalFields>);
+pub struct LocalContent {
+    fields: HashMap<OwnedTransactionId, LocalFields>,
+    edits: Vec<QueuedEdit>,
+}
+
+struct QueuedEdit {
+    transaction_id: OwnedTransactionId,
+    target: OwnedEventId,
+    profile: Option<PerMessageProfileView>,
+    sent: Option<OwnedEventId>,
+}
 
 impl LocalContent {
     #[must_use]
@@ -107,7 +126,7 @@ impl LocalContent {
         content
     }
 
-    pub fn apply(&mut self, update: &RoomSendQueueUpdate) {
+    pub fn apply(&mut self, update: &RoomSendQueueUpdate) -> Option<OwnedEventId> {
         match update {
             RoomSendQueueUpdate::NewLocalEvent(LocalEcho {
                 transaction_id,
@@ -115,46 +134,138 @@ impl LocalContent {
                     LocalEchoContent::Event {
                         serialized_event, ..
                     },
-            }) => self.remember(transaction_id, serialized_event),
+            }) => {
+                self.remember(transaction_id, serialized_event);
+                self.edit_target(transaction_id)
+            }
             RoomSendQueueUpdate::ReplacedLocalEvent {
                 transaction_id,
                 new_content,
-            } => self.remember(transaction_id, new_content),
-            RoomSendQueueUpdate::CancelledLocalEvent { transaction_id } => {
-                self.0.remove(transaction_id);
+            } => {
+                let previous = self.edit_target(transaction_id);
+                self.remember(transaction_id, new_content);
+                self.edit_target(transaction_id).or(previous)
             }
-            _ => {}
+            RoomSendQueueUpdate::CancelledLocalEvent { transaction_id } => {
+                let target = self.edit_target(transaction_id);
+                self.forget(transaction_id);
+                target
+            }
+            RoomSendQueueUpdate::SentEvent {
+                transaction_id,
+                event_id,
+            } => {
+                for edit in &mut self.edits {
+                    if edit.transaction_id == *transaction_id {
+                        edit.sent = Some(event_id.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
+    fn edit_target(&self, transaction_id: &TransactionId) -> Option<OwnedEventId> {
+        self.edits
+            .iter()
+            .find(|edit| edit.transaction_id == *transaction_id)
+            .map(|edit| edit.target.clone())
+    }
+
     fn remember(&mut self, transaction_id: &TransactionId, content: &SerializableEventContent) {
-        let fields = content
+        let content = content
             .raw()
             .0
             .deserialize_as_unchecked::<serde_json::Value>()
-            .ok()
+            .ok();
+        self.edits
+            .retain(|edit| edit.transaction_id != *transaction_id);
+        if let Some(target) = content.as_ref().and_then(replaced_event) {
+            self.edits.push(QueuedEdit {
+                transaction_id: transaction_id.to_owned(),
+                target,
+                profile: content
+                    .as_ref()
+                    .and_then(|content| per_message_profile(Some(content))),
+                sent: None,
+            });
+        }
+        let fields = content
             .map(|content| LocalFields {
                 profile: per_message_profile(Some(&content)),
                 formatted_body: raw_formatted_body(Some(&content)).map(ToOwned::to_owned),
+                spoiler: spoiler_reason(Some(&content)),
+                gallery_spoilers: content
+                    .get("itemtypes")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|item| spoiler_reason(Some(item)))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
-            .filter(|fields| fields.profile.is_some() || fields.formatted_body.is_some());
+            .filter(|fields| {
+                fields.profile.is_some()
+                    || fields.formatted_body.is_some()
+                    || fields.spoiler.is_some()
+                    || fields.gallery_spoilers.iter().any(Option::is_some)
+            });
         match fields {
             Some(fields) => {
-                self.0.insert(transaction_id.to_owned(), fields);
+                self.fields.insert(transaction_id.to_owned(), fields);
             }
             None => {
-                self.0.remove(transaction_id);
+                self.fields.remove(transaction_id);
             }
         }
     }
 
     fn get(&self, transaction_id: &TransactionId) -> Option<&LocalFields> {
-        self.0.get(transaction_id)
+        self.fields.get(transaction_id)
+    }
+
+    /// `Some(None)` is a queued edit that clears the profile.
+    fn pending_edit(&self, event_id: &EventId) -> Option<&Option<PerMessageProfileView>> {
+        self.edits
+            .iter()
+            .rev()
+            .find_map(|edit| (edit.target == event_id).then_some(&edit.profile))
+    }
+
+    /// Drops the queued edits whose remote echo is now the event's latest edit.
+    pub(crate) fn settle(&mut self, target: &EventId, latest_edit: Option<&EventId>) {
+        let Some(latest_edit) = latest_edit else {
+            return;
+        };
+        self.edits
+            .retain(|edit| edit.target != target || edit.sent.as_deref() != Some(latest_edit));
     }
 
     pub(crate) fn forget(&mut self, transaction_id: &TransactionId) {
-        self.0.remove(transaction_id);
+        self.fields.remove(transaction_id);
+        self.edits
+            .retain(|edit| edit.transaction_id != *transaction_id);
     }
+}
+
+#[must_use]
+pub fn latest_edit_id(event: &EventTimelineItem) -> Option<OwnedEventId> {
+    event
+        .latest_edit_json()?
+        .get_field("event_id")
+        .ok()
+        .flatten()
+}
+
+fn replaced_event(content: &serde_json::Value) -> Option<OwnedEventId> {
+    let relation = content.get("m.relates_to")?;
+    if relation.get("rel_type")?.as_str()? != "m.replace" {
+        return None;
+    }
+    OwnedEventId::try_from(relation.get("event_id")?.as_str()?).ok()
 }
 
 impl TimelineItemContentView {
@@ -171,7 +282,8 @@ impl TimelineItemContentView {
             | Self::Location { .. }
             | Self::LiveLocation { .. }
             | Self::Poll { .. }
-            | Self::Redacted { .. } => TimelineRowKind::Message,
+            | Self::Redacted { .. }
+            | Self::UnableToDecrypt { .. } => TimelineRowKind::Message,
             Self::DateDivider { .. } | Self::ReadMarker | Self::TimelineStart => {
                 TimelineRowKind::Annotation
             }
@@ -179,7 +291,6 @@ impl TimelineItemContentView {
             | Self::VerificationRequest
             | Self::Cute { .. }
             | Self::Malformed { .. }
-            | Self::UnableToDecrypt { .. }
             | Self::Membership { .. }
             | Self::ProfileChange { .. }
             | Self::StateEvent { .. }
@@ -197,6 +308,7 @@ impl TimelineItemContentView {
                 | Self::Video { .. }
                 | Self::Audio { .. }
                 | Self::File { .. }
+                | Self::Sticker { .. }
                 | Self::Location { .. }
                 | Self::Gallery { .. }
         )
@@ -226,6 +338,75 @@ impl TimelineItemContentView {
     }
 }
 
+/// State is never encrypted without MSC4362, so a decrypted state change is forged.
+pub(crate) const fn forged_state(encrypted: bool, content: &TimelineItemContent) -> bool {
+    encrypted
+        && matches!(
+            content,
+            TimelineItemContent::MembershipChange(_)
+                | TimelineItemContent::ProfileChange(_)
+                | TimelineItemContent::OtherState(_)
+                | TimelineItemContent::FailedToParseState { .. }
+        )
+}
+
+const fn shield(state: TimelineEventShieldState) -> Option<MessageShieldView> {
+    let (code, critical) = match state {
+        TimelineEventShieldState::Red { code } => (code, true),
+        TimelineEventShieldState::Grey { code } => (code, false),
+        TimelineEventShieldState::None => return None,
+    };
+    let code = match code {
+        TimelineEventShieldStateCode::AuthenticityNotGuaranteed => {
+            MessageShieldCode::AuthenticityNotGuaranteed
+        }
+        TimelineEventShieldStateCode::UnknownDevice => MessageShieldCode::UnknownDevice,
+        TimelineEventShieldStateCode::UnsignedDevice => MessageShieldCode::UnsignedDevice,
+        TimelineEventShieldStateCode::UnverifiedIdentity => MessageShieldCode::UnverifiedIdentity,
+        TimelineEventShieldStateCode::VerificationViolation => {
+            MessageShieldCode::VerificationViolation
+        }
+        TimelineEventShieldStateCode::MismatchedSender => MessageShieldCode::MismatchedSender,
+        TimelineEventShieldStateCode::SentInClear => MessageShieldCode::SentInClear,
+    };
+    Some(MessageShieldView { code, critical })
+}
+
+impl TimelineItemView {
+    /// An item with only its content set, and the flags that content implies.
+    const fn bare(id: String, timestamp: u64, content: TimelineItemContentView) -> Self {
+        Self {
+            id,
+            row: content.row_kind(),
+            forwardable: content.forwardable(),
+            redactable: content.redactable(),
+            visibility: content.visibility(),
+            event_id: None,
+            transaction_id: None,
+            send_state: None,
+            sender: None,
+            sender_name: None,
+            sender_avatar: None,
+            timestamp,
+            content,
+            in_reply_to: None,
+            thread_root: None,
+            thread_summary: None,
+            reactions: Vec::new(),
+            is_own: false,
+            read_by: Vec::new(),
+            read_timestamps: BTreeMap::new(),
+            per_message_profile: None,
+            bundled_link_previews: Vec::new(),
+            link_previews_removed: None,
+            mention: MentionView::None,
+            forwarded: None,
+            forum_title: None,
+            shield: None,
+        }
+    }
+}
+
 #[must_use]
 pub fn aggregation_item(
     event: &AnySyncTimelineEvent,
@@ -241,36 +422,19 @@ pub fn aggregation_item(
         redacts,
     };
     TimelineItemView {
-        id: event_id.to_string(),
-        row: content.row_kind(),
-        forwardable: content.forwardable(),
-        redactable: content.redactable(),
-        visibility: content.visibility(),
-        event_id: Some(event_id),
-        transaction_id: None,
-        send_state: None,
+        event_id: Some(event_id.clone()),
         is_own: own_user_id == Some(sender.as_ref()),
-        sender_name: None,
-        sender_avatar: None,
-        timestamp: event.origin_server_ts().0.into(),
-        content,
         sender: Some(sender),
-        in_reply_to: None,
-        thread_root: None,
-        thread_summary: None,
-        reactions: Vec::new(),
-        read_by: Vec::new(),
-        read_timestamps: BTreeMap::new(),
-        per_message_profile: None,
-        bundled_link_previews: Vec::new(),
-        link_previews_removed: None,
-        mention: MentionView::None,
-        forwarded: None,
-        forum_title: None,
+        ..TimelineItemView::bare(
+            event_id.to_string(),
+            event.origin_server_ts().0.into(),
+            content,
+        )
     }
 }
 
 pub async fn standalone_item(
+    core: &crate::Core,
     room: &Room,
     event: TimelineEvent,
     latest: Option<TimelineEvent>,
@@ -300,20 +464,38 @@ pub async fn standalone_item(
         _ => false,
     };
     let message_profile = per_message_profile(raw.content.as_ref());
-    let member = room.get_member_no_sync(&sender).await.ok().flatten();
+    let (sender_name, sender_avatar) =
+        if let Some(member) = room.get_member_no_sync(&sender).await.ok().flatten() {
+            (
+                member
+                    .display_name()
+                    .and_then(visible_name)
+                    .map(ToOwned::to_owned),
+                member.avatar_url().map(ToString::to_string),
+            )
+        } else {
+            let content = core
+                .room_state_event_content(
+                    room.room_id().to_owned(),
+                    "m.room.member".to_owned(),
+                    sender.to_string(),
+                )
+                .await
+                .unwrap_or_default();
+            let profile = crate::member_look::member_look(content.as_ref(), None);
+            (
+                profile.display_name.and_then(visible_name),
+                profile.avatar_url,
+            )
+        };
     let original = event
         .raw()
         .deserialize_as_unchecked::<RawFields>()
         .unwrap_or_default();
-    let thread_summary = thread_summary(&item_content).or_else(|| {
-        event
-            .raw()
-            .get_field::<serde_json::Value>("unsigned")
-            .ok()
-            .flatten()
-            .as_ref()
-            .and_then(bundled_thread_summary)
-    });
+    let thread_summary = merge_thread_summary(
+        thread_summary(&item_content),
+        unsigned_thread_summary(event.raw()),
+    );
 
     let mut view_content = content(
         &item_content,
@@ -327,45 +509,55 @@ pub async fn standalone_item(
         *edited = true;
     }
 
-    Some(TimelineItemView {
-        id: event_id.to_string(),
-        row: view_content.row_kind(),
-        forwardable: view_content.forwardable(),
-        redactable: view_content.redactable(),
-        visibility: view_content.visibility(),
-        event_id: Some(event_id),
-        transaction_id: None,
-        send_state: None,
+    let mut item = TimelineItemView {
+        event_id: Some(event_id.clone()),
         is_own,
-        sender_name: member
-            .as_ref()
-            .and_then(|member| member.display_name().map(ToOwned::to_owned)),
-        sender_avatar: member
-            .as_ref()
-            .and_then(|member| member.avatar_url().map(ToString::to_string)),
-        timestamp: timestamp.0.into(),
+        sender_name,
+        sender_avatar,
         mention: content_mention(&item_content, is_own, own_user_id.as_deref(), highlighted),
         in_reply_to: in_reply_to(&item_content),
         thread_root: msg_like(&item_content).and_then(|msg| msg.thread_root.clone()),
         thread_summary,
-        content: view_content,
         sender: Some(sender),
-        reactions: Vec::new(),
-        read_by: Vec::new(),
-        read_timestamps: BTreeMap::new(),
         bundled_link_previews: bundled_link_previews(raw.message()),
         link_previews_removed: link_previews_removed(raw.message()),
         per_message_profile: message_profile,
         forwarded: original.content.as_ref().and_then(forward_meta),
-        forum_title: None,
-    })
+        ..TimelineItemView::bare(event_id.to_string(), timestamp.0.into(), view_content)
+    };
+    core.nicknames().apply_item(&mut item);
+    Some(item)
+}
+
+fn message_profile(
+    event: &EventTimelineItem,
+    raw: &RawFields,
+    local: Option<&LocalFields>,
+    local_content: &LocalContent,
+) -> Option<PerMessageProfileView> {
+    let pending_edit = event
+        .event_id()
+        .and_then(|event_id| local_content.pending_edit(event_id));
+    pending_edit
+        .map_or_else(|| per_message_profile(raw.content.as_ref()), Clone::clone)
+        .or_else(|| local?.profile.clone())
 }
 
 #[must_use]
+fn unsigned_thread_summary<T>(raw: &Raw<T>) -> Option<ThreadSummaryView> {
+    raw.get_field::<serde_json::Value>("unsigned")
+        .ok()
+        .flatten()
+        .and_then(|unsigned| bundled_thread_summary(&unsigned))
+}
+
+fn original_bundled_thread_summary(event: &EventTimelineItem) -> Option<ThreadSummaryView> {
+    unsigned_thread_summary(event.original_json()?)
+}
+
 pub fn timeline_item(
     item: &Arc<TimelineItem>,
     own_user_id: Option<&UserId>,
-    relays: &BTreeSet<OwnedUserId>,
     highlights: &Highlights,
     local_content: &LocalContent,
 ) -> TimelineItemView {
@@ -378,19 +570,19 @@ pub fn timeline_item(
                 _ => None,
             };
             let mut raw = RawFields::read(event);
+            if event.latest_edit_json().is_some() {
+                raw.original_content = original_content(event);
+            }
             let local = event
                 .send_state()
-                .and(event.transaction_id())
+                .and_then(|_| event.transaction_id())
                 .and_then(|transaction_id| local_content.get(transaction_id));
             raw.echo_formatted_body = local.and_then(|fields| fields.formatted_body.clone());
-            let message_profile = per_message_profile(raw.content.as_ref())
-                .or_else(|| local?.profile.clone())
-                .or_else(|| {
-                    relays
-                        .contains(event.sender())
-                        .then(|| relay_profile(raw.content.as_ref()))
-                        .flatten()
-                });
+            raw.echo_spoiler = local.and_then(|fields| fields.spoiler.clone());
+            raw.echo_gallery_spoilers = local
+                .map(|fields| fields.gallery_spoilers.clone())
+                .unwrap_or_default();
+            let message_profile = message_profile(event, &raw, local, local_content);
 
             let mention = mention(event, own_user_id, highlights.holds(&id, event));
             let bundled_link_previews = bundled_link_previews(raw.message());
@@ -398,18 +590,26 @@ pub fn timeline_item(
             let forwarded = forwarded(event, &raw);
             let forum_title = forum_title(raw.message());
             let content = content(event.content(), message_profile.as_ref(), &raw, own_user_id);
+            let visibility = if forged_state(event.encryption_info().is_some(), event.content()) {
+                TimelineVisibility::Hidden
+            } else {
+                content.visibility()
+            };
 
             TimelineItemView {
                 id,
                 row: content.row_kind(),
                 forwardable: content.forwardable(),
                 redactable: content.redactable(),
-                visibility: content.visibility(),
+                visibility,
                 event_id: event.event_id().map(ToOwned::to_owned),
                 transaction_id: event.transaction_id().map(ToString::to_string),
                 send_state: event.send_state().map(send_state),
                 sender: Some(event.sender().to_owned()),
-                sender_name: profile.and_then(|p: &Profile| p.display_name.clone()),
+                sender_name: profile
+                    .and_then(|p: &Profile| p.display_name.as_deref())
+                    .and_then(visible_name)
+                    .map(str::to_owned),
                 sender_avatar: profile
                     .and_then(|p: &Profile| p.avatar_url.as_ref())
                     .map(ToString::to_string),
@@ -417,7 +617,10 @@ pub fn timeline_item(
                 content,
                 in_reply_to: in_reply_to(event.content()),
                 thread_root: msg_like(event.content()).and_then(|msg| msg.thread_root.clone()),
-                thread_summary: thread_summary(event.content()),
+                thread_summary: merge_thread_summary(
+                    thread_summary(event.content()),
+                    original_bundled_thread_summary(event),
+                ),
                 reactions: annotatable_reactions(event),
                 is_own: event.is_own(),
                 read_by: event.read_receipts().keys().cloned().collect(),
@@ -428,6 +631,12 @@ pub fn timeline_item(
                 mention,
                 forwarded,
                 forum_title,
+                shield: msg_like(event.content())
+                    .and_then(|_| shield(event.get_shield(false)))
+                    .filter(|shield| {
+                        !event.content().is_redacted()
+                            || shield.code != MessageShieldCode::SentInClear
+                    }),
             }
         }
 
@@ -443,34 +652,7 @@ pub fn timeline_item(
                 VirtualTimelineItem::TimelineStart => (0, TimelineItemContentView::TimelineStart),
             };
 
-            TimelineItemView {
-                id,
-                row: content.row_kind(),
-                forwardable: content.forwardable(),
-                redactable: content.redactable(),
-                visibility: content.visibility(),
-                event_id: None,
-                transaction_id: None,
-                send_state: None,
-                sender: None,
-                sender_name: None,
-                sender_avatar: None,
-                timestamp,
-                content,
-                in_reply_to: None,
-                thread_root: None,
-                thread_summary: None,
-                reactions: Vec::new(),
-                is_own: false,
-                read_by: Vec::new(),
-                read_timestamps: BTreeMap::new(),
-                per_message_profile: None,
-                bundled_link_previews: Vec::new(),
-                link_previews_removed: None,
-                mention: MentionView::None,
-                forwarded: None,
-                forum_title: None,
-            }
+            TimelineItemView::bare(id, timestamp, content)
         }
     }
 }
@@ -583,7 +765,9 @@ mod tests {
     use matrix_sdk_base::store::QueueWedgeError;
     use serde_json::json;
 
-    use crate::protocol::{TimelineItemContentView, TimelineRowKind, TimelineVisibility};
+    use crate::protocol::{
+        TimelineItemContentView, TimelineRowKind, TimelineVisibility, UtdCauseView,
+    };
     use matrix_sdk::ruma::serde::Raw;
     use matrix_sdk::ruma::{OwnedEventId, OwnedTransactionId};
 
@@ -655,12 +839,94 @@ mod tests {
         assert!(local_content.get(&transaction_id).is_none());
     }
 
+    fn queued_edit(profile: Option<serde_json::Value>) -> SerializableEventContent {
+        let mut content = json!({
+            "msgtype": "m.text",
+            "body": "* hello",
+            "m.new_content": { "msgtype": "m.text", "body": "hello" },
+            "m.relates_to": { "rel_type": "m.replace", "event_id": "$target:example.org" },
+        });
+        if let Some(profile) = profile {
+            content["com.beeper.per_message_profile"] = profile;
+        }
+        SerializableEventContent::from_raw(
+            Raw::from_json_string(content.to_string()).expect("raw content"),
+            "m.room.message".to_owned(),
+        )
+    }
+
+    #[test]
+    fn a_queued_edit_carries_its_profile_to_the_edited_event() {
+        let target = OwnedEventId::try_from("$target:example.org").expect("an event id");
+        let transaction_id = OwnedTransactionId::from("txn");
+        let mut local_content = LocalContent::default();
+        assert!(local_content.pending_edit(&target).is_none());
+
+        local_content.apply(&RoomSendQueueUpdate::ReplacedLocalEvent {
+            transaction_id: transaction_id.clone(),
+            new_content: queued_edit(Some(json!({ "id": "kris", "displayname": "Kris" }))),
+        });
+        let profile = local_content
+            .pending_edit(&target)
+            .expect("the queued edit")
+            .as_ref()
+            .expect("its profile");
+        assert_eq!(profile.display_name.as_deref(), Some("Kris"));
+
+        local_content.apply(&RoomSendQueueUpdate::ReplacedLocalEvent {
+            transaction_id: transaction_id.clone(),
+            new_content: queued_edit(None),
+        });
+        assert!(
+            matches!(local_content.pending_edit(&target), Some(None)),
+            "an edit that drops the profile clears it too"
+        );
+
+        local_content.forget(&transaction_id);
+        assert!(local_content.pending_edit(&target).is_none());
+    }
+
+    #[test]
+    fn a_queued_edit_settles_once_its_remote_echo_is_the_latest_edit() {
+        let target = OwnedEventId::try_from("$target:example.org").expect("an event id");
+        let sent = OwnedEventId::try_from("$edit:example.org").expect("an event id");
+        let other = OwnedEventId::try_from("$other:example.org").expect("an event id");
+        let transaction_id = OwnedTransactionId::from("txn");
+        let mut local_content = LocalContent::default();
+        local_content.apply(&RoomSendQueueUpdate::ReplacedLocalEvent {
+            transaction_id: transaction_id.clone(),
+            new_content: queued_edit(Some(json!({ "id": "kris" }))),
+        });
+        local_content.apply(&RoomSendQueueUpdate::SentEvent {
+            transaction_id,
+            event_id: sent.clone(),
+        });
+
+        local_content.settle(&target, Some(&other));
+        assert!(local_content.pending_edit(&target).is_some());
+
+        local_content.settle(&target, Some(&sent));
+        assert!(local_content.pending_edit(&target).is_none());
+    }
+
     #[test]
     fn a_tombstone_is_a_message_row_that_cannot_be_redacted_again() {
-        let tombstone = TimelineItemContentView::Redacted { reason: None };
+        let tombstone = TimelineItemContentView::Redacted {
+            reason: None,
+            redacted_by: None,
+        };
         assert_eq!(tombstone.row_kind(), TimelineRowKind::Message);
         assert!(!tombstone.redactable());
         assert!(!tombstone.forwardable());
+    }
+
+    #[test]
+    fn an_undecryptable_event_is_a_message_row() {
+        let utd = TimelineItemContentView::UnableToDecrypt {
+            reason: UtdCauseView::Unknown,
+            session_id: None,
+        };
+        assert_eq!(utd.row_kind(), TimelineRowKind::Message);
     }
 
     #[test]
@@ -677,7 +943,10 @@ mod tests {
 
     #[test]
     fn visibility_names_the_preference_that_can_hide_a_row() {
-        let tombstone = TimelineItemContentView::Redacted { reason: None };
+        let tombstone = TimelineItemContentView::Redacted {
+            reason: None,
+            redacted_by: None,
+        };
         assert_eq!(tombstone.visibility(), TimelineVisibility::Tombstone);
         let hidden = TimelineItemContentView::HiddenEvent {
             event_type: "m.reaction".to_owned(),

@@ -123,7 +123,7 @@ test('a subspace holding no rooms never becomes a lone heading', () => {
     room('!empty', { is_space: true }),
   ];
 
-  const sections = buildHierarchySections(rooms, '!space');
+  const sections = buildHierarchySections(rooms, '!space', { joined: ['!space', '!empty'] });
   expect(sections.map((section) => section.space?.room_id ?? null)).toEqual([null]);
 });
 
@@ -203,7 +203,7 @@ test('a first page of nothing but subspaces yields no sections yet', () => {
     room('!sub', { is_space: true, children: [edge('!chat')] }),
   ];
 
-  expect(buildHierarchySections(rooms, '!root')).toEqual([]);
+  expect(buildHierarchySections(rooms, '!root', { joined: ['!root', '!sub'] })).toEqual([]);
 });
 
 test('a level still in flight is not an empty space', () => {
@@ -232,6 +232,7 @@ function summary(roomId: string, overrides: Partial<RoomListItemView> = {}): Roo
     canonical_alias: null,
     name: roomId,
     topic: null,
+    topic_html: null,
     avatar_url: null,
     is_direct: false,
     direct_targets: [],
@@ -247,6 +248,7 @@ function summary(roomId: string, overrides: Partial<RoomListItemView> = {}): Roo
     supports_restricted: false,
     supports_knock_restricted: false,
     space_children: [],
+    bridge: null,
     unread: 0,
     notifying: 0,
     highlight: 0,
@@ -331,9 +333,12 @@ test('a described subspace holding nothing is dropped again', () => {
     room('!sub', { is_space: true }),
   ];
 
-  expect(buildHierarchySections(rooms, '!root', { loaded: new Set(['!root', '!sub']) })).toEqual(
-    []
-  );
+  expect(
+    buildHierarchySections(rooms, '!root', {
+      loaded: new Set(['!root', '!sub']),
+      joined: ['!root', '!sub'],
+    })
+  ).toEqual([]);
 });
 
 test('a section with no known edges still reserves rows to fill', () => {

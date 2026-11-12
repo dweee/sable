@@ -10,6 +10,8 @@ import { core } from '#lib/core/__mocks__/context.js';
 import ProfileEditor from './ProfileEditor.svelte';
 
 vi.mock('#lib/core/context.js');
+vi.mock('#lib/features/room/members/MentionProfileCard.svelte', () => ({ default: () => {} }));
+vi.mock('#lib/features/room/timeline/TimelineItem.svelte', () => ({ default: () => {} }));
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/rooms/room-list.svelte.js')>()),
   useRoomList: () => ({ rooms: [], byId: () => undefined }),
@@ -19,6 +21,8 @@ const profile: ProfileView = {
   user_id: '@me:example.org',
   display_name: 'Me',
   avatar_url: null,
+  real_name: 'Me',
+  real_avatar_url: null,
   bio: null,
   hero_color: null,
   hero_brightness: null,
@@ -134,4 +138,55 @@ test('a status over the byte limit is shown as it was saved', async () => {
   });
   expect(status).toHaveValue('🌴'.repeat(64));
   expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+});
+
+test('the tabs are one tab stop that arrow keys move and select', async () => {
+  const user = userEvent.setup();
+  mount();
+  const edit = screen.getByRole('tab', { name: 'Edit' });
+  const preview = screen.getByRole('tab', { name: 'Preview' });
+
+  expect(edit).toHaveAttribute('tabindex', '0');
+  expect(preview).toHaveAttribute('tabindex', '-1');
+  expect(edit).toHaveAttribute('aria-controls', 'profile-panel-edit');
+
+  edit.focus();
+  await user.keyboard('{ArrowRight}');
+  expect(preview).toHaveFocus();
+  expect(preview).toHaveAttribute('aria-selected', 'true');
+  expect(preview).toHaveAttribute('tabindex', '0');
+  expect(edit).toHaveAttribute('tabindex', '-1');
+  expect(screen.getByRole('tabpanel')).toHaveAccessibleName('Preview');
+
+  await user.keyboard('{Home}');
+  expect(edit).toHaveFocus();
+  expect(edit).toHaveAttribute('aria-selected', 'true');
+});
+
+test('editing and saving the bio retains custom emoji and inline image URLs', async () => {
+  const user = userEvent.setup();
+  const onSaved = vi.fn();
+  render(ProfileEditor, {
+    profile: {
+      ...profile,
+      bio: '<p>Hello <img data-mx-emoticon src="mxc://example.org/wave" alt=":wave:"> <img src="mxc://example.org/cat" alt="Cat"></p>',
+    },
+    userId: profile.user_id,
+    onSaved,
+  });
+  const bio = screen.getByRole('combobox', { name: 'Biography' });
+  await user.click(bio);
+  await user.paste(' cheers');
+  await user.click(screen.getByRole('button', { name: 'Save' }));
+  await vi.waitFor(() => {
+    expect(onSaved).toHaveBeenCalled();
+  });
+  const [field, value] = setProfileField.mock.calls[0];
+  expect(field).toBe('gay.fomx.biography');
+  const texts = (value as { 'm.text': { body: string; mimetype?: string }[] })['m.text'];
+  expect(texts).toHaveLength(2);
+  expect(texts[0].mimetype).toBe('text/html');
+  expect(texts[0].body).toContain('mxc://example.org/wave');
+  expect(texts[0].body).toContain('mxc://example.org/cat');
+  expect(texts[1].body).toContain('cheers');
 });

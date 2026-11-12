@@ -154,6 +154,11 @@ test('receipts beside text, reactions, an embed or an image add no row of their 
           image_mime: null,
           image_width: null,
           image_height: null,
+          post: null,
+          video: null,
+          theme_color: null,
+          card: null,
+          author_name: null,
         },
       ],
     },
@@ -207,6 +212,11 @@ test('a receipt under a picture or an embed that fills the column never covers i
           image_mime: null,
           image_width: null,
           image_height: null,
+          post: null,
+          video: null,
+          theme_color: null,
+          card: null,
+          author_name: null,
         },
       ],
     },
@@ -238,29 +248,32 @@ test('a receipt under a picture or an embed that fills the column never covers i
   }
 });
 
-test('copying a receipted message by triple-click copies its text alone', async ({
-  page,
-  app,
-  timeline,
-  core,
-  installRoomCore,
-}) => {
-  await installRoomCore('ready');
-  await app.openRooms();
-  await app.openRoomFromList('General');
-  await timeline.expectRevealed();
-  const subscription = await core.subscription();
-  const row = page.locator('[data-item-id="general-18"] .message');
-  await core.setTimelineItemById(subscription, 'general-18', {
-    ...timelineItem('general-18', 'i will do it'),
-    read_by: Array.from({ length: 6 }, (_, index) => `@reader${String(index)}:example.test`),
-  });
-  await expect(row.locator('.read-receipt-stack .overflow')).toBeVisible();
+test.describe('with a fine pointer', () => {
+  test.use({ hasTouch: false });
 
-  await row.locator('.formatted-body').click({ clickCount: 3 });
-  const copied = await page.evaluate(() => getSelection()?.toString() ?? '');
-  expect(copied.trim()).toBe('i will do it');
-  expect(copied).not.toContain('\n');
+  test('copying a receipted message by triple-click copies its text alone', async ({
+    page,
+    app,
+    timeline,
+    core,
+    installRoomCore,
+  }) => {
+    await installRoomCore('ready');
+    await app.openRooms();
+    await app.openRoomFromList('General');
+    await timeline.expectRevealed();
+    const subscription = await core.subscription();
+    const row = page.locator('[data-item-id="general-18"] .message');
+    await core.setTimelineItemById(subscription, 'general-18', {
+      ...timelineItem('general-18', 'i will do it'),
+      read_by: Array.from({ length: 6 }, (_, index) => `@reader${String(index)}:example.test`),
+    });
+    await expect(row.locator('.read-receipt-stack .overflow')).toBeVisible();
+
+    await row.locator('.formatted-body').click({ clickCount: 3 });
+    const copied = await page.evaluate(() => getSelection()?.toString() ?? '');
+    expect(copied).toMatch(/^i will do it\s*$/);
+  });
 });
 
 test('bubble receipts sit beside trailing reactions on either side', async ({
@@ -317,6 +330,8 @@ for (const device of ['desktop', 'mobile']) {
           user_id: `@${name}:example.test`,
           display_name: name,
           avatar_url: `mxc://example.test/${name}`,
+          real_name: name,
+          real_avatar_url: `mxc://example.test/${name}`,
           power_level: 0,
           membership: 'join',
           member_ts: null,

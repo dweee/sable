@@ -1,26 +1,43 @@
 import { sentrySvelteKit } from '@sentry/sveltekit/vite';
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vite';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 
-import { fetchDeepFilterNet } from './scripts/build/fetch-deepfilternet.mjs';
 import { emojiDataPlugin } from './scripts/build/emoji-data-plugin.mjs';
+import { writeCspHeaders } from './scripts/build/csp.mjs';
 
 const wasmOutput = process.env.SABLE_WASM_OUTPUT ?? 'src/generated/wasm';
+const serverMode = Boolean(process.env.VITE_SABLE_SERVER_URL);
+const nativeMobile =
+  process.env.NODE_ENV === 'production' &&
+  ['android', 'ios'].includes(process.env.TAURI_ENV_PLATFORM ?? '');
+const staticAdapter = adapter({ assets: 'dist', pages: 'dist', fallback: '404.html' });
 
 export default defineConfig({
   define: {
     __SABLE_STABLE__: JSON.stringify(process.env.SABLE_BUILD_FLAVOR === 'stable'),
   },
   build: {
-    sourcemap: process.env.VITE_SENTRY_ENVIRONMENT === 'production' ? 'hidden' : true,
+    target: process.env.TAURI_ENV_PLATFORM === 'ios' ? 'safari15.4' : undefined,
+    cssTarget: process.env.TAURI_ENV_PLATFORM === 'ios' ? 'safari15.4' : undefined,
+    sourcemap:
+      process.env.SABLE_FOSS === '1'
+        ? false
+        : process.env.VITE_SENTRY_ENVIRONMENT === 'production'
+          ? 'hidden'
+          : true,
   },
   optimizeDeps: {
     exclude: ['phosphor-svelte'],
   },
   resolve: {
     alias: {
+      '#src/transport/create': resolve(
+        nativeMobile ? 'src/transport/create.native.ts' : 'src/transport/create.ts'
+      ),
       '#src/generated/wasm': resolve(wasmOutput),
     },
   },
@@ -51,13 +68,6 @@ export default defineConfig({
   },
   plugins: [
     emojiDataPlugin(),
-    {
-      name: 'deepfilternet-assets',
-      buildStart: async () => {
-        if (!process.env.VITEST && !process.env.SABLE_SKIP_DEEPFILTERNET)
-          await fetchDeepFilterNet();
-      },
-    },
     sentrySvelteKit({
       // The plugin detects the adapter from `svelte.config.js`, which this
       // project does not have, and does not know `adapter-static` either.
@@ -66,6 +76,10 @@ export default defineConfig({
       release: { name: process.env.VITE_APP_VERSION },
     }),
     sveltekit({
+      csp: serverMode ? { mode: 'hash' } : undefined,
+      // Defaults to the build time, which breaks reproducible APKs.
+      version: { name: process.env.VITE_APP_VERSION },
+      preprocess: vitePreprocess(),
       compilerOptions: {
         // Force runes mode for the project, except for libraries. Can be removed in svelte 6.
         runes: ({ filename }) =>
@@ -87,11 +101,16 @@ export default defineConfig({
       serviceWorker: {
         register: false,
       },
-      adapter: adapter({
-        assets: 'dist',
-        pages: 'dist',
-        fallback: '404.html',
-      }),
+      adapter: {
+        ...staticAdapter,
+        async adapt(builder) {
+          await staticAdapter.adapt(builder);
+          const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8')) as {
+            app: { security: { csp: Record<string, string> } };
+          };
+          await writeCspHeaders('dist', config.app.security.csp);
+        },
+      },
       inspector: true,
     }),
   ],

@@ -5,71 +5,83 @@
   import { i18n } from '#lib/i18n.js';
   import LockSimpleIcon from 'phosphor-svelte/lib/LockSimpleIcon';
   import DotsThreeVerticalIcon from 'phosphor-svelte/lib/DotsThreeVerticalIcon';
-  import MediaImage from '#lib/ui/MediaImage.svelte';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import ResizeHandle from '#lib/ui/primitives/ResizeHandle.svelte';
-  import {
-    PREFERENCE_RANGES,
-    preferences,
-    setPreference,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { PREFERENCE_RANGES } from '#lib/settings/definitions.js';
   import { bannerChanges, readRoomBanner } from '#lib/features/room/room-banner.svelte.js';
+  import Banner from '#lib/ui/primitives/Banner.svelte';
 
   interface Props {
     activeSpace: RoomListItemView | null;
+    activeRoom: RoomListItemView | null;
     title: string;
     titleIcon: Component;
     collapsed: boolean;
     menuItems: Snippet;
   }
 
-  let { activeSpace, title, titleIcon: TitleIcon, collapsed, menuItems }: Props = $props();
+  let {
+    activeSpace,
+    activeRoom,
+    title,
+    titleIcon: TitleIcon,
+    collapsed,
+    menuItems,
+  }: Props = $props();
 
   const core = useCoreClient();
   let activeSpaceId = $derived(activeSpace?.room_id ?? null);
+  let activeRoomId = $derived(activeRoom?.room_id ?? null);
 
-  let banner = $state<string | null>(null);
+  let spaceBanner = $state<string | null>(null);
+  let roomBanner = $state<string | null>(null);
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- a cache nothing renders from
   const banners = new Map<string, string | null>();
 
-  $effect(() => {
-    const spaceId = activeSpaceId;
+  function loadBanner(roomId: string | null, onLoad: (url: string | null) => void) {
     void bannerChanges.version;
-    if (spaceId === null) {
-      banner = null;
+    if (roomId === null) {
+      onLoad(null);
       return;
     }
 
     let current = true;
-    banner = banners.get(spaceId) ?? null;
-    void readRoomBanner(core, spaceId).then((next) => {
-      banners.set(spaceId, next);
-      if (current) banner = next;
+    onLoad(banners.get(roomId) ?? null);
+    void readRoomBanner(core, roomId).then((next) => {
+      if (!current) return;
+      banners.set(roomId, next);
+      onLoad(next);
     });
     return () => {
       current = false;
     };
-  });
+  }
 
+  // Keep the space banner ready as a fallback without reloading it on every room switch.
+  $effect(() => loadBanner(activeSpaceId, (next) => (spaceBanner = next)));
+  $effect(() => loadBanner(activeRoomId, (next) => (roomBanner = next)));
+
+  let banner = $derived(roomBanner ?? spaceBanner);
+  let bannerName = $derived(roomBanner !== null ? (activeRoom?.display_name ?? title) : title);
   let bannerShown = $derived(banner !== null && !collapsed && preferences.showRoomBanners);
-  const { min: bannerMin, max: bannerMax } = PREFERENCE_RANGES.roomBannerHeight;
+  const { min, max } = PREFERENCE_RANGES.roomBannerHeight;
 </script>
 
 <div class="room-nav-top">
   {#if bannerShown && banner}
     <div class="room-banner" style:height={`${preferences.roomBannerHeight}px`}>
-      <MediaImage source={banner} alt="" width={640} height={190} class="room-banner-image" />
+      <Banner source={banner} name={bannerName} width={640} height={190} />
       <ResizeHandle
         value={preferences.roomBannerHeight}
-        min={bannerMin}
-        max={bannerMax}
+        {min}
+        {max}
         label={i18n.t('nav.resizeRooms')}
         grow="down"
         step={16}
         shiftStep={64}
-        onResize={(next) =>
-          setPreference('roomBannerHeight', Math.max(bannerMin, Math.min(bannerMax, next)))}
+        onResize={(next) => setPreference('roomBannerHeight', Math.max(min, Math.min(max, next)))}
       />
     </div>
   {/if}
@@ -87,7 +99,7 @@
               {#if activeSpace}
                 <Avatar
                   id={activeSpace.room_id}
-                  src={activeSpace.avatar_url}
+                  src={activeSpace.display_avatar_url}
                   name={title}
                   size="small"
                 />
@@ -148,6 +160,7 @@
   }
 
   .room-banner :global(.room-banner-image),
+  .room-banner :global(.banner-button),
   .room-banner :global(img) {
     display: block;
     height: 100%;

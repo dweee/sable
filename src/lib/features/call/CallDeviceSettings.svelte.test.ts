@@ -5,12 +5,6 @@ import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 
 vi.mock('#lib/i18n.js', () => import('#lib/test-support/i18n.js'));
-vi.mock('svelte/reactivity', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('svelte/reactivity')>()),
-  MediaQuery: class {
-    current = true;
-  },
-}));
 
 import CallDeviceSettings from './CallDeviceSettings.svelte';
 import * as inputMeter from './input-meter';
@@ -92,7 +86,7 @@ test.each([
     ['callOutputDevice', 'USB speakers'],
     ['callCameraDevice', 'USB camera'],
   ]) {
-    await user.click(screen.getByRole('button', { name: `settings.${setting}` }));
+    await user.click(screen.getByRole('combobox', { name: `settings.${setting}` }));
     expect(await screen.findByRole('option', { name: label })).toBeInTheDocument();
     await user.keyboard('{Escape}');
   }
@@ -119,4 +113,57 @@ test('shows why microphone access failed', async () => {
     )
   ).toBeInTheDocument();
   expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
+});
+
+test('plays the microphone test through the output device and restarts it on new settings', async () => {
+  const enumerateDevices = vi.fn(() =>
+    Promise.resolve([
+      { deviceId: 'mixer-a', kind: 'audioinput', label: 'Mixer A' },
+      { deviceId: 'mixer-b', kind: 'audioinput', label: 'Mixer B' },
+      { deviceId: 'speakers', kind: 'audiooutput', label: 'USB speakers' },
+    ])
+  );
+  vi.stubGlobal('navigator', {
+    mediaDevices: Object.assign(new EventTarget(), { enumerateDevices }),
+  });
+  const { preferences } = await import('#lib/settings/preferences.svelte.js');
+  preferences.audioInputDevice = 'mixer-a';
+  preferences.audioOutputDevice = 'speakers';
+  const stop = vi.fn();
+  const start = vi.spyOn(inputMeter, 'startInputMeter').mockResolvedValue(stop);
+  const user = userEvent.setup();
+  const instance = render(CallDeviceSettings);
+
+  await user.click(screen.getByRole('button', { name: 'settings.callMicTest' }));
+  await waitFor(() => {
+    expect(start).toHaveBeenCalledWith(
+      'mixer-a',
+      expect.any(Function),
+      expect.objectContaining({ outputDevice: 'speakers' })
+    );
+  });
+
+  await user.click(screen.getByRole('combobox', { name: 'settings.callInputDevice' }));
+  await user.click(await screen.findByRole('option', { name: 'Mixer B' }));
+  await waitFor(() => {
+    expect(start).toHaveBeenLastCalledWith(
+      'mixer-b',
+      expect.any(Function),
+      expect.objectContaining({ outputDevice: 'speakers' })
+    );
+  });
+  expect(stop).toHaveBeenCalledOnce();
+
+  const echoCancellation = preferences.echoCancellation;
+  preferences.echoCancellation = !echoCancellation;
+  await waitFor(() => {
+    expect(start.mock.lastCall?.[2]?.constraints.echoCancellation).toBe(!echoCancellation);
+  });
+  expect(stop).toHaveBeenCalledTimes(2);
+
+  instance.unmount();
+  expect(stop).toHaveBeenCalledTimes(3);
+  preferences.echoCancellation = echoCancellation;
+  preferences.audioInputDevice = '';
+  preferences.audioOutputDevice = '';
 });

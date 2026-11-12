@@ -25,14 +25,24 @@ export async function listCallDevices(): Promise<{ devices: CallDevice[]; denied
   if (!supportsDeviceSelection()) return { devices: [], denied: false };
   try {
     const all = await navigator.mediaDevices.enumerateDevices();
+    const seen = new Set<string>();
     const devices = all
       .filter((device) => device.deviceId !== '' && !SCREEN_AUDIO_LABELS.includes(device.label))
+      .filter((device) => {
+        const key = `${device.kind}:${device.deviceId}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
       .map((device) => ({
         deviceId: device.deviceId,
         kind: device.kind,
         label: device.label,
       }));
-    return { devices, denied: all.some((device) => device.label === '') };
+    return {
+      devices,
+      denied: all.some((device) => device.kind === 'audioinput' && device.label === ''),
+    };
   } catch (error) {
     console.debug('[sable call] could not enumerate devices', error);
     return { devices: [], denied: true };

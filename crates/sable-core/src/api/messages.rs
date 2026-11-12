@@ -11,24 +11,27 @@ use serde::{Deserialize, Serialize};
 
 use super::Handler;
 use crate::link_previews::BUNDLED_LINK_PREVIEWS;
-use crate::outgoing::IMAGE_SOURCE_PACKS;
 use crate::link_previews::LEGACY_BUNDLED_LINK_PREVIEWS;
-use crate::outgoing::REACTION_SHORTCODE;
 use crate::link_previews::bundled_link_previews;
+use crate::link_previews::preview_refused;
+use crate::link_previews::url_preview;
+use crate::outgoing::IMAGE_SOURCE_PACKS;
+use crate::outgoing::REACTION_SHORTCODE;
 use crate::outgoing::empty_mentions;
-use crate::outgoing::empty_mentions_extra;
 use crate::outgoing::ensure_empty_mentions;
 use crate::outgoing::extra_content;
 use crate::outgoing::forum_title_value;
 use crate::outgoing::image_source_pack_extra;
 use crate::outgoing::image_source_pack_references;
-use crate::link_previews::preview_refused;
+use crate::outgoing::message_extra_content;
 use crate::outgoing::reaction_shortcode;
-use crate::link_previews::soliditas_preview;
 use crate::outgoing::sticker_info;
-use crate::link_previews::url_preview;
 use crate::outgoing::{gif_content, location_content, message_content, reply_to, thread_reply};
-use crate::protocol::{AttachmentInfoView, RpcError, ComposerContent, ComposerPill, GestureView, ImageSourcePackReferenceView, ImageSourcePackView, MessageKind, PackImageInfoView, PerMessageProfileView, ReactionShortcodeView, ScheduledMessageView, SubscriptionId, UrlPreviewView};
+use crate::protocol::{
+    AttachmentInfoView, ComposerContent, ComposerPill, GestureView, ImageSourcePackReferenceView,
+    ImageSourcePackView, MessageKind, PackImageInfoView, PerMessageProfileView,
+    ReactionShortcodeView, RpcCode, RpcError, ScheduledMessageView, SubscriptionId, UrlPreviewView,
+};
 use crate::{Core, ResultExt, view};
 
 domain! {
@@ -61,6 +64,8 @@ domain! {
     send_gesture,
     url_preview,
     reaction_shortcodes,
+    frequent_reactions,
+    remember_emoji,
     set_typing,
     media_config,
 }
@@ -78,10 +83,7 @@ pub struct MarkdownToContentParams {
 impl Handler for MarkdownToContentParams {
     type Ok = ComposerContent;
 
-    fn run(
-        self,
-        _core: &Arc<Core>,
-    ) -> impl Future<Output = Result<ComposerContent, RpcError>> {
+    fn run(self, _core: &Arc<Core>) -> impl Future<Output = Result<ComposerContent, RpcError>> {
         std::future::ready(Ok(sable_model::markdown::markdown_to_content(
             &self.markdown,
             &self.pills,
@@ -139,11 +141,8 @@ impl Handler for SendParams {
         let timeline = core.timeline_for(&room_id, thread_root.as_ref()).await?;
         let (body, formatted, persona) = match self.persona {
             Some(persona) => {
-                let (body, formatted, persona) = crate::personas::outgoing_with_fallback(
-                    self.body,
-                    self.formatted,
-                    &persona,
-                );
+                let (body, formatted, persona) =
+                    crate::personas::outgoing_with_fallback(self.body, self.formatted, &persona);
                 (body, formatted, Some(persona))
             }
             None => (self.body, self.formatted, None),
@@ -161,24 +160,32 @@ impl Handler for SendParams {
             .with_reply(&room_id, content, reply, thread_root.clone(), "send_reply")
             .await?;
 
-        let link_previews = self.link_previews;
-        let opt_out = self
-            .no_link_previews
+        let mut seen = std::collections::HashSet::new();
+        let had_previews = !self.link_previews.is_empty();
+        let link_previews: Vec<_> = self
+            .link_previews
+            .into_iter()
+            .filter(|preview| {
+                !self.no_link_previews
+                    && crate::link_previews::is_preview_url(&preview.url)
+                    && content.body().contains(&preview.url)
+                    && seen.insert(preview.url.clone())
+            })
+            .collect();
+        let opt_out = (self.no_link_previews || (had_previews && link_previews.is_empty()))
             .then(|| serde_json::Value::Array(Vec::new()));
-        let encrypted_images = core
-            .encrypted_preview_images(&room_id, &link_previews)
-            .await;
+        let images = core.prepare_preview_images(&room_id, &link_previews).await;
         let extra = extra_content(
             persona.as_ref().map(crate::personas::profile_extra_content),
             [
                 (
                     BUNDLED_LINK_PREVIEWS,
-                    bundled_link_previews(&link_previews, &encrypted_images, true)
+                    bundled_link_previews(&link_previews, &images, true)
                         .or_else(|| opt_out.clone()),
                 ),
                 (
                     LEGACY_BUNDLED_LINK_PREVIEWS,
-                    bundled_link_previews(&link_previews, &encrypted_images, false)
+                    bundled_link_previews(&link_previews, &images, false)
                         .or_else(|| opt_out.clone()),
                 ),
                 (
@@ -206,6 +213,8 @@ pub struct SendRawEventParams {
     pub event_type: String,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Unknown))]
     pub content: serde_json::Value,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for SendRawEventParams {
@@ -214,6 +223,12 @@ impl Handler for SendRawEventParams {
     async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
         let mut content = self.content;
         ensure_empty_mentions(&mut content);
+        if let Some(profile) = self.persona.as_ref() {
+            crate::personas::stamp_profile(
+                &mut content,
+                &crate::personas::without_fallback(profile),
+            );
+        }
         let response = core
             .room(&self.room_id)
             .await?
@@ -245,7 +260,7 @@ impl Handler for SendRedactionParams {
             .await?
             .redact(&self.event_id, self.reason.as_deref(), None)
             .await
-            .map_err(|error| core.homeserver_http_error("send_redaction", error))?;
+            .or_failed(core, "send_redaction")?;
         Ok(response.event_id.to_string())
     }
 }
@@ -277,7 +292,7 @@ impl Handler for SendStickerParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let url = OwnedMxcUri::from(self.url);
         if url.parts().is_err() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         let source = image_source_pack_extra(url.as_str(), self.source_pack);
 
@@ -348,7 +363,7 @@ impl Handler for SendGifParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let url = OwnedMxcUri::from(self.url);
         if url.parts().is_err() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
 
         let mut info = ImageInfo::new();
@@ -470,21 +485,7 @@ impl Handler for EditParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.edit_message(
-            &self.room_id,
-            self.event_id,
-            self.transaction_id,
-            self.body,
-            self.formatted,
-            self.kind,
-            self.media_caption,
-            self.thread_root,
-            self.mentions,
-            self.mentions_room,
-            self.persona,
-            self.forum_title,
-        )
-        .await
+        core.edit_message(self).await
     }
 }
 
@@ -597,6 +598,8 @@ pub struct ReactParams {
     pub thread_root: Option<OwnedEventId>,
     #[serde(default)]
     pub subscription: Option<SubscriptionId>,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for ReactParams {
@@ -611,28 +614,29 @@ impl Handler for ReactParams {
             shortcode,
             thread_root,
             subscription,
+            persona,
         } = self;
         core.ensure_reaction_target(&room_id, &event_id).await?;
         let timeline = core
             .subscribed_timeline(&room_id, thread_root.as_ref(), subscription)
             .await?;
-        let shortcode =
-            match shortcode.or_else(|| source_pack.as_ref().map(|source| source.shortcode.clone()))
-            {
-                Some(shortcode) => Some(shortcode),
-                None => {
-                    core.known_reaction_shortcode(&room_id, &event_id, &key)
-                        .await
-                }
-            };
+        let shortcode = match shortcode
+            .or_else(|| source_pack.as_ref().map(|source| source.shortcode.clone()))
+        {
+            Some(shortcode) => Some(shortcode),
+            None => {
+                core.known_reaction_shortcode(&room_id, &event_id, &key)
+                    .await
+            }
+        };
         let shortcode = reaction_shortcode(&key, shortcode.as_deref());
-        if let Some(source) = image_source_pack_extra(&key, source_pack) {
+        let added = if let Some(source) = image_source_pack_extra(&key, source_pack) {
             timeline
                 .toggle_reaction_with_extra_content(
                     &TimelineEventItemId::EventId(event_id),
                     &key,
                     extra_content(
-                        None,
+                        message_extra_content(persona.as_ref()),
                         [
                             (IMAGE_SOURCE_PACKS, Some(source)),
                             (REACTION_SHORTCODE, shortcode),
@@ -641,16 +645,22 @@ impl Handler for ReactParams {
                     ),
                 )
                 .await
-                .or_failed(core, "react")?;
+                .or_failed(core, "react")?
         } else {
             timeline
                 .toggle_reaction_with_extra_content(
                     &TimelineEventItemId::EventId(event_id),
                     &key,
-                    extra_content(empty_mentions_extra(), [(REACTION_SHORTCODE, shortcode)]),
+                    extra_content(
+                        message_extra_content(persona.as_ref()),
+                        [(REACTION_SHORTCODE, shortcode)],
+                    ),
                 )
                 .await
-                .or_failed(core, "react")?;
+                .or_failed(core, "react")?
+        };
+        if added && let Err(error) = core.remember_reaction(&key).await {
+            tracing::warn!("reaction history could not be saved: {error:?}");
         }
 
         Ok(())
@@ -672,6 +682,8 @@ pub struct SendLocationParams {
     #[serde(default)]
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub thread_root: Option<OwnedEventId>,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for SendLocationParams {
@@ -679,7 +691,7 @@ impl Handler for SendLocationParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         if view::geo_coordinates(&self.geo_uri).is_none() {
-            return Err(RpcError::InvalidLocation);
+            return Err(RpcCode::InvalidLocation.into());
         }
 
         let room_id = self.room_id;
@@ -694,7 +706,14 @@ impl Handler for SendLocationParams {
             .with_reply(&room_id, content, reply, thread_root, "send_location")
             .await?;
         timeline
-            .send(content.into())
+            .send_with_extra_content(
+                content.into(),
+                self.persona.as_ref().map(|profile| {
+                    crate::personas::profile_extra_content(&crate::personas::without_fallback(
+                        profile,
+                    ))
+                }),
+            )
             .await
             .or_failed(core, "send_location")?;
 
@@ -711,14 +730,24 @@ pub struct ForwardParams {
     pub event_id: OwnedEventId,
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub to_room_id: OwnedRoomId,
+    #[serde(default)]
+    pub include_metadata: Option<bool>,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for ForwardParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.forward_message(&self.room_id, &self.event_id, &self.to_room_id)
-            .await
+        core.forward_message(
+            &self.room_id,
+            &self.event_id,
+            &self.to_room_id,
+            self.persona.as_ref(),
+            self.include_metadata.unwrap_or(true),
+        )
+        .await
     }
 }
 
@@ -815,6 +844,8 @@ pub struct ScheduleParams {
     pub formatted: Option<String>,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub delay_ms: u64,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for ScheduleParams {
@@ -829,7 +860,7 @@ impl Handler for ScheduleParams {
             Vec::new(),
             false,
         );
-        core.schedule_message(&self.room_id, content, self.delay_ms)
+        core.schedule_message(&self.room_id, content, self.delay_ms, self.persona.as_ref())
             .await
     }
 }
@@ -850,6 +881,8 @@ pub struct ScheduleAttachmentParams {
     pub spoiler: bool,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub delay_ms: u64,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for ScheduleAttachmentParams {
@@ -857,17 +890,7 @@ impl Handler for ScheduleAttachmentParams {
     type Ok = String;
 
     async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
-        core.schedule_attachment(
-            &self.room_id,
-            self.filename,
-            self.mime,
-            self.url,
-            self.size,
-            self.info,
-            self.spoiler,
-            self.delay_ms,
-        )
-        .await
+        core.schedule_attachment(self).await
     }
 }
 
@@ -930,6 +953,8 @@ pub struct CreatePollParams {
     #[serde(default)]
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub thread_root: Option<OwnedEventId>,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for CreatePollParams {
@@ -942,7 +967,7 @@ impl Handler for CreatePollParams {
             self.undisclosed,
             self.max_selections,
         )
-        .ok_or(RpcError::InvalidPoll)?;
+        .ok_or(RpcCode::InvalidPoll)?;
         let content =
             matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent::from(
                 content,
@@ -950,7 +975,7 @@ impl Handler for CreatePollParams {
 
         core.timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?
-            .send_with_extra_content(content.into(), empty_mentions_extra())
+            .send_with_extra_content(content.into(), message_extra_content(self.persona.as_ref()))
             .await
             .or_failed(core, "create_poll")?;
 
@@ -972,6 +997,8 @@ pub struct VotePollParams {
     #[serde(default)]
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub thread_root: Option<OwnedEventId>,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for VotePollParams {
@@ -986,7 +1013,7 @@ impl Handler for VotePollParams {
 
         core.timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?
-            .send_with_extra_content(content.into(), empty_mentions_extra())
+            .send_with_extra_content(content.into(), message_extra_content(self.persona.as_ref()))
             .await
             .or_failed(core, "vote_poll")?;
 
@@ -1005,20 +1032,23 @@ pub struct EndPollParams {
     #[serde(default)]
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub thread_root: Option<OwnedEventId>,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for EndPollParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let content = matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
-            "The poll has closed.",
-            self.event_id,
-        );
+        let content =
+            matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
+                "The poll has closed.",
+                self.event_id,
+            );
 
         core.timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?
-            .send_with_extra_content(content.into(), empty_mentions_extra())
+            .send_with_extra_content(content.into(), message_extra_content(self.persona.as_ref()))
             .await
             .or_failed(core, "end_poll")?;
 
@@ -1035,14 +1065,21 @@ pub struct SendGestureParams {
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     #[serde(default)]
     pub target: Option<OwnedUserId>,
+    #[serde(default)]
+    pub persona: Option<PerMessageProfileView>,
 }
 
 impl Handler for SendGestureParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.send_gesture(&self.room_id, self.gesture, self.target.as_ref())
-            .await
+        core.send_gesture(
+            &self.room_id,
+            self.gesture,
+            self.target.as_ref(),
+            self.persona.as_ref(),
+        )
+        .await
     }
 }
 
@@ -1051,7 +1088,11 @@ impl Handler for SendGestureParams {
 pub struct UrlPreviewParams {
     pub url: String,
     #[serde(default)]
+    pub client: bool,
+    #[serde(default)]
     pub service: Option<String>,
+    #[serde(default)]
+    pub klipy_api_key: Option<String>,
 }
 
 impl Handler for UrlPreviewParams {
@@ -1059,9 +1100,23 @@ impl Handler for UrlPreviewParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<Option<UrlPreviewView>, RpcError> {
         let url = self.url;
-        if let Some(base) = self.service {
-            let data = soliditas_preview(&base, &url).await?;
-            return Ok(data.and_then(|data| url_preview(url, &data)));
+        if self.client {
+            #[cfg(not(target_family = "wasm"))]
+            return crate::link_previews::scrape_locally(
+                &url,
+                &sable_link_preview::ScrapeOptions {
+                    klipy_api_key: self.klipy_api_key,
+                },
+            )
+            .await;
+            #[cfg(target_family = "wasm")]
+            {
+                let Some(base) = self.service else {
+                    return Ok(None);
+                };
+                let data = crate::link_previews::soliditas_preview(&base, &url).await?;
+                return Ok(data.and_then(|data| url_preview(url, &data)));
+            }
         }
 
         let sent = core
@@ -1076,13 +1131,45 @@ impl Handler for UrlPreviewParams {
                 tracing::info!(context = "url_preview", "the homeserver refused the url");
                 return Ok(None);
             }
-            Err(error) => return Err(core.homeserver_http_error("url_preview", error)),
+            Err(error) => return Err(core.rpc_error("url_preview", &error)),
         };
 
         Ok(response
             .data
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
             .and_then(|data| url_preview(url, &data)))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct FrequentReactionsParams {
+    #[serde(default)]
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Unknown>))]
+    pub legacy: Option<serde_json::Value>,
+    #[serde(default)]
+    pub recent: Vec<String>,
+}
+
+impl Handler for FrequentReactionsParams {
+    type Ok = Vec<String>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Self::Ok, RpcError> {
+        core.frequent_reactions(self.legacy, &self.recent).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct RememberEmojiParams {
+    pub key: String,
+}
+
+impl Handler for RememberEmojiParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<Self::Ok, RpcError> {
+        core.remember_reaction(&self.key).await
     }
 }
 
@@ -1117,9 +1204,11 @@ impl Handler for SetTypingParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.room(&self.room_id)
-            .await?
-            .typing_notice(self.typing)
+        let room = core.room(&self.room_id).await?;
+        if room.state() != matrix_sdk::RoomState::Joined {
+            return Ok(());
+        }
+        room.typing_notice(self.typing)
             .await
             .or_failed(core, "set_typing")
     }

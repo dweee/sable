@@ -11,17 +11,22 @@ export async function collectMaps(root) {
   return entries.filter((entry) => entry.endsWith('.map')).map((entry) => join(root, entry));
 }
 
+export function sentryCommands(assets, release) {
+  return [
+    ['sourcemaps', 'inject', assets],
+    ['sourcemaps', 'upload', '--release', release, assets],
+  ];
+}
+
 async function main() {
   if (!process.env.VITE_SENTRY_DSN) return;
   for (const name of ['SENTRY_AUTH_TOKEN', 'SENTRY_ORG', 'SENTRY_PROJECT', 'VITE_APP_VERSION']) {
     if (!process.env[name]) throw new Error(`${name} is required for source map uploads`);
   }
   const [assets = 'dist'] = process.argv.slice(2);
-  execFileSync(
-    SentryCli.getPath(),
-    ['sourcemaps', 'upload', '--release', process.env.VITE_APP_VERSION, assets],
-    { stdio: 'inherit' }
-  );
+  for (const args of sentryCommands(assets, process.env.VITE_APP_VERSION)) {
+    execFileSync(SentryCli.getPath(), args, { stdio: 'inherit' });
+  }
   if (process.env.VITE_SENTRY_ENVIRONMENT !== 'production') return;
   for (const root of [assets, '.svelte-kit/output']) {
     for (const map of await collectMaps(root)) await rm(map);

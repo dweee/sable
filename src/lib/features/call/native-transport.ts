@@ -38,7 +38,11 @@ const connectionOf = (state: NativeCallSnapshot['connectionState']): CallTranspo
   }
 };
 
-const participantOf = (participant: NativeCallRemoteParticipant): CallParticipant => ({
+type NativeParticipant = NativeCallRemoteParticipant & {
+  screenShareAudio?: NativeCallRemoteParticipant['microphone'];
+};
+
+const participantOf = (participant: NativeParticipant): CallParticipant => ({
   identity: participant.identity,
   camera: participant.camera && {
     id: participant.camera.sid,
@@ -49,6 +53,11 @@ const participantOf = (participant: NativeCallRemoteParticipant): CallParticipan
     id: participant.screenShare.sid,
     muted: participant.screenShare.muted,
     subscribed: participant.screenShare.subscribed,
+  },
+  screenShareAudio: participant.screenShareAudio && {
+    id: participant.screenShareAudio.sid,
+    muted: participant.screenShareAudio.muted,
+    subscribed: participant.screenShareAudio.subscribed,
   },
   microphone: participant.microphone && {
     id: participant.microphone.sid,
@@ -74,13 +83,15 @@ const stateOf = (snapshot: NativeCallSnapshot, identity: string): CallTransportS
   cameraEnabled: snapshot.cameraEnabled,
   screenShareEnabled: snapshot.screenShareEnabled,
   error: snapshot.lastError?.message,
+  errorCode: snapshot.lastError?.code,
 });
 
 export type NativeTransport = CallTransport & { readonly callId: string };
 
 export async function createNativeTransport(
   callId: string,
-  identity: string
+  identity: string,
+  callerName?: string
 ): Promise<NativeTransport | null> {
   const plugin: Plugin | null = await loadNativeCalls();
   if (!plugin) return null;
@@ -91,6 +102,7 @@ export async function createNativeTransport(
   let unlisten: (() => void) | undefined;
   const queuedKeys: CallEncryptionKey[] = [];
   let connected = false;
+  let disposed = false;
 
   const adopt = (snapshot: NativeCallSnapshot): void => {
     if (snapshot.revision <= revision) return;
@@ -122,7 +134,12 @@ export async function createNativeTransport(
   return {
     callId,
     connect: async (options) => {
-      unlisten = await plugin.listenNativeCallSnapshot(adopt);
+      const stop = await plugin.listenNativeCallSnapshot(adopt);
+      if (disposed) {
+        stop();
+        return;
+      }
+      unlisten = stop;
       adopt(
         await plugin.connectNativeCall({
           callId,
@@ -134,6 +151,7 @@ export async function createNativeTransport(
             noiseSuppression: preferences.noiseSuppression,
             autoGainControl: preferences.autoGainControl,
           },
+          callerName,
           encryptionKeys: options.encryptionKeys.map((key) => ({
             identity: key.identity,
             keyIndex: key.keyIndex,
@@ -155,6 +173,7 @@ export async function createNativeTransport(
       }
     },
     disconnect: async () => {
+      disposed = true;
       try {
         adopt(await plugin.disconnectNativeCall({ callId }));
       } finally {
@@ -169,8 +188,9 @@ export async function createNativeTransport(
     setCameraEnabled: async (enabled) => {
       adopt(await plugin.setNativeCallCameraEnabled({ callId, enabled }));
     },
-    setParticipantVolume: async (identity, volume) => {
-      adopt(await plugin.setNativeCallParticipantVolume({ callId, identity, volume }));
+    setParticipantVolume: async (identity, volume, screen = false) => {
+      const request = { callId, identity, volume, screenShare: screen };
+      adopt(await plugin.setNativeCallParticipantVolume(request));
     },
     setEncryptionKey: async (key) => {
       if (!connected) {
@@ -210,8 +230,8 @@ export async function createNativeTransport(
             })
           );
         },
-        clear: async () => {
-          adopt(await plugin.clearNativeCallRemoteVideoOverlay({ callId }));
+        clear: async (trackId) => {
+          adopt(await plugin.clearNativeCallRemoteVideoOverlay({ callId, trackId }));
         },
       },
       audioRoutes: {

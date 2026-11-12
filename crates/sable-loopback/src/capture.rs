@@ -21,11 +21,6 @@ const MAX_PACKET_FRAMES: usize = 16_384;
 pub type Sink = Box<dyn FnMut(&[u8]) -> bool + Send>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    feature = "tauri",
-    derive(serde::Deserialize),
-    serde(tag = "kind", rename_all = "lowercase")
-)]
 pub enum Selection {
     System { exclude: Vec<String> },
     Apps { include: Vec<String> },
@@ -56,10 +51,10 @@ impl Drop for Com {
     }
 }
 
-fn processes() -> HashMap<u32, Process> {
-    let mut system = System::new();
+fn processes() -> Result<HashMap<u32, Process>, String> {
+    let mut system = System::new().map_err(|error| error.to_string())?;
     system.refresh_processes(ProcessesToUpdate::All, true);
-    system
+    Ok(system
         .processes()
         .iter()
         .map(|(pid, process)| {
@@ -71,7 +66,7 @@ fn processes() -> HashMap<u32, Process> {
                 },
             )
         })
-        .collect()
+        .collect())
 }
 
 fn playing_pids() -> Result<Vec<u32>, String> {
@@ -133,7 +128,7 @@ fn on_thread<T: Send + 'static>(
 /// Fails when Windows will not enumerate its audio devices.
 pub fn list_apps(webview: u32) -> Result<Vec<String>, String> {
     on_thread("screen-audio-list", move || {
-        let table = processes();
+        let table = processes()?;
         let own = std::process::id();
         let apps: BTreeSet<String> = playing_pids()?
             .into_iter()
@@ -156,7 +151,7 @@ fn resolve(selection: &Selection, webview: u32) -> Result<Mode, String> {
             let [name] = include.as_slice() else {
                 return Err("Windows can share the sound of one application at a time".to_owned());
             };
-            let table = processes();
+            let table = processes()?;
             table
                 .iter()
                 .filter(|(_, process)| app_name(&process.name).eq_ignore_ascii_case(name))

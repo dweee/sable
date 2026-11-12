@@ -1,5 +1,6 @@
 import { type PushDetails, runtimeConfig } from '#lib/config/runtime-config.js';
-import { type Preferences, preferences } from '#lib/settings/preferences.svelte.js';
+import { preferences } from '#lib/settings/preferences.svelte.js';
+import { type Preferences } from '#lib/settings/definitions.js';
 
 export type PushConfig = {
   gateway: string;
@@ -83,4 +84,21 @@ export async function pushConfig(
 ): Promise<{ resolved: PushConfig | null; details: PushDetails | null }> {
   const { push } = await runtimeConfig();
   return { resolved: resolvePushConfig(override, push), details: push };
+}
+
+export function embeddedServer(details: PushDetails | null | undefined): string {
+  return details?.unifiedPushEmbeddedServerUrl ?? 'https://ntfy.sh';
+}
+
+/** The distributor appends `/<topic>?up=1`, and `pusher()` in the shell drops
+    http or credentialed endpoints. */
+export function isEmbeddedServerUrl(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return false;
+  }
+  const addressed = parsed.username !== '' || parsed.password !== '';
+  return parsed.protocol === 'https:' && !addressed && parsed.search === '' && parsed.hash === '';
 }

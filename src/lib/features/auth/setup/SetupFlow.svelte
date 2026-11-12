@@ -9,6 +9,10 @@
   import { takeAfterLogin } from '#lib/auth/after-login.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { permissionState } from '#lib/features/notifications/present.js';
+  import { logoutWithPush } from '#lib/features/notifications/web-push.js';
+  import { SignOutGuard } from '#lib/features/sidebar/sign-out-guard.svelte.js';
+  import SignOutWarningDialog from '#lib/features/sidebar/SignOutWarningDialog.svelte';
+  import { pushOverride } from '#lib/notifications/push-config.js';
   import { i18n } from '#lib/i18n.js';
   import { telemetryConsentPending } from '#lib/platform/telemetry.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
@@ -45,19 +49,8 @@
     type SetupRecord,
   } from './setup-record';
 
-  const STAGE_LABELS: Record<SetupStep, string> = {
-    device: 'setup.stageDeviceLabel',
-    recovery: 'auth.stageRecoveryLabel',
-    profile: 'auth.stageProfileLabel',
-    notifications: 'setup.stageNotificationsLabel',
-    appearance: 'setup.stageAppearanceLabel',
-    layout: 'setup.stageLayoutLabel',
-    sync: 'setup.stageSyncLabel',
-    done: 'setup.stageDoneLabel',
-    consent: 'auth.stageConsentLabel',
-  };
-
   const core = useCoreClient();
+  const signOut = new SignOutGuard(core);
   let record = $state<SetupRecord | null>(null);
   let accountFinished = $state.raw<AccountStep[]>([]);
   let permissionAskable = false;
@@ -96,10 +89,6 @@
   $effect(() => {
     if (userId) void untrack(() => profile.load());
   });
-
-  function stepRoute(step: SetupStep): string {
-    return resolve('/(auth)/setup/[step]', { step });
-  }
 
   function stateFor(base: Pick<SetupRecord, 'registering'>, encryption: EncryptionStatusView) {
     return {
@@ -159,7 +148,7 @@
     }
     writeSetupRecord({ setItem: writeText }, key, next);
     record = next;
-    const target = stepRoute(upcoming);
+    const target = resolve('/(auth)/setup/[step]', { step: upcoming });
     if (reload) location.assign(target);
     else if (page.url.pathname !== target)
       void goto(target, { replace: requestedIndex < 0, reset: false });
@@ -168,6 +157,7 @@
   function leave(target: string, reload: boolean): void {
     leaving = true;
     if (reload) location.assign(target);
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- callers pass a resolved path
     else void goto(target);
   }
 
@@ -186,11 +176,26 @@
   function activate(index: number): void {
     const step = steps.at(index);
     if (!step) return;
-    if (index <= pendingIndex) void goto(stepRoute(step), { reset: false });
+    if (index <= pendingIndex)
+      void goto(resolve('/(auth)/setup/[step]', { step }), { reset: false });
     else if (index === pendingIndex + 1 && canSkipAhead && pending) advance(pending);
   }
 
+  async function logout(): Promise<void> {
+    const key = recordKey;
+    leaving = true;
+    try {
+      await logoutWithPush(core, pushOverride());
+    } catch (error) {
+      leaving = false;
+      throw error;
+    }
+    if (key) removeLocalValue(key);
+    await goto(resolve(core.session ? '/(app)/rooms' : '/(auth)/login'));
+  }
+
   function skipChecking(): void {
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- takeAfterLogin() returns a resolved path
     void goto(takeAfterLogin(resolve('/(app)/rooms')));
   }
 
@@ -211,15 +216,20 @@
   $effect(() => {
     if (!record || !pending || leaving) return;
     if (requestedIndex >= 0 && requestedIndex <= pendingIndex) return;
-    void goto(stepRoute(pending), { replace: true, reset: false });
+    void goto(resolve('/(auth)/setup/[step]', { step: pending }), {
+      replace: true,
+      reset: false,
+    });
   });
 </script>
 
-{#if !record}
-  <div class="setup-checking" role="status">
+<div class="setup-checking" role="status" aria-atomic="true">
+  {#if !record}
     <Spinner />
     <p>{i18n.t('setup.checking')}</p>
-  </div>
+  {/if}
+</div>
+{#if !record}
   <AuthSecondaryAction label={i18n.t('auth.skipForNow')} onclick={skipChecking} />
 {:else}
   <AuthRail
@@ -243,7 +253,6 @@
         reachable={index <= pendingIndex || (index === pendingIndex + 1 && canSkipAhead)}
         before={index < activeIndex}
         after={index > activeIndex}
-        accessibilityLabel={i18n.t(STAGE_LABELS[step])}
         unavailableLabel={i18n.t('setup.finishCurrentStep')}
         onActivate={() => {
           activate(index);
@@ -352,6 +361,12 @@
     {/each}
   </AuthRail>
 {/if}
+<AuthSecondaryAction
+  label={i18n.t('settings.logout')}
+  disabled={signOut.checking || signOut.signingOut}
+  onclick={() => void signOut.request(logout)}
+/>
+<SignOutWarningDialog guard={signOut} />
 
 <style>
   .setup-checking {

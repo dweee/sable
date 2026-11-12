@@ -27,6 +27,7 @@
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import Label from '#lib/ui/primitives/Label.svelte';
+  import LinkButton from '#lib/ui/primitives/LinkButton.svelte';
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import StatusBadge from '#lib/ui/primitives/StatusBadge.svelte';
@@ -37,11 +38,12 @@
   import VerifyDeviceDialog from './VerifyDeviceDialog.svelte';
   import DeviceActionForm from './DeviceActionForm.svelte';
   import RoomKeyFile from './RoomKeyFile.svelte';
+  import DehydratedDeviceSettings from './DehydratedDeviceSettings.svelte';
   import KeyBackupSettings from './KeyBackupSettings.svelte';
 
   const core = useCoreClient();
+  const accountManagementUrl = core.oauthMetadata?.account_management_uri;
   let devices = $state.raw<DeviceView[]>([]);
-  let accountManagement = $state(false);
   let status = $state<EncryptionStatusView | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -51,6 +53,7 @@
   let managingRecovery = $state(false);
   let newRecoveryKey = $state<string | null>(null);
   let confirmingReset = $state(false);
+  let confirmingReplaceBackup = $state(false);
   let deleting = $state<string | null>(null);
   let removing = $state<string | null>(null);
   let verificationOpen = $state(false);
@@ -58,6 +61,8 @@
   let verifying = $state<string | null>(null);
   let currentDevice = $derived(devices.find((device) => device.is_own));
   let cancelled = false;
+  let statusRevision = 0;
+  let devicesRevision = 0;
 
   const bulkSelected = new SvelteSet<string>();
   let bulkRemoving = $state(false);
@@ -102,6 +107,8 @@
   }
 
   async function refresh(): Promise<void> {
+    const requestedStatus = statusRevision;
+    const requestedDevices = devicesRevision;
     loading = true;
     error = null;
     try {
@@ -110,9 +117,8 @@
         core.rpc.encryption.devices(),
       ]);
       if (cancelled) return;
-      status = nextStatus;
-      devices = nextDevices.devices;
-      accountManagement = nextDevices.account_management;
+      if (requestedStatus === statusRevision) status = nextStatus;
+      if (requestedDevices === devicesRevision) devices = nextDevices.devices;
     } catch (cause) {
       if (!cancelled) error = messageFor(cause);
     } finally {
@@ -195,9 +201,10 @@
   }
 
   function toggleSelectAll(): void {
-    bulkSelected.clear();
     if (!allSelected) {
       for (const device of selectableDevices) bulkSelected.add(device.device_id);
+    } else {
+      bulkSelected.clear();
     }
   }
 
@@ -217,7 +224,7 @@
       try {
         const managementUrl = await core.rpc.encryption.deleteDevice({
           device_id: deviceId,
-          password: accountManagement ? null : bulkPassword || null,
+          password: accountManagementUrl ? null : bulkPassword || null,
         });
         if (managementUrl) await openExternalAuthUrl(managementUrl);
       } catch (cause) {
@@ -237,7 +244,7 @@
   }
 
   function beginRemoval(deviceId: string): void {
-    if (!accountManagement) {
+    if (!accountManagementUrl) {
       deleting = deviceId;
       return;
     }
@@ -250,16 +257,24 @@
     void removeDevice(deviceId, authWindow);
   }
 
-  async function manageRecovery(reset = false): Promise<void> {
+  async function manageRecovery(reset = false, replaceBackup = false): Promise<void> {
     managingRecovery = true;
     error = null;
     try {
       newRecoveryKey = reset
         ? await core.rpc.encryption.resetRecoveryKey({ passphrase: null })
-        : await core.rpc.encryption.enableRecovery({ passphrase: null });
+        : await core.rpc.encryption.enableRecovery({
+            passphrase: null,
+            replace_backup: replaceBackup,
+          });
+      confirmingReplaceBackup = false;
       await refresh();
     } catch (cause) {
-      error = messageFor(cause);
+      if (cause instanceof CoreError && cause.detail.code === 'backup_exists') {
+        confirmingReplaceBackup = true;
+      } else {
+        error = messageFor(cause);
+      }
     } finally {
       managingRecovery = false;
     }
@@ -273,7 +288,14 @@
   $effect(() => {
     void refresh();
     const unsubscribe = core.subscribeEvents((event) => {
-      if (event.type === 'encryption_status') status = event.status;
+      if (event.type === 'encryption_status') {
+        statusRevision += 1;
+        status = event.status;
+      }
+      if (event.type === 'devices_changed') {
+        devicesRevision += 1;
+        devices = event.devices;
+      }
     });
     return () => {
       cancelled = true;
@@ -294,7 +316,12 @@
   </IconButton>
 {/snippet}
 
-<AppPageShell title={i18n.t('settings.devicesTitle')} density="compact" class="devices-settings">
+<AppPageShell
+  maxWidth="56rem"
+  title={i18n.t('settings.devicesTitle')}
+  density="compact"
+  class="devices-settings"
+>
   {#if error}<Alert class="settings-error" variant="critical" role="alert">{error}</Alert>{/if}
 
   {#if newRecoveryKey}
@@ -400,6 +427,8 @@
           </div>
         {/if}
 
+        <DehydratedDeviceSettings />
+
         <div class="setting-row">
           <span class="row-icon" aria-hidden="true"><WarningCircleIcon /></span>
           <div class="row-copy">
@@ -424,6 +453,13 @@
       title={i18n.t('settings.signedInDevices')}
       titleActions={refreshAction}
     >
+      {#snippet actions()}
+        {#if accountManagementUrl}
+          <LinkButton href={accountManagementUrl} target="_blank" rel="noopener noreferrer">
+            {i18n.t('settings.devicesDashboard')}
+          </LinkButton>
+        {/if}
+      {/snippet}
       {#if loading}
         <div class="settings-form loading-state" role="status">
           <Spinner /><span>{i18n.t('settings.loadingDevices')}</span>
@@ -479,7 +515,7 @@
               >
               <p>{i18n.t('settings.removeDeviceDescription')}</p>
             </div>
-            {#if !accountManagement}
+            {#if !accountManagementUrl}
               <Label for="bulk-device-password">{i18n.t('settings.password')}</Label>
               <TextInput
                 id="bulk-device-password"
@@ -630,7 +666,7 @@
                 <DeviceActionForm
                   mode="remove"
                   deviceId={device.device_id}
-                  {accountManagement}
+                  accountManagement={!!accountManagementUrl}
                   bind:password
                   busy={removing === device.device_id}
                   onSubmit={() => void removeDevice(device.device_id)}
@@ -656,6 +692,24 @@
   onConfirm={() => void confirmReset()}
 />
 
+<ConfirmDialog
+  bind:open={confirmingReplaceBackup}
+  title={i18n.t('settings.replaceKeyBackupConfirmTitle')}
+  description={i18n.t('settings.replaceKeyBackupConfirmDescription')}
+  confirmLabel={i18n.t('settings.replaceKeyBackup')}
+  busy={managingRecovery}
+  onConfirm={() => void manageRecovery(false, true)}
+>
+  <Button
+    onclick={() => {
+      confirmingReplaceBackup = false;
+      verificationOpen = true;
+    }}
+  >
+    {i18n.t('settings.replaceKeyBackupUseExisting')}
+  </Button>
+</ConfirmDialog>
+
 {#if status}
   <VerifyDeviceDialog
     bind:open={verificationOpen}
@@ -672,10 +726,6 @@
   .device-seen {
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
-  }
-
-  :global(.app-page-shell.devices-settings) {
-    max-width: 56rem;
   }
 
   .settings-stack {

@@ -17,6 +17,7 @@
     rebind,
     resetAllBindings,
     resetBinding,
+    shortcutCapture,
   } from '#lib/ui/shortcuts/bindings.svelte.js';
   import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
   import { SHORTCUT_CATEGORIES, SHORTCUTS, type ShortcutId } from '#lib/ui/shortcuts/shortcuts.js';
@@ -28,6 +29,13 @@
   let isMac = $derived(isMacPlatform());
   let shortcuts = $derived(effectiveShortcuts());
   let rebound = $derived(SHORTCUTS.some((shortcut) => isRebound(shortcut.id)));
+
+  $effect(() => {
+    shortcutCapture.active = capturing !== null;
+    return () => {
+      shortcutCapture.active = false;
+    };
+  });
 
   function shortcutAnchor(id: ShortcutId): string {
     return `shortcut-${settingFocusId(id.replace('.', '-'))}`;
@@ -61,7 +69,12 @@
   }
 </script>
 
-<AppPageShell title={i18n.t('settings.keyboard')} density="compact" class="keyboard-settings-page">
+<AppPageShell
+  maxWidth="56rem"
+  title={i18n.t('settings.keyboard')}
+  density="compact"
+  class="keyboard-settings-page"
+>
   <div class="keyboard-settings">
     {#if rejected}
       <Alert variant="warning">{i18n.t('shortcuts.conflict', { name: rejected })}</Alert>
@@ -133,10 +146,6 @@
 </AppPageShell>
 
 <style>
-  :global(.app-page-shell.keyboard-settings-page) {
-    max-width: 56rem;
-  }
-
   .keyboard-settings {
     display: grid;
     gap: var(--space-400);

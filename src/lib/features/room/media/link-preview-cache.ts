@@ -18,16 +18,21 @@ export function resetUrlPreviews(): void {
 export function loadUrlPreview(
   messages: Pick<Rpc['messages'], 'urlPreview'>,
   url: string,
-  service: string | null
+  client: boolean,
+  service: string | null = null,
+  klipyApiKey: string | null = null
 ): Promise<UrlPreviewView | null> {
-  if (service === null && !homeserverPreviews) return Promise.resolve(null);
+  if (!client && !homeserverPreviews) return Promise.resolve(null);
 
-  const key = `${service ?? 'homeserver'}:${url}`;
+  const key = client ? `client:${service ?? ''}:${url}` : `homeserver:${url}`;
   const cached = previews.get(key);
   if (cached) return cached;
 
-  const request = messages.urlPreview({ url, service }).catch((error: unknown) => {
-    if (service === null && error instanceof CoreError && error.detail.code === 'unsupported') {
+  const params = client
+    ? { url, client, service, klipy_api_key: klipyApiKey }
+    : { url, service: null };
+  const request = messages.urlPreview(params).catch((error: unknown) => {
+    if (!client && error instanceof CoreError && error.detail.code === 'unsupported') {
       homeserverPreviews = false;
     }
     console.warn('[sable link preview] unavailable', url, error);
@@ -48,6 +53,16 @@ export function loadUrlPreview(
   return promise;
 }
 
+const BOT_CHALLENGED_HOSTS = new Set(['klipy.com', 'www.klipy.com']);
+
+function homeserverCanPreview(url: string): boolean {
+  try {
+    return !BOT_CHALLENGED_HOSTS.has(new URL(url).hostname);
+  } catch {
+    return true;
+  }
+}
+
 export interface PreviewSources {
   server: boolean;
   client: boolean;
@@ -65,8 +80,10 @@ export async function resolveUrlPreview(
   url: string,
   sources: PreviewSources
 ): Promise<UrlPreviewView | null> {
-  const service = sources.client ? (await runtimeConfig()).embeds.serviceUrl : null;
-  const fromService = service === null ? null : await loadUrlPreview(messages, url, service);
-  if (fromService !== null || !sources.server) return fromService;
-  return loadUrlPreview(messages, url, null);
+  const config = sources.client ? await runtimeConfig() : null;
+  const fromClient = config
+    ? await loadUrlPreview(messages, url, true, config.embeds.serviceUrl, config.gifs.klipyApiKey)
+    : null;
+  if (fromClient !== null || !sources.server || !homeserverCanPreview(url)) return fromClient;
+  return loadUrlPreview(messages, url, false);
 }

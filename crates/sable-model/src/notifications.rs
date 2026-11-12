@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use serde_with::{DefaultOnError, DeserializeAs, VecSkipError, serde_as};
 
-use crate::text::trim;
+use crate::text::{trim, visible_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
@@ -75,7 +75,11 @@ pub struct PushAlert {
     pub invite: bool,
 }
 
-const RING_EVENT_TYPES: [&str; 2] = ["m.rtc.notification", "org.matrix.msc4075.rtc.notification"];
+const RING_EVENT_TYPES: [&str; 3] = [
+    "m.rtc.invite",
+    "m.rtc.notification",
+    "org.matrix.msc4075.rtc.notification",
+];
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 /// A string that is not blank, kept as received; anything else reads as nothing.
@@ -128,6 +132,12 @@ struct ContentIn {
     body: Option<String>,
     #[serde_as(as = "NonBlankText")]
     #[serde(default)]
+    format: Option<String>,
+    #[serde_as(as = "NonBlankText")]
+    #[serde(default)]
+    formatted_body: Option<String>,
+    #[serde_as(as = "NonBlankText")]
+    #[serde(default)]
     membership: Option<String>,
     #[serde_as(as = "NonBlankText")]
     #[serde(default)]
@@ -137,7 +147,13 @@ struct ContentIn {
 impl From<ContentIn> for PushContent {
     fn from(content: ContentIn) -> Self {
         Self {
-            body: content.body,
+            body: content.body.map(|body| {
+                let formatted = content
+                    .formatted_body
+                    .as_deref()
+                    .filter(|_| content.format.as_deref() == Some("org.matrix.custom.html"));
+                crate::html::preview_body(&body, formatted)
+            }),
             membership: content.membership,
             notification_type: content.notification_type,
         }
@@ -197,6 +213,9 @@ struct Counts {
 #[serde_as]
 #[derive(Deserialize)]
 struct NotificationIn {
+    #[serde_as(as = "NonBlankText")]
+    #[serde(default)]
+    sender: Option<String>,
     #[serde_as(as = "Recipient")]
     #[serde(default)]
     user_id: Option<String>,
@@ -293,7 +312,10 @@ pub fn parse_push_payload(raw: &str) -> Option<PushNotification> {
         room_id: notification.room_id,
         event_id: notification.event_id,
         room_name: notification.room_name,
-        sender_display_name: notification.sender_display_name,
+        sender_display_name: notification
+            .sender_display_name
+            .and_then(visible_name)
+            .or(notification.sender),
         event_type: notification.event_type,
         membership: notification.membership,
         content: notification.content.unwrap_or_default().into(),
@@ -441,6 +463,36 @@ pub fn alert(
     })
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DeviceActivity {
+    pub devices: std::collections::BTreeMap<String, DeviceActivityEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DeviceActivityEntry {
+    pub active: bool,
+    pub at: u64,
+}
+
+const DEVICE_ACTIVITY_FRESH_MS: u64 = 3 * 60_000;
+const DEVICE_ACTIVITY_CLOCK_SKEW_MS: u64 = 60_000;
+
+#[must_use]
+pub fn active_elsewhere(content: &DeviceActivity, own_device_id: &str, now_ms: u64) -> bool {
+    content.devices.iter().any(|(device_id, entry)| {
+        device_id != own_device_id
+            && entry.active
+            && entry.at <= now_ms.saturating_add(DEVICE_ACTIVITY_CLOCK_SKEW_MS)
+            && now_ms.saturating_sub(entry.at) < DEVICE_ACTIVITY_FRESH_MS
+    })
+}
+
+#[must_use]
+pub fn active_elsewhere_json(content: &str, own_device_id: &str, now_ms: u64) -> bool {
+    serde_json::from_str::<DeviceActivity>(content)
+        .is_ok_and(|content| active_elsewhere(&content, own_device_id, now_ms))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -449,6 +501,73 @@ mod tests {
 
     fn parsed(raw: &Value) -> PushNotification {
         parse_push_payload(&raw.to_string()).expect("a valid push")
+    }
+
+    #[test]
+    fn hidden_push_names_use_the_sender() {
+        for name in [
+            "",
+            "   ",
+            "\u{200b}\u{2800}\u{feff}",
+            "\u{3164}",
+            "\u{2060}\u{2066}\u{2069}",
+            "\u{fe0f}\u{e0100}",
+            "\u{0085}",
+            "\u{0600}",
+            "\u{fff9}\u{fffa}\u{fffb}",
+            "\u{13430}",
+        ] {
+            let push = parsed(&json!({
+                "room_id": "!r:x", "sender": "@alice:x", "sender_display_name": name,
+            }));
+            assert_eq!(push.sender_display_name.as_deref(), Some("@alice:x"));
+        }
+    }
+
+    #[test]
+    fn rich_text_pushes_use_formatted_text() {
+        let content = json!({
+            "msgtype": "m.text",
+            "body": "<a data-mention-type=\"user\" href=\"https://matrix.to/#/@alice:example.org\" contenteditable=\"false\">Alice</a> hi &amp; welcome",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<a href=\"https://matrix.to/#/@alice:example.org\">Alice</a> hi &amp; welcome"
+        });
+        assert_eq!(
+            push_content(&content).body.as_deref(),
+            Some("Alice hi & welcome")
+        );
+        let push = parsed(&json!({
+            "room_id": "!r:x", "event_id": "$e", "sender_display_name": "Bob",
+            "type": "m.room.message", "content": content
+        }));
+        let shown = alert(&push, None, true).expect("an alert");
+        assert_eq!(shown.body, "Bob: Alice hi & welcome");
+        assert_eq!(shown.line.body, "Alice hi & welcome");
+    }
+
+    #[test]
+    fn push_previews_keep_literal_plain_text() {
+        for format in [json!(null), json!("org.example.other"), json!(5)] {
+            assert_eq!(
+                push_content(&json!({
+                    "body": "<b>literal</b> &amp; text", "format": format,
+                    "formatted_body": "<b>formatted</b>"
+                }))
+                .body
+                .as_deref(),
+                Some("<b>literal</b> &amp; text")
+            );
+        }
+    }
+
+    #[test]
+    fn push_previews_hide_spoilers_and_reply_fallbacks() {
+        let content = push_content(&json!({
+            "body": "quoted secret",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<mx-reply><blockquote>quoted</blockquote></mx-reply>look <span data-mx-spoiler>secret</span>"
+        }));
+        assert_eq!(content.body.as_deref(), Some("look [Spoiler]"));
     }
 
     #[test]
@@ -557,6 +676,24 @@ mod tests {
     }
 
     #[test]
+    fn stable_call_invites_use_the_receivers_presentation() {
+        let mut invite = PushNotification {
+            room_id: Some("!room:example.org".to_owned()),
+            event_type: Some("m.rtc.invite".to_owned()),
+            content: PushContent {
+                notification_type: Some("ring".to_owned()),
+                ..PushContent::default()
+            },
+            ..PushNotification::default()
+        };
+        assert!(alert(&invite, None, true).unwrap().ring);
+        invite.content.notification_type = Some("notification".to_owned());
+        assert!(!alert(&invite, None, true).unwrap().ring);
+        invite.content.notification_type = None;
+        assert!(!alert(&invite, None, true).unwrap().ring);
+    }
+
+    #[test]
     fn content_stays_out_when_previews_are_off() {
         let message = PushNotification {
             room_id: Some("!r:x".to_owned()),
@@ -594,6 +731,89 @@ mod tests {
         assert!(!silenced_by_room_mode(&encrypted, None));
         assert!(silenced_by_room_mode(
             &PushNotification::default(),
+            Some(NotificationModeView::Mute)
+        ));
+    }
+
+    #[test]
+    fn an_event_id_only_push_is_named_from_the_cached_room() {
+        let push = parsed(&json!({
+            "room_id": "!r:x", "event_id": "$e", "user_id": "@me:x", "unread": 1
+        }));
+        assert_eq!(
+            alert(&push, Some("Design crew"), true),
+            Some(PushAlert {
+                title: "Design crew".to_owned(),
+                body: "New message".to_owned(),
+                line: ConversationLine {
+                    sender: None,
+                    body: "New message".to_owned(),
+                    event_id: Some("$e".to_owned()),
+                },
+                tag: room_tag(Some("@me:x"), "!r:x"),
+                room_id: "!r:x".to_owned(),
+                event_id: Some("$e".to_owned()),
+                ring: false,
+                invite: false,
+            })
+        );
+        assert_eq!(room_tag(Some("@me:x"), "!r:x"), "@me:x !r:x");
+    }
+
+    #[test]
+    fn a_rich_push_prefers_the_name_the_server_sent() {
+        let push = parsed(&json!({
+            "room_id": "!r:x", "room_name": "Design crew", "sender_display_name": "Ada",
+            "content": {"body": "shipped the patch"}
+        }));
+        let shown = alert(&push, Some("Stale name"), true).expect("an alert");
+        assert_eq!(shown.title, "Design crew");
+        assert_eq!(shown.body, "Ada: shipped the patch");
+    }
+
+    #[test]
+    fn an_invitation_with_membership_content_says_so() {
+        let invite = parsed(&json!({
+            "room_id": "!r:x", "type": "m.room.member", "sender_display_name": "Ada",
+            "content": {"membership": "invite"}
+        }));
+        let shown = alert(&invite, Some("Design crew"), true).expect("an alert");
+        assert_eq!(shown.body, "Ada invited you");
+        assert!(shown.invite);
+    }
+
+    #[test]
+    fn a_call_notification_that_does_not_ring_stays_a_plain_alert() {
+        let notify = parsed(&json!({
+            "room_id": "!r:x", "type": "m.rtc.notification", "sender_display_name": "Ada",
+            "content": {"notification_type": "notification"}
+        }));
+        assert!(!alert(&notify, Some("Design crew"), true).unwrap().ring);
+    }
+
+    #[test]
+    fn hidden_previews_also_hide_the_conversation_line() {
+        let message = parsed(&json!({
+            "room_id": "!r:x", "event_id": "$e", "sender_display_name": "Ada",
+            "content": {"body": "the merger closes friday"}
+        }));
+        let hidden = alert(&message, Some("Design crew"), false).expect("an alert");
+        assert_eq!(hidden.body, "New message from Ada");
+        assert_eq!(hidden.line.body, "New message from Ada");
+    }
+
+    #[test]
+    fn a_plain_push_is_not_silenced_where_only_mentions_count() {
+        let plain = PushNotification {
+            event_type: Some("m.room.message".to_owned()),
+            ..PushNotification::default()
+        };
+        assert!(!silenced_by_room_mode(
+            &plain,
+            Some(NotificationModeView::Mentions)
+        ));
+        assert!(silenced_by_room_mode(
+            &plain,
             Some(NotificationModeView::Mute)
         ));
     }
@@ -656,5 +876,39 @@ mod tests {
         let push = parsed(&json!({"user_id": " @me:x ", "room_id": "!r:x", "room_name": " Den "}));
         assert_eq!(push.room_name.as_deref(), Some(" Den "));
         assert_eq!(push.user_id.as_deref(), Some("@me:x"));
+    }
+
+    const NOW: u64 = 1_000_000;
+
+    fn activity(value: &Value) -> DeviceActivity {
+        serde_json::from_value(value.clone()).expect("device activity content")
+    }
+
+    #[test]
+    fn a_fresh_active_report_from_another_device_keeps_this_one_quiet() {
+        let content = activity(&json!({
+            "devices": { "OTHER": { "active": true, "at": NOW - 20_000 } }
+        }));
+        assert!(active_elsewhere(&content, "OWN", NOW));
+    }
+
+    #[test]
+    fn this_devices_own_report_does_not_count() {
+        let content = activity(&json!({
+            "devices": { "OWN": { "active": true, "at": NOW - 20_000 } }
+        }));
+        assert!(!active_elsewhere(&content, "OWN", NOW));
+    }
+
+    #[test]
+    fn stale_future_inactive_or_malformed_reports_alert() {
+        for value in [
+            json!({ "devices": { "OTHER": { "active": true, "at": NOW - 180_000 } } }),
+            json!({ "devices": { "OTHER": { "active": true, "at": NOW + 60_001 } } }),
+            json!({ "devices": { "OTHER": { "active": false, "at": NOW - 20_000 } } }),
+        ] {
+            assert!(!active_elsewhere(&activity(&value), "OWN", NOW), "{value}");
+        }
+        assert!(!active_elsewhere_json("{\"devices\":true}", "OWN", NOW));
     }
 }

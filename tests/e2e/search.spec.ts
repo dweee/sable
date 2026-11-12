@@ -36,7 +36,7 @@ function searchField(page: Page) {
 }
 
 function orderControl(page: Page) {
-  return page.getByRole('button', { name: en.search.order });
+  return page.getByRole('combobox', { name: en.search.order });
 }
 
 async function chooseOrder(page: Page, label: string): Promise<void> {
@@ -173,11 +173,14 @@ test('the search shortcut in a room scopes the search to it', async ({
 }) => {
   await app.openRoom(searchCorpus.generalId);
 
+  const roomUrl = page.url();
   await page.keyboard.press('ControlOrMeta+f');
 
-  await expect(page).toHaveURL(/\/search\?q=/);
-  await expect(chips(page)).toHaveText(/in:\s*General/);
+  const panel = page.getByRole('complementary', { name: en.common.searchMessages });
+  await expect(panel).toBeVisible();
+  await expect(chips(panel)).toHaveText(/in:\s*General/);
   await expect(searchField(page)).toBeFocused();
+  expect(page.url()).toBe(roomUrl);
 });
 
 test('a submitted search is offered again from an empty field', async ({ page }) => {
@@ -304,12 +307,14 @@ test('the sort order rides in the url and survives a reload', async ({ page }) =
   await page.goto('/search');
   await searchField(page).fill('message');
 
-  await chooseOrder(page, en.search.orderRecent);
-  await expect(page).toHaveURL(/order=recent/);
+  await chooseOrder(page, en.search.orderOldest);
+  await expect(page).toHaveURL(/order=oldest/);
 
   await page.reload();
 
-  await expect(orderControl(page)).toHaveText(en.search.orderRecent);
+  await expect(orderControl(page)).toHaveText(en.search.orderOldest);
+  await chooseOrder(page, en.search.orderRecent);
+  await expect.poll(() => new URL(page.url()).searchParams.get('order')).toBeNull();
 });
 
 test('zero results are announced and offer a way out', async ({ page, searchCorpus }) => {

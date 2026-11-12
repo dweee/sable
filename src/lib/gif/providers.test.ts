@@ -3,6 +3,7 @@ import { expect, test } from 'vitest';
 import {
   gifFilename,
   gifFromProxiedMxc,
+  gifFromUploadedMxc,
   gifProvider,
   gifProviders,
   gifSearchAvailable,
@@ -119,6 +120,25 @@ test('a payload in the wrong shape yields no results rather than throwing', () =
   }
 });
 
+test('malformed metadata does not discard usable GIFs or neighboring records', () => {
+  const [usable, empty] = gifProviders.tenor.parse({
+    results: [
+      null,
+      {
+        id: 'kept',
+        title: false,
+        content_description: 23,
+        media_formats: {
+          gif: { url: 'https://media.tenor.com/a/cat.gif', dims: ['bad', '12'], size: '12' },
+        },
+      },
+      { id: 7, title: 'title', media_formats: [] },
+    ],
+  });
+  expect(usable).toMatchObject({ id: 'kept', title: 'GIF', width: 0, height: 12, size: 12 });
+  expect(empty).toMatchObject({ id: '', title: 'title', mediaUrl: '' });
+});
+
 test('klipy keeps only the gif encoding of each size', () => {
   const results = gifProviders.klipy.parse({
     data: {
@@ -216,6 +236,7 @@ test('a filename gets the extension the proxy will actually serve', () => {
   expect(gifFilename('a cat', 'image/gif')).toBe('a-cat.gif');
   expect(gifFilename('a cat.gif', 'image/gif')).toBe('a-cat.gif');
   expect(gifFilename('a cat', 'image/webp')).toBe('a-cat.webp');
+  expect(gifFilename('a cat', 'image/jpeg')).toBe('a-cat.gif');
   expect(gifFilename('  ', 'image/gif')).toBe('gif.gif');
 });
 
@@ -239,4 +260,38 @@ test('an mxc that is not a proxied provider gif is not a favorite candidate', ()
   expect(gifFromProxiedMxc('mxc://gifs.example/tenor_!!!', 'a.gif', null, null, null, null)).toBe(
     undefined
   );
+});
+
+test('an uploaded gif keeps its own mxc url and needs no proxy to be resent', () => {
+  const uploaded = gifFromUploadedMxc('mxc://example.org/abc', 'cat.gif', 4, 3, 10, 'image/gif');
+
+  expect(uploaded).toMatchObject({ mediaUrl: 'mxc://example.org/abc', title: 'cat', width: 4 });
+  expect(uploaded && proxiedGif(uploaded, null)).toEqual({
+    mxcUrl: 'mxc://example.org/abc',
+    mimetype: 'image/gif',
+  });
+});
+
+test('only plain mxc gifs count as uploaded', () => {
+  expect(
+    gifFromUploadedMxc('mxc://example.org/abc', 'a.png', 1, 1, 1, 'image/png')
+  ).toBeUndefined();
+  expect(
+    gifFromUploadedMxc('{"url":"mxc://example.org/abc"}', 'a.gif', 1, 1, 1, 'image/gif')
+  ).toBeUndefined();
+  expect(
+    gifFromUploadedMxc('mxc://gifs.example/tenor_YWJj', 'a.gif', 1, 1, 1, 'image/gif')
+  ).toBeUndefined();
+});
+
+test('an animated webp can be saved like a gif, a still one cannot', () => {
+  expect(
+    gifFromUploadedMxc('mxc://example.org/abc', 'cat.webp', 4, 3, 10, 'image/webp', true)
+  ).toMatchObject({ mediaUrl: 'mxc://example.org/abc', mimetype: 'image/webp' });
+  expect(
+    gifFromUploadedMxc('mxc://example.org/abc', 'cat.webp', 4, 3, 10, 'image/webp', false)
+  ).toBeUndefined();
+  expect(
+    gifFromUploadedMxc('mxc://example.org/abc', 'cat.webp', 4, 3, 10, 'image/webp')
+  ).toBeUndefined();
 });

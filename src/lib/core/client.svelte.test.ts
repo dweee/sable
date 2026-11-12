@@ -1,13 +1,40 @@
 import { afterEach, expect, test, vi } from 'vitest';
 
-import type { CoreEvent, SessionInfo } from '#src/generated/protocol';
-import { CoreError, type Transport } from '#src/transport';
+import { deviceDisplayName } from '#lib/deployment/policy.js';
+import { EMPTY_RUNTIME_CONFIG } from '#lib/config/runtime-config.js';
+import {
+  activateAccountConfiguration,
+  removeAccountConfiguration,
+  prepareLoginConfiguration,
+} from '#lib/deployment/deployment.js';
+import { reportSessionFailure } from '#lib/observability/session-telemetry.js';
+
+import type { AttachmentInfoView, CoreEvent, SessionInfo } from '#src/generated/protocol';
+import {
+  CoreError,
+  transportFailure,
+  type GalleryAttachment,
+  type Transport,
+} from '#src/transport';
 
 import { recentSearches, rememberSearch } from '#lib/search/recent-searches.svelte.js';
+import { activeRoomTimeline } from '#lib/rooms/timeline.svelte.js';
 
 import { joinRoom } from './api/rooms.js';
 import { createCoreClient } from './client.svelte.js';
-import { markVoiceRecording } from './attachment-info.js';
+import * as attachmentInfo from './attachment-info.js';
+
+vi.mock('#lib/observability/session-telemetry.js', () => ({ reportSessionFailure: vi.fn() }));
+vi.mock('#lib/deployment/deployment.js', async () => {
+  const { EMPTY_RUNTIME_CONFIG } = await import('#lib/config/runtime-config.js');
+  return {
+    deployment: () => EMPTY_RUNTIME_CONFIG,
+    loginConfiguration: () => EMPTY_RUNTIME_CONFIG,
+    activateAccountConfiguration: vi.fn(),
+    removeAccountConfiguration: vi.fn(),
+    prepareLoginConfiguration: vi.fn(() => Promise.resolve(EMPTY_RUNTIME_CONFIG)),
+  };
+});
 
 const localNetwork = vi.hoisted(() => ({ gated: false, denied: false }));
 
@@ -19,7 +46,7 @@ vi.mock('#lib/platform/local-network.js', async (importOriginal) => ({
 
 const session: SessionInfo = {
   account_id: 'account-a',
-  user_id: '@erwan:example.org',
+  user_id: '@kris:example.org',
   device_id: 'LAPTOP',
   homeserver: 'https://example.org',
   needs_reauth: false,
@@ -46,10 +73,81 @@ test('a locked account keeps its session and clears the lock after switching acc
   fake.emit({ type: 'account_lock_changed', account_id: session.account_id, locked: false });
   expect(core.accountLocked).toBe(false);
   fake.emit({ type: 'account_lock_changed', account_id: session.account_id, locked: true });
+  const previousTimeline = activeRoomTimeline(core);
+  core.memberPreviews.set('room', { key: '', threshold: 1, count: 0, groups: [] });
   await core.switchAccount(otherSession.account_id);
+  expect(activeRoomTimeline(core)).not.toBe(previousTimeline);
+  expect(core.memberPreviews.get('room', '', null)).toBeNull();
   expect(core.accountLocked).toBe(false);
   expect(core.session).toEqual(otherSession);
+  expect(activateAccountConfiguration).toHaveBeenLastCalledWith(otherSession);
   expect(fake.deleteAccountStore).not.toHaveBeenCalled();
+});
+
+test('a restore that takes longer than fifteen seconds is reported as a slow start', async () => {
+  vi.useFakeTimers();
+  try {
+    const fake = fakeTransport({ 'session.restore': () => new Promise(() => {}) });
+    const core = createCoreClient(() => fake.transport);
+    void core.start();
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(core.slowStart).toBe(false);
+    expect(reportSessionFailure).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(core.slowStart).toBe(true);
+    expect(core.status).toBe('starting');
+    expect(reportSessionFailure).toHaveBeenCalledWith('restore_slow');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('a slow restore that finishes clears the slow start', async () => {
+  vi.useFakeTimers();
+  try {
+    let finish: (value: SessionInfo) => void = () => {};
+    const fake = fakeTransport({
+      'session.restore': () => new Promise<SessionInfo>((resolve) => (finish = resolve)),
+      'session.list_accounts': [session],
+    });
+    const core = createCoreClient(() => fake.transport);
+    const started = core.start();
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(core.slowStart).toBe(true);
+
+    finish(session);
+    await started;
+    expect(core.status).toBe('ready');
+    expect(core.slowStart).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('retrying a stuck start begins a new attempt instead of joining it', async () => {
+  vi.useFakeTimers();
+  try {
+    let stuck = true;
+    const fake = fakeTransport({
+      'session.restore': () => (stuck ? new Promise(() => {}) : session),
+      'session.list_accounts': [session],
+    });
+    const core = createCoreClient(() => fake.transport);
+    void core.start();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(core.slowStart).toBe(true);
+
+    stuck = false;
+    await core.retryStart();
+
+    expect(core.status).toBe('ready');
+    expect(core.slowStart).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('keeps a lock event that arrives before the restored session response', async () => {
@@ -180,7 +278,7 @@ test('a restore that returns a session leaves the client ready', async () => {
   await core.start();
 
   expect(core.status).toBe('ready');
-  expect(core.session?.user_id).toBe('@erwan:example.org');
+  expect(core.session?.user_id).toBe('@kris:example.org');
   expect(core.accounts).toHaveLength(1);
 });
 
@@ -326,7 +424,7 @@ test('a restored session survives an account-list failure and a retry', async ()
   const fake = fakeTransport({ 'session.restore': session });
   fake.call.mockImplementation((method) =>
     method === 'session.list_accounts'
-      ? Promise.reject(new CoreError({ code: 'failed', log_id: 'e1' }))
+      ? Promise.reject(new CoreError(transportFailure('e1')))
       : Promise.resolve(session)
   );
   const recovered = fakeTransport({
@@ -364,7 +462,7 @@ test.each(['list_accounts', 'switch_account'])(
     await core.start();
     initial.call.mockImplementation((method) =>
       method === `session.${failedCommand}`
-        ? Promise.reject(new CoreError({ code: 'failed', log_id: 'e1' }))
+        ? Promise.reject(new CoreError(transportFailure('e1')))
         : Promise.resolve([retired, otherSession])
     );
     initial.emit({ type: 'session_ended', reason: 'soft_logout' });
@@ -387,7 +485,7 @@ test('failed crypto restoration exposes saved accounts for deliberate recovery',
   const fake = fakeTransport({ 'session.list_accounts': [session, otherSession] });
   fake.call.mockImplementation((method) =>
     method === 'session.restore'
-      ? Promise.reject(new CoreError({ code: 'failed', log_id: 'e1' }))
+      ? Promise.reject(new CoreError(transportFailure('e1')))
       : Promise.resolve([session, otherSession])
   );
   const core = createCoreClient(() => fake.transport);
@@ -443,6 +541,27 @@ test.each(['password', 'oidc', 'sso', 'qr'])(
     core.stop();
   }
 );
+
+test('sign-in requests carry the deployment device name', async () => {
+  vi.stubGlobal('BroadcastChannel', undefined);
+  const fake = fakeTransport({
+    'session.restore': session,
+    'session.list_accounts': [session],
+    'auth.login': session.user_id,
+    'auth.complete_sso_login': session.user_id,
+  });
+  const core = createCoreClient(() => fake.transport);
+
+  await core.login(session.homeserver, { kind: 'user', user: session.user_id }, 'password');
+  await core.completeSsoLogin('sable://sso/callback?loginToken=new');
+
+  for (const method of ['auth.login', 'auth.complete_sso_login']) {
+    expect(fake.called.find((call) => call.method === method)?.params).toMatchObject({
+      device_display_name: deviceDisplayName(),
+    });
+  }
+  core.stop();
+});
 
 test('concurrent starts share one restore', async () => {
   const fake = fakeTransport({ 'session.restore': null });
@@ -537,7 +656,7 @@ test('sending a voice recording forwards its MIME type, duration, waveform and v
   fake.transport.sendAttachment = sendAttachment;
   const core = createCoreClient(() => fake.transport);
   const recording = new File(['recording'], 'voice.ogg', { type: 'audio/ogg' });
-  markVoiceRecording(recording, [0, 0.5, 1], 1250);
+  attachmentInfo.markVoiceRecording(recording, [0, 0.5, 1], 1250);
 
   await core.media.sendAttachment('!room:example.org', recording);
 
@@ -560,7 +679,7 @@ test('sending an attachment forwards its rich caption, mentions, reply, and thre
     caption: 'hey Member One :wave:',
     formattedCaption:
       'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon>',
-    mentions: { userIds: ['@one:example.org'], room: true },
+    mentions: { user_ids: ['@one:example.org'], room: true },
     inReplyTo: '$reply:example.org',
     threadRoot: '$thread:example.org',
     persona: {
@@ -571,6 +690,11 @@ test('sending an attachment forwards its rich caption, mentions, reply, and thre
       color_on_light: null,
       color_on_dark: null,
       has_fallback: false,
+      biography: null,
+      banner_url: null,
+      is_animal: null,
+      has_animal: null,
+      animal_need: null,
     },
   });
 
@@ -587,6 +711,7 @@ test('sending an attachment forwards its rich caption, mentions, reply, and thre
     inReplyTo: '$reply:example.org',
     silentReply: false,
     info: null,
+    thumbnail: null,
     threadRoot: '$thread:example.org',
     persona: {
       id: 'hatchy',
@@ -596,10 +721,59 @@ test('sending an attachment forwards its rich caption, mentions, reply, and thre
       color_on_light: null,
       color_on_dark: null,
       has_fallback: false,
+      biography: null,
+      banner_url: null,
+      is_animal: null,
+      has_animal: null,
+      animal_need: null,
     },
     spoiler: false,
   });
 });
+
+test.each(['attachment', 'gallery'] as const)(
+  'sending a video %s separates its thumbnail from metadata',
+  async (kind) => {
+    const info: AttachmentInfoView = {
+      width: 1920,
+      height: 1080,
+      duration_ms: 12000,
+      animated: null,
+      blurhash: null,
+      waveform: null,
+      voice: false,
+      audio_metadata: null,
+    };
+    const thumbnail = { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 };
+    const measure = vi
+      .spyOn(attachmentInfo, 'measureAttachment')
+      .mockResolvedValue({ info, thumbnail });
+    try {
+      const fake = fakeTransport();
+      const sent: GalleryAttachment[] = [];
+      fake.transport.sendAttachment = (attachment) => {
+        sent.push(attachment);
+        return Promise.resolve();
+      };
+      fake.transport.sendGallery = (gallery) => {
+        sent.push(...gallery.attachments);
+        return Promise.resolve();
+      };
+      const core = createCoreClient(() => fake.transport);
+      const file = new File(['video'], 'video.mp4', { type: 'video/mp4' });
+      if (kind === 'attachment') await core.media.sendAttachment('!room:example.org', file);
+      else await core.media.sendGallery('!room:example.org', [file, file]);
+      expect(sent).toHaveLength(kind === 'attachment' ? 1 : 2);
+      for (const attachment of sent) {
+        expect(attachment.info).toEqual(info);
+        expect(attachment.thumbnail).toBe(thumbnail);
+        expect(attachment.bytes).toEqual(new TextEncoder().encode('video'));
+      }
+    } finally {
+      measure.mockRestore();
+    }
+  }
+);
 
 test('scheduling an attachment uploads it before creating its delayed event', async () => {
   const fake = fakeTransport({
@@ -632,6 +806,7 @@ test('scheduling an attachment uploads it before creating its delayed event', as
       size: 5,
       info: null,
       spoiler: false,
+      persona: null,
       delay_ms: 28_000,
     },
   });
@@ -653,6 +828,20 @@ test('an attachment is not uploaded when the homeserver cannot schedule it', asy
 });
 
 test('sending a gallery forwards shared metadata and every attachment', async () => {
+  const persona = {
+    id: 'kris',
+    display_name: 'Kris',
+    avatar_url: null,
+    pronouns: [],
+    color_on_light: null,
+    color_on_dark: null,
+    has_fallback: false,
+    biography: null,
+    banner_url: null,
+    is_animal: null,
+    has_animal: null,
+    animal_need: null,
+  };
   const fake = fakeTransport();
   const sendGallery = vi.fn<Transport['sendGallery']>();
   fake.transport.sendGallery = sendGallery;
@@ -663,16 +852,18 @@ test('sending a gallery forwards shared metadata and every attachment', async ()
   await core.media.sendGallery('!room:example.org', [first, second], {
     caption: 'Weekend',
     formattedCaption: '<strong>Weekend</strong>',
-    mentions: { userIds: ['@one:example.org'], room: true },
+    mentions: { user_ids: ['@one:example.org'], room: true },
     inReplyTo: '$reply',
     threadRoot: '$thread',
+    persona,
+    spoilers: [true],
   });
 
   expect(sendGallery).toHaveBeenCalledWith({
     roomId: '!room:example.org',
     attachments: [
-      expect.objectContaining({ filename: 'one.png', mime: 'image/png' }),
-      expect.objectContaining({ filename: 'two.pdf', mime: 'application/pdf' }),
+      expect.objectContaining({ filename: 'one.png', mime: 'image/png', spoiler: true }),
+      expect.objectContaining({ filename: 'two.pdf', mime: 'application/pdf', spoiler: false }),
     ],
     caption: 'Weekend',
     formattedCaption: '<strong>Weekend</strong>',
@@ -681,6 +872,7 @@ test('sending a gallery forwards shared metadata and every attachment', async ()
     inReplyTo: '$reply',
     silentReply: false,
     threadRoot: '$thread',
+    persona,
   });
 });
 
@@ -689,7 +881,11 @@ test('stopping clears the session and closes the transport', async () => {
   const core = createCoreClient(() => fake.transport);
 
   await core.start();
+  const previousTimeline = activeRoomTimeline(core);
+  core.memberPreviews.set('room', { key: '', threshold: 1, count: 0, groups: [] });
   core.stop();
+  expect(activeRoomTimeline(core)).not.toBe(previousTimeline);
+  expect(core.memberPreviews.get('room', '', null)).toBeNull();
 
   expect(core.status).toBe('idle');
   expect(core.session).toBeNull();
@@ -1388,7 +1584,7 @@ test('an onion homeserver leaves discovery to the Matrix core without a browser 
   expect(fake.called).toContainEqual({ method: 'auth.login_flows', params: { homeserver } });
 });
 
-test('a status reported while the first read is in flight is not overwritten by it', async () => {
+test('keeps newer trust events when the initial status read completes', async () => {
   const unknown = {
     verification: 'unknown',
     recovery: 'unknown',
@@ -1400,6 +1596,7 @@ test('a status reported while the first read is in flight is not overwritten by 
   const known = { ...unknown, verification: 'verified', recovery: 'enabled' } as const;
   let answer: (value: object) => void = () => {};
   const device = { device_id: 'LAPTOP' };
+  const verifiedDevice = { ...device, is_verified: true, cross_signed: true };
   const fake = fakeTransport({
     'session.restore': session,
     'session.list_accounts': [session],
@@ -1417,13 +1614,43 @@ test('a status reported while the first read is in flight is not overwritten by 
 
   await core.start();
   fake.emit({ type: 'encryption_status', status: known } as unknown as CoreEvent);
+  fake.emit({ type: 'devices_changed', devices: [verifiedDevice] } as unknown as CoreEvent);
   answer(unknown);
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await vi.waitFor(() => {
-    expect(core.deviceList).toEqual([device]);
+    expect(core.deviceList).toEqual([verifiedDevice]);
   });
 
   expect(core.encryption).toEqual(known);
   core.stop();
+});
+
+test('reads the OAuth metadata at session start and keeps a newer push', async () => {
+  const metadata = { account_management_uri: null, account_management_actions_supported: [] };
+  const pushed = {
+    account_management_uri: 'https://auth.example.org/account',
+    account_management_actions_supported: ['org.matrix.session_end'],
+  };
+  let answer: (value: object | null) => void = () => {};
+  const fake = fakeTransport({
+    'session.restore': session,
+    'session.list_accounts': [session],
+    'session.oauth_metadata': () =>
+      new Promise<object | null>((resolve) => {
+        answer = resolve;
+      }),
+  });
+  const core = createCoreClient(() => fake.transport);
+
+  await core.start();
+  expect(core.oauthMetadata).toBeUndefined();
+  fake.emit({ type: 'oauth_metadata', metadata: pushed } as unknown as CoreEvent);
+  answer(metadata);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(core.oauthMetadata).toEqual(pushed);
+  core.stop();
+  expect(core.oauthMetadata).toBeUndefined();
 });
 
 test('a stale login callback that fails does not discard the first status read', async () => {
@@ -1506,4 +1733,40 @@ test('writing a profile field invalidates the cached profile', async () => {
     core.stop();
     vi.useRealTimers();
   }
+});
+
+test('login discovers configuration using the entered server and uses its device name', async () => {
+  const fake = fakeTransport({
+    'session.restore': session,
+    'session.list_accounts': [session],
+    'auth.login': session.user_id,
+  });
+  const core = createCoreClient(() => fake.transport);
+  await core.start();
+  vi.mocked(prepareLoginConfiguration).mockResolvedValueOnce({
+    ...EMPTY_RUNTIME_CONFIG,
+    auth: { ...EMPTY_RUNTIME_CONFIG.auth, deviceDisplayName: 'Acme Chat' },
+  });
+  await core.login('example.org', { kind: 'user', user: 'kris' }, 'password');
+  expect(prepareLoginConfiguration).toHaveBeenCalledWith('example.org');
+  const calls = fake.call.mock.calls.filter(([method]) => method === 'auth.login');
+  expect(calls.at(-1)?.[1]).toMatchObject({
+    device_display_name: deviceDisplayName({
+      ...EMPTY_RUNTIME_CONFIG,
+      auth: { ...EMPTY_RUNTIME_CONFIG.auth, deviceDisplayName: 'Acme Chat' },
+    }),
+  });
+  core.stop();
+});
+
+test('removing an account removes its cached homeserver configuration', async () => {
+  const fake = fakeTransport({
+    'session.restore': session,
+    'session.list_accounts': [session, otherSession],
+  });
+  const core = createCoreClient(() => fake.transport);
+  await core.start();
+  await core.removeAccount(otherSession.account_id);
+  expect(removeAccountConfiguration).toHaveBeenCalledWith(otherSession.account_id);
+  core.stop();
 });

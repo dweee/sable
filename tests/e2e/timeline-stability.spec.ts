@@ -840,7 +840,9 @@ test('real wheel input through unmeasured history moves the reader by exactly th
       dropped += 1;
       continue;
     }
-    const missed = result.clamped ? 0 : Math.abs(result.readerMovement + WHEEL);
+    const missed = result.clamped
+      ? 0
+      : Math.max(Math.abs(result.readerMovement + WHEEL), Math.abs(result.screenMovement - WHEEL));
     if (missed > 2 || result.frameError > 2) {
       misses.push({ tick, pages: await core.paginateCount(), ...result });
     }
@@ -1286,7 +1288,7 @@ test('a message the reader sends from the bottom is followed on every frame', as
   timeline,
   core,
   installRoomCore,
-  isMobile,
+  hasTouch,
 }) => {
   await installRoomCore('ready');
   await page.setViewportSize({ width: 900, height: 420 });
@@ -1316,7 +1318,8 @@ test('a message the reader sends from the bottom is followed on every frame', as
         .poll(() => app.composer.evaluate((node) => node.getBoundingClientRect().height))
         .toBeGreaterThan(initialComposerHeight);
     }
-    if (send.method === 'button' || isMobile) await app.sendMessage.click();
+    // Enter adds a line on touch screens, so only a keyboard-first browser sends with it.
+    if (send.method === 'button' || hasTouch) await app.sendMessage.click();
     else await app.composer.press('Enter');
     await expect
       .poll(
@@ -1337,6 +1340,7 @@ test('a message the reader sends from the bottom is followed on every frame', as
         if (!viewport) throw new Error('no viewport');
         const gaps: number[] = [];
         let visible = true;
+        const hiddenFrames: unknown[] = [];
         window.__e2eEmitTimelineEvent({
           type: 'timeline_diff',
           subscription,
@@ -1349,10 +1353,25 @@ test('a message the reader sends from the bottom is followed on every frame', as
           if (!row) continue;
           const rowBounds = row.getBoundingClientRect();
           const viewportBounds = viewport.getBoundingClientRect();
+          const rows = viewport.querySelector('.window-rows');
+          const reserve = rows ? Number.parseFloat(getComputedStyle(rows).paddingBlockEnd) : 0;
+          // A bottom-following row also leaves the maintained footer reservation.
+          // A row taller than the remaining content area cannot fit in full.
+          const available = viewport.clientHeight - reserve;
           visible &&=
             rowBounds.bottom <= viewportBounds.bottom + 1 &&
             rowBounds.bottom >= viewportBounds.top &&
-            (rowBounds.height > viewport.clientHeight || rowBounds.top >= viewportBounds.top - 1);
+            (rowBounds.height > available || rowBounds.top >= viewportBounds.top - 1);
+          if (!visible)
+            hiddenFrames.push({
+              frame,
+              row: { top: rowBounds.top, bottom: rowBounds.bottom, height: rowBounds.height },
+              viewport: {
+                top: viewportBounds.top,
+                bottom: viewportBounds.bottom,
+                height: viewportBounds.height,
+              },
+            });
           if (frame === 15) {
             window.__e2eEmitTimelineEvent({
               type: 'timeline_diff',
@@ -1360,7 +1379,7 @@ test('a message the reader sends from the bottom is followed on every frame', as
               diffs: [
                 {
                   op: 'set',
-                  index: Number(row.dataset.index),
+                  index: window.__e2eTimelineIndexOf(subscription, echo.id),
                   value: {
                     ...echo,
                     event_id: `$${echo.id}`,
@@ -1372,12 +1391,14 @@ test('a message the reader sends from the bottom is followed on every frame', as
             });
           }
         }
-        return { gaps, visible };
+        return { gaps, visible, hiddenFrames };
       },
       { subscription, echo }
     );
     expect(Math.max(...result.gaps)).toBeLessThanOrEqual(1);
-    expect(result.visible).toBe(true);
+    expect(result.visible, JSON.stringify({ send: send.id, frames: result.hiddenFrames })).toBe(
+      true
+    );
     await expect(timeline.itemById(send.id)).toHaveAttribute('data-event-id', `$${send.id}`);
   }
 });
@@ -1413,8 +1434,7 @@ test('deleting the last composer character keeps following latest', async ({
           kind: 'message',
           body: linkBody,
           html: 'A link preview <a href="https://example.test/article">https://example.test/article</a>',
-          emote: false,
-          notice: false,
+          msgtype: 'text',
           edited: false,
         },
       },
@@ -1527,8 +1547,7 @@ test('follows sent links after scrolling back to the bottom in Firefox', async (
           kind: 'message',
           body,
           html: 'Firefox regression <a href="https://example.test/article">https://example.test/article</a>',
-          emote: false,
-          notice: false,
+          msgtype: 'text',
           edited: false,
         },
       },

@@ -24,14 +24,14 @@
     profilePalette,
   } from './readable-color.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
+  import Banner from './Banner.svelte';
 
   interface Props {
     displayName: string;
     userId: string;
     avatarUrl?: string | null;
-    avatarLabel?: string;
-    onAvatarClick?: (source: string, displayName: string) => void;
     onAvatarEdit?: () => void;
+    avatarEditLabel?: string;
     color: string;
     /** The owner's own choice, so only this one tints the card. `color` also
         covers the id-derived fallback. */
@@ -64,9 +64,8 @@
     displayName,
     userId,
     avatarUrl = null,
-    avatarLabel,
-    onAvatarClick,
     onAvatarEdit,
+    avatarEditLabel,
     color,
     pronouns,
     nameField,
@@ -109,17 +108,10 @@
       ink === BLACK ? (nameColorLight ?? nameColorDark) : (nameColorDark ?? nameColorLight);
     return palette && own ? nameColorOn(own, palette.ground) : null;
   });
-  let canOpenAvatar = $derived(Boolean(onAvatarEdit ?? (avatarUrl && onAvatarClick)));
-  function openAvatar(): void {
-    if (onAvatarEdit) onAvatarEdit();
-    else if (avatarUrl) onAvatarClick?.(avatarUrl, displayName);
-  }
-  function openBanner(): void {
-    if (banner) onAvatarClick?.(banner, displayName);
-  }
 
   const nameId = $props.id();
   let copied = $state(false);
+  let statusHovered = $state(false);
   async function copyUserId(): Promise<void> {
     await copyText(userId);
     copied = true;
@@ -136,6 +128,10 @@
 </script>
 
 <section
+  onpointerleave={(event) => {
+    statusHovered = false;
+    resetStatusScroll(event);
+  }}
   ondragstart={(event) => {
     event.preventDefault();
   }}
@@ -143,7 +139,7 @@
   class={[
     'profile-card',
     `profile-card-${variant}`,
-    { 'profile-card-inset-body': insetBody },
+    { 'profile-card-inset-body': insetBody, 'status-hovered': statusHovered },
     className,
     { tinted, 'tint-light': ink === BLACK, 'tint-dark': ink === WHITE },
   ]}
@@ -156,25 +152,11 @@
   data-inset-owner={variant === 'sheet' ? 'bottom' : undefined}
 >
   <div class={['profile-card-cover', { 'has-banner': banner }]} style:background={color}>
-    {#if banner && onAvatarClick}
-      <button
-        class="profile-card-banner-button"
-        type="button"
-        aria-label={i18n.t('timeline.profileBanner', { name: displayName })}
-        onclick={openBanner}
-      >
-        <MediaImage
-          class="profile-card-banner"
-          source={banner}
-          alt=""
-          width={720}
-          height={240}
-          original={preferences.autoplayGifs}
-        />
-      </button>
+    {#if banner}
+      <Banner source={banner} name={displayName} width={720} height={240} />
     {:else if cover}
       <MediaImage
-        class={banner ? 'profile-card-banner' : 'profile-card-banner profile-card-banner-fallback'}
+        class={banner ? 'banner-image' : 'banner-image banner-image-fallback'}
         source={cover}
         alt=""
         width={720}
@@ -185,35 +167,29 @@
   </div>
   <div class="profile-card-crest">
     <div class="profile-card-avatar-wrap">
-      {#if canOpenAvatar}
-        <button
-          class="profile-card-avatar-button"
-          type="button"
-          aria-label={avatarLabel ?? displayName}
-          onclick={openAvatar}
-        >
-          <Avatar
-            class="profile-card-avatar"
-            size="large"
-            src={avatarUrl}
-            name={displayName}
-            id={userId}
-            color={heroColor ? undefined : color}
-            original
-            decorative
-          />
-        </button>
-      {:else}
+      {#snippet avatar(openable: boolean)}
         <Avatar
           class="profile-card-avatar"
           size="large"
           src={avatarUrl}
+          {openable}
           name={displayName}
           id={userId}
           color={heroColor ? undefined : color}
           original
-          alt={displayName}
         />
+      {/snippet}
+      {#if onAvatarEdit}
+        <button
+          class="profile-card-avatar-edit-button"
+          type="button"
+          aria-label={avatarEditLabel}
+          onclick={onAvatarEdit}
+        >
+          {@render avatar(false)}
+        </button>
+      {:else}
+        {@render avatar(true)}
       {/if}
       {#if presence}<PresenceDot
           class="profile-card-presence"
@@ -227,6 +203,7 @@
     {:else if status || statusField}
       <div
         class="profile-card-status"
+        onpointerenter={() => (statusHovered = true)}
         role="group"
         onpointerleave={resetStatusScroll}
         onfocusout={resetStatusScroll}
@@ -318,6 +295,8 @@
 <style>
   @media (pointer: fine) {
     .profile-card {
+      border: var(--border-width) solid var(--profile-line);
+      border-radius: var(--radius);
       user-select: text;
     }
   }
@@ -325,10 +304,9 @@
   .profile-card {
     /* --sec-main alone fails 4.5:1 on the light background at this text
        size, so small words get a stronger mix and it is left to icons. */
-    --profile-text-muted: color-mix(in oklab, var(--sec-main) 55%, var(--surface-on-container));
-    --profile-ink: var(--surface-on-container);
+    --profile-text-muted: var(--surface-on-container);
     --profile-icon: var(--sec-main);
-    --profile-line: var(--surface-container-line);
+    --profile-line: color-mix(in oklab, var(--profile-ink) 20%, var(--profile-card-ground));
     --profile-avatar-size: var(--avatar-size-large);
     --profile-cover-height: var(--avatar-size-large);
     --profile-bio-lines: 4;
@@ -340,15 +318,26 @@
     --pill-ink: var(--profile-ink, var(--bg-on-container));
     --pill-icon: var(--profile-icon);
     --pill-state: var(--profile-chip-state);
-    --profile-chip-state: var(--bg-on-container);
-    --profile-panel-ground: var(--surface-var-container);
+    --profile-panel-ground: color-mix(
+      in oklab,
+      var(--profile-chip-state) 8%,
+      var(--surface-container)
+    );
 
-    background: var(--profile-card-ground);
-    border: var(--border-width) solid var(--profile-line);
-    border-radius: var(--radius);
+    background: var(--profile-panel-ground);
     color: var(--profile-ink);
     overflow: hidden;
     position: relative;
+  }
+
+  :root.dark .profile-card {
+    --profile-ink: var(--profile-ink-light);
+    --profile-chip-state: var(--profile-ink-dark);
+  }
+
+  :root.light .profile-card {
+    --profile-chip-state: var(--profile-ink-light);
+    --profile-ink: var(--profile-ink-dark);
   }
 
   .profile-card.tinted {
@@ -395,17 +384,17 @@
   }
 
   /* Both dimensions, so the ratio MediaImage sets inline stops applying. */
-  .profile-card-cover :global(.profile-card-banner) {
+  .profile-card-cover :global(.banner-image) {
     height: 100%;
     width: 100%;
   }
 
-  .profile-card-cover :global(.profile-card-banner img) {
+  .profile-card-cover :global(.banner-image img) {
     object-fit: cover;
     object-position: center;
   }
 
-  .profile-card-cover :global(.profile-card-banner-fallback img) {
+  .profile-card-cover :global(.banner-image-fallback img) {
     filter: blur(1.5rem) saturate(1.2);
     transform: scale(1.4);
   }
@@ -443,27 +432,12 @@
     box-shadow: 0 0 0 0.25rem var(--profile-card-ground);
   }
 
-  .profile-card-banner-button {
-    background: none;
-    border: 0;
-    cursor: pointer;
-    display: block;
-    height: 100%;
-    padding: 0;
-    width: 100%;
-  }
-
-  .profile-card-banner-button:focus-visible {
-    outline: var(--focus-ring-width) solid var(--focus-ring);
-    outline-offset: calc(-1 * var(--focus-ring-width));
-  }
-
-  .profile-card-avatar-button {
+  .profile-card-avatar-edit-button {
     background: none;
     border: 0;
     border-radius: var(--radii-400);
     cursor: pointer;
-    display: inline-flex;
+    display: flex;
     flex: 0 0 var(--profile-avatar-size);
     height: var(--profile-avatar-size);
     padding: 0;
@@ -473,13 +447,13 @@
   :global(.profile-card-presence) {
     --presence-ring: var(--profile-card-ground);
 
-    bottom: var(--space-050);
+    bottom: 0;
     position: absolute;
     right: 0;
     z-index: 1;
   }
 
-  .profile-card-avatar-button:focus-visible {
+  .profile-card-avatar-edit-button:focus-visible {
     outline: var(--focus-ring-width) solid var(--focus-ring);
     outline-offset: var(--focus-ring-offset);
   }
@@ -545,7 +519,7 @@
     outline-offset: calc(-1 * var(--focus-ring-width));
   }
 
-  .profile-card-status:hover .profile-card-status-text,
+  .profile-card.status-hovered .profile-card-status-text,
   .profile-card-status:focus-within .profile-card-status-text {
     display: block;
     -webkit-line-clamp: unset;
@@ -562,26 +536,25 @@
     padding: var(--space-300) var(--space-400) var(--space-400);
   }
 
-  .profile-card.tinted.profile-card-inset-body {
+  .profile-card.profile-card-inset-body {
     padding-bottom: var(--space-200);
   }
 
-  .profile-card-sheet.tinted.profile-card-inset-body {
+  .profile-card-sheet.profile-card-inset-body {
     padding-bottom: calc(var(--space-200) + var(--sheet-inset-bottom));
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-identity {
+  .profile-card.profile-card-inset-body .profile-card-identity {
     padding-inline: 0;
     padding-bottom: 0;
     padding-top: 0;
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-body {
-    background: var(--profile-panel-ground);
-    border: var(--border-width) solid var(--profile-line);
+  .profile-card.profile-card-inset-body .profile-card-body {
     border-radius: var(--radius-inner);
     margin: 0 var(--space-200);
-    padding: var(--space-200) var(--space-300);
+    padding: var(--space-200);
+    padding-block: var(--space-300) var(--space-200);
   }
 
   .profile-card-heading {
@@ -589,7 +562,7 @@
     display: flex;
     flex-flow: row wrap;
     gap: var(--space-100) var(--space-200);
-    margin-bottom: var(--space-100);
+    margin-bottom: var(--space-050);
   }
 
   .profile-card-heading :global(.btn:last-child) {
@@ -602,16 +575,12 @@
   }
 
   .profile-card-name {
+    color: var(--profile-name-color);
     font-size: var(--font-size-heading);
     font-weight: var(--font-weight-bold);
     letter-spacing: -0.01em;
     min-width: 0;
     overflow-wrap: anywhere;
-  }
-
-  .profile-card-name.tinted,
-  :global(.profile-card-tinted) {
-    color: var(--profile-name-color);
   }
 
   .profile-card-user-id {
@@ -647,7 +616,7 @@
 
   @media (pointer: coarse) {
     .profile-card-user-id {
-      min-height: var(--control-height-large);
+      min-height: 48px;
     }
   }
 
@@ -664,9 +633,9 @@
     display: flex;
     flex-wrap: wrap;
     font-size: var(--font-size-small);
-    gap: var(--space-100) var(--space-300);
+    gap: var(--space-050) var(--space-300);
     line-height: var(--line-height-small);
-    margin-top: var(--space-150);
+    margin-top: var(--space-250);
   }
 
   .profile-card-meta :global(svg) {
@@ -677,12 +646,12 @@
   /* Same gutter as the identity text, and framed only with a bio to hold: a lone
      misc-data line in a panel reads as an empty box. */
   .profile-card-panel {
-    margin: 0 var(--space-400) var(--space-300);
+    margin: 0 var(--space-300) var(--space-100);
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-panel {
+  .profile-card.profile-card-inset-body .profile-card-panel {
     margin-inline: 0;
-    margin-top: var(--space-200);
+    margin-top: var(--space-300);
   }
 
   /* Padding sits on the rows so the divider between them can reach
@@ -695,19 +664,19 @@
     overflow: clip;
   }
 
-  .profile-card.tinted .profile-card-status,
-  .profile-card.tinted .profile-card-panel.framed {
+  .profile-card .profile-card-status,
+  .profile-card .profile-card-panel.framed {
     color: var(--profile-ink);
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-panel.framed {
-    background: var(--profile-hero);
+  .profile-card.profile-card-inset-body .profile-card-panel.framed {
+    background: var(--profile-card-ground);
     border: 0;
     border-radius: var(--radii-400);
     box-shadow: inset 0 1px 2px color-mix(in srgb, var(--profile-ink) 12%, transparent);
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-footer {
+  .profile-card.profile-card-inset-body .profile-card-footer {
     display: flex;
     flex-direction: column;
     text-align: center;
@@ -739,7 +708,7 @@
     outline-offset: calc(-1 * var(--focus-ring-width));
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-bio {
+  .profile-card.profile-card-inset-body .profile-card-bio {
     margin-block: 0;
     max-height: 12.5rem;
     padding: var(--space-200);
@@ -749,18 +718,18 @@
     white-space: normal;
   }
 
-  .profile-card.tinted :global(.formatted-body a:not([data-matrix-link], [data-settings-link])) {
+  .profile-card :global(.formatted-body a:not([data-matrix-link], [data-settings-link])) {
     color: var(--profile-ink);
     text-decoration: underline;
   }
 
-  .profile-card.tinted :global(.formatted-body code:not(pre code)) {
+  .profile-card :global(.formatted-body code:not(pre code)) {
     background: var(--profile-card-ground);
     border-color: var(--profile-line);
     color: var(--profile-ink);
   }
 
-  .profile-card.tinted :global(.formatted-body .code-block) {
+  .profile-card :global(.formatted-body .code-block) {
     color: var(--surface-var-on-container);
   }
 
@@ -770,42 +739,60 @@
     padding: 0 var(--space-400) var(--space-400);
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-composer {
-    padding: var(--space-200) 0 0;
+  .profile-card.profile-card-inset-body .profile-card-composer {
+    padding: var(--space-400) 0 0;
   }
 
   .profile-card-below {
     padding: 0 var(--space-400) var(--space-400);
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-below {
-    padding: var(--space-200) 0 0;
+  .profile-card.profile-card-inset-body .profile-card-below {
+    padding: var(--space-300) 0 0;
   }
 
   .profile-card-footer.divided {
     border-top: var(--border-width) solid var(--profile-line);
   }
 
-  .profile-card.tinted.profile-card-inset-body .profile-card-footer.divided {
+  .profile-card.profile-card-inset-body .profile-card-footer.divided {
     border-top: 0;
   }
 
   @media (prefers-color-scheme: dark) {
-    :root:not(.light) .profile-card-name.tinted,
-    :root:not(.light) :global(.profile-card-tinted),
-    :root.dark .profile-card-name.tinted,
-    :root.dark :global(.profile-card-tinted) {
+    :root:not(.light) .profile-card-name,
+    :root.dark .profile-card-name {
       color: var(--profile-name-color-dark);
     }
   }
 
-  :root.dark .profile-card-name.tinted,
-  :root.dark :global(.profile-card-tinted) {
+  .profile-card .profile-card-name {
+    color: var(--profile-name-on-hero, var(--profile-ink));
+  }
+
+  :root.dark .profile-card-name {
     color: var(--profile-name-color-dark);
   }
 
-  .profile-card.tinted .profile-card-name.tinted,
-  .profile-card.tinted :global(.profile-card-tinted) {
+  /* A tinted card brings its own ground, so the hero picks the name colour. */
+  .profile-card.tinted .profile-card-name {
     color: var(--profile-name-on-hero, var(--profile-ink));
+  }
+
+  @supports not (color: color-mix(in srgb, black, white)) {
+    .profile-card {
+      --profile-line: var(--surface-var-container-line);
+      --profile-panel-ground: var(--surface-container);
+    }
+
+    .profile-card.tinted {
+      --profile-chip-line: var(--surface-var-container-line);
+      --pill-primary-hover: var(--surface-container-hover);
+      --profile-line: var(--surface-var-container-line);
+    }
+
+    .profile-card.profile-card-inset-body .profile-card-panel.framed {
+      box-shadow: inset 0 1px 2px var(--profile-ink);
+    }
   }
 </style>

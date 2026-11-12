@@ -16,7 +16,9 @@ export type SendAttachmentOptions = {
   spoiler?: boolean;
 };
 
-export type SendGalleryOptions = Omit<SendAttachmentOptions, 'persona' | 'spoiler'>;
+export type SendGalleryOptions = Omit<SendAttachmentOptions, 'spoiler'> & {
+  spoilers?: readonly boolean[];
+};
 
 /** Moves bytes: uploads, attachments and media reads, which the RPC router does not carry. */
 export function createMedia(transport: () => Transport) {
@@ -34,13 +36,14 @@ export function createMedia(transport: () => Transport) {
       roomId: string,
       picked: File,
       dueTs: number,
-      spoiler = false
+      spoiler = false,
+      persona: PerMessageProfileView | null = null
     ): Promise<string> {
       const file = withResolvedMime(picked);
       await validateAttachments([file]);
       const supported = await rpc.session.delayedEventsSupported();
       if (!supported) throw new CoreError({ code: 'delayed_events_unsupported' });
-      const [info, bytes] = await Promise.all([
+      const [measured, bytes] = await Promise.all([
         measureAttachment(file),
         file.arrayBuffer().then((buffer) => new Uint8Array(buffer)),
       ]);
@@ -51,8 +54,9 @@ export function createMedia(transport: () => Transport) {
         mime: file.type || 'application/octet-stream',
         url,
         size: file.size,
-        info,
+        info: measured.info,
         spoiler,
+        persona: $state.snapshot(persona),
         delay_ms: Math.max(0, dueTs - Date.now()),
       });
     },
@@ -64,7 +68,7 @@ export function createMedia(transport: () => Transport) {
     ): Promise<void> {
       const file = withResolvedMime(picked);
       await validateAttachments([file]);
-      const info = await measureAttachment(file);
+      const measured = await measureAttachment(file);
       const bytes = new Uint8Array(await file.arrayBuffer());
       await transport().sendAttachment({
         roomId,
@@ -73,11 +77,12 @@ export function createMedia(transport: () => Transport) {
         bytes,
         caption: options.caption ?? null,
         formattedCaption: options.formattedCaption ?? null,
-        mentions: [...(options.mentions?.userIds ?? [])],
+        mentions: [...(options.mentions?.user_ids ?? [])],
         mentionsRoom: options.mentions?.room ?? false,
         inReplyTo: options.inReplyTo ?? null,
         silentReply: options.silentReply ?? false,
-        info,
+        info: measured.info,
+        thumbnail: measured.thumbnail,
         threadRoot: options.threadRoot ?? null,
         persona: $state.snapshot(options.persona ?? null),
         spoiler: options.spoiler ?? false,
@@ -92,24 +97,29 @@ export function createMedia(transport: () => Transport) {
       if (files.length < 2) throw new Error('A gallery needs at least two attachments');
       await validateAttachments(files);
       const attachments = await Promise.all(
-        files.map(withResolvedMime).map(async (file) => ({
-          roomId,
-          filename: file.name,
-          mime: file.type || 'application/octet-stream',
-          bytes: new Uint8Array(await file.arrayBuffer()),
-          info: await measureAttachment(file),
-        }))
+        files.map(withResolvedMime).map(async (file, index) => {
+          const measured = await measureAttachment(file);
+          return {
+            filename: file.name,
+            mime: file.type || 'application/octet-stream',
+            bytes: new Uint8Array(await file.arrayBuffer()),
+            info: measured.info,
+            thumbnail: measured.thumbnail,
+            spoiler: options.spoilers?.[index] ?? false,
+          };
+        })
       );
       await transport().sendGallery({
         roomId,
         attachments,
         caption: options.caption ?? null,
         formattedCaption: options.formattedCaption ?? null,
-        mentions: [...(options.mentions?.userIds ?? [])],
+        mentions: [...(options.mentions?.user_ids ?? [])],
         mentionsRoom: options.mentions?.room ?? false,
         inReplyTo: options.inReplyTo ?? null,
         silentReply: options.silentReply ?? false,
         threadRoot: options.threadRoot ?? null,
+        persona: $state.snapshot(options.persona ?? null),
       });
     },
 
@@ -124,14 +134,6 @@ export function createMedia(transport: () => Transport) {
 
     forgetMedia(source: string): Promise<void> {
       return transport().forgetMedia(source);
-    },
-
-    videoStreamMime(): Promise<string> {
-      return transport().videoStreamMime();
-    },
-
-    streamVideo(source: string, id: number, onChunk: (chunk: Uint8Array) => void): Promise<void> {
-      return transport().streamVideo(source, id, onChunk);
     },
 
     uploadMedia(mime: string, bytes: Uint8Array<ArrayBuffer>): Promise<string> {

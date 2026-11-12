@@ -18,7 +18,6 @@ type RoomDetailRpc = RoomStateRpc<
   'memberListThreshold' | 'event' | 'events' | 'addWidget' | 'removeWidget'
 > & {
   rooms: Pick<Rpc['rooms'], 'open'>;
-  members: Pick<Rpc['members'], 'powerLevels'>;
 };
 
 function parseWidgets(events: readonly RoomStateEventView[]): RoomWidget[] {
@@ -55,6 +54,7 @@ export class RoomDetails {
       .then((opened) => {
         if (generation !== this.#generation) return;
         this.permissions = opened.permissions;
+        this.powerLevels = opened.power_levels;
         this.predecessor = opened.predecessor;
         this.powerTags = opened.power_level_tags;
         this.widgets = parseWidgets(opened.widgets);
@@ -63,14 +63,6 @@ export class RoomDetails {
       .catch((error: unknown) => {
         console.debug('[sable room] room details unavailable', error);
         if (generation === this.#generation) this.powerTags = {};
-      });
-    void this.rpc.members
-      .powerLevels({ room_id: roomId })
-      .then((levels) => {
-        if (generation === this.#generation) this.powerLevels = levels;
-      })
-      .catch((error: unknown) => {
-        console.debug('[sable room] power levels unavailable', error);
       });
     return () => {
       if (generation === this.#generation) this.#generation += 1;
@@ -172,6 +164,7 @@ export class RoomSession {
   readonly memberList: RoomMemberList;
   readonly tombstone: RoomTombstone;
   #roomId: string | null = null;
+  #roomKnown = false;
   #memberListRevision: number | null = null;
   #tombstoned: boolean | null = null;
   #stopDetails: (() => void) | null = null;
@@ -220,13 +213,21 @@ export class RoomSession {
     return this.tombstone.checked;
   }
 
-  sync(roomId: string, tombstoned: boolean, memberListRevision: number): void {
+  sync(roomId: string, tombstoned: boolean, memberListRevision: number, roomKnown = true): void {
     if (roomId !== this.#roomId) {
       this.dispose();
       this.#roomId = roomId;
+      this.#roomKnown = roomKnown;
       this.#stopDetails = this.details.start(roomId);
       this.#memberListRevision = null;
       this.#tombstoned = null;
+    }
+    // A direct room URL can arrive before sync knows the room. Retry the
+    // one-shot details request when the room first enters the room list.
+    if (roomKnown && !this.#roomKnown) {
+      this.#stopDetails?.();
+      this.#stopDetails = this.details.start(roomId);
+      this.#roomKnown = true;
     }
     if (memberListRevision !== this.#memberListRevision) {
       this.#stopMemberList?.();
@@ -248,6 +249,7 @@ export class RoomSession {
     this.#stopMemberList = null;
     this.#stopTombstone = null;
     this.#roomId = null;
+    this.#roomKnown = false;
     this.#memberListRevision = null;
     this.#tombstoned = null;
   }

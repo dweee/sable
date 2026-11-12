@@ -18,8 +18,7 @@ function item(overrides: Partial<TimelineItemView> = {}): TimelineItemView {
       kind: 'message',
       body: 'hello',
       html: '<b>hello</b>',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -36,6 +35,7 @@ function item(overrides: Partial<TimelineItemView> = {}): TimelineItemView {
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
     ...overrides,
   });
 }
@@ -73,7 +73,9 @@ test('local sends expose only actions that do not require a server event', () =>
 });
 
 test('forwarded messages cannot be edited', () => {
-  const actions = policy({ forwarded: { timestamp: 1, room_id: null, event_id: null } });
+  const actions = policy({
+    forwarded: { sender: null, content_valid: null, timestamp: 1, room_id: null, event_id: null },
+  });
 
   expect(actions.edit).toBe(false);
   expect(actions.reply).toBe(true);
@@ -87,6 +89,95 @@ test('policy centralizes ownership and permission gates', () => {
   expect(other.report).toBe(true);
 });
 
+const MEDIA_KINDS = ['image', 'video', 'audio', 'file'] as const;
+
+function mediaContent(
+  kind: (typeof MEDIA_KINDS)[number],
+  caption: string | null = 'the code',
+  html: string | null = null
+): TimelineItemView['content'] {
+  const common = {
+    filename: 'main.rs',
+    caption,
+    html,
+    source: 'mxc://example.org/x',
+    external_url: null,
+    mime: 'text/x',
+  };
+  if (kind === 'image') {
+    return {
+      kind,
+      ...common,
+      width: null,
+      height: null,
+      size: null,
+      blurhash: null,
+      thumbnail: null,
+      spoiler: null,
+      animated: null,
+    };
+  }
+  if (kind === 'video') {
+    return {
+      kind,
+      ...common,
+      width: null,
+      height: null,
+      blurhash: null,
+      thumbnail: null,
+      spoiler: null,
+      playback: null,
+    };
+  }
+  if (kind === 'audio') {
+    return { kind, ...common, duration_ms: null, waveform: null, voice: false, metadata: null };
+  }
+  return { kind, ...common, size: 128 };
+}
+
+test.each(MEDIA_KINDS)('an own %s message is edited through its caption', (kind) => {
+  const actions = policy({ content: mediaContent(kind) });
+
+  expect(actions.edit).toBe(true);
+  expect(actions.mediaCaption).toBe(true);
+  expect(actions.body).toBe('the code');
+});
+
+test('an attachment is not edited by someone else, nor once forwarded', () => {
+  const content = mediaContent('file');
+
+  expect(policy({ content, is_own: false }).edit).toBe(false);
+  expect(
+    policy({
+      content,
+      forwarded: { sender: null, content_valid: null, timestamp: 1, room_id: null, event_id: null },
+    }).edit
+  ).toBe(false);
+});
+
+test('an attachment without a caption is still editable', () => {
+  const actions = policy({ content: mediaContent('file', null) });
+
+  expect(actions.edit).toBe(true);
+  expect(actions.body).toBe('');
+});
+
+test('a formatted caption is kept when the attachment is edited', () => {
+  const actions = policy({ content: mediaContent('file', 'the code', '<b>the code</b>') });
+
+  expect(actions.edit).toBe(true);
+  expect(actions.html).toBe('<b>the code</b>');
+});
+
+test('a gallery caption is not editable', () => {
+  const actions = policy({
+    content: { kind: 'gallery', body: 'set', html: 'set', items: [] },
+  });
+
+  expect(actions.edit).toBe(false);
+  expect(actions.mediaCaption).toBe(false);
+});
+
 test('media and threaded events expose their respective actions', () => {
   const media = policy({
     content: {
@@ -95,6 +186,7 @@ test('media and threaded events expose their respective actions', () => {
       filename: 'photo.png',
       caption: null,
       source: 'mxc://example.org/photo',
+      external_url: null,
       mime: 'image/png',
       width: null,
       height: null,
@@ -151,7 +243,7 @@ test.each(['m.annotation', 'm.replace'])('cannot react to a %s event', (relType)
 
 test('cannot react to a redacted message', () => {
   const actions = policy({
-    content: { kind: 'redacted', reason: null },
+    content: { kind: 'redacted', reason: null, redacted_by: null },
     reactions: [{ key: '👍', senders: ['@alice:example.org'] }],
   });
 
@@ -178,8 +270,7 @@ test('edited messages can still be annotated through their original event', () =
       kind: 'message',
       body: 'edited',
       html: 'edited',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: true,
       jumbo: null,
     },

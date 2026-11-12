@@ -35,6 +35,7 @@ export type MessageActions = {
   onEdit?: () => void;
   onReproxy?: () => void;
   onDelete?: () => void;
+  onCancelSend?: () => void;
   onCopyText?: () => void;
   copyTextLabel?: string;
   onCopyLink?: () => void;
@@ -44,6 +45,7 @@ export type MessageActions = {
   onForward?: () => void;
   onRemoveLinkPreviews?: () => void;
   onDownload?: () => void;
+  onSaveToPhotos?: () => void;
   onFavoriteGif?: () => void;
   gifFavorited?: boolean;
   onStealEmotes?: () => void;
@@ -161,6 +163,14 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       run: actions.onDownload,
     });
   }
+  if (actions.onSaveToPhotos) {
+    rows.push({
+      key: 'save-to-photos',
+      label: 'viewer.saveToPhotos',
+      icon: DownloadIcon,
+      run: actions.onSaveToPhotos,
+    });
+  }
   if (actions.onFavoriteGif) {
     rows.push({
       key: 'favorite-gif',
@@ -233,6 +243,15 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       icon: ReportIcon,
       run: actions.onReport,
       separated: true,
+    });
+  }
+  if (actions.onCancelSend) {
+    rows.push({
+      key: 'cancel-send',
+      label: 'timeline.cancelSend',
+      icon: TrashIcon,
+      run: actions.onCancelSend,
+      destructive: true,
     });
   }
   if (actions.onDelete) {

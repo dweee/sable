@@ -6,16 +6,14 @@
 import { version } from '$app/env';
 import { resolve } from '$app/paths';
 
+import { runtimeConfig } from '#lib/config/runtime-config.js';
+import { DEFAULT_APP_NAME } from '#lib/deployment/default-app-name.js';
 import favicon from '#lib/assets/favicon.png';
-import {
-  alertCooling,
-  appendLine,
-  hideLines,
-  readLines,
-  summarise,
-} from '#lib/features/notifications/conversation.js';
+import { alertCooling } from '#lib/features/notifications/alert-cooldown.js';
+import { isRingingCall, type PresentedAlertData } from '#lib/features/notifications/call-alert.js';
 import { notificationPermalink } from '#lib/features/notifications/notification-link.js';
 import {
+  activeElsewhere,
   parsePushPayload,
   pushAlert,
   type PushNotification,
@@ -24,9 +22,14 @@ import {
   webPushValidation,
 } from '#lib/notifications/push-payload.js';
 import {
+  acknowledgeWebPusher,
   completePushPayload,
+  fetchDeviceActivity,
+  isRtcInvite,
   namesOnlyItsEvent,
+  readPushRooms,
   readPushFetch,
+  type CompletedPushNotification,
 } from '#lib/features/notifications/push-fetch.js';
 import {
   isDiagnosticPush,
@@ -34,17 +37,72 @@ import {
   type PushHistoryEntry,
 } from '#lib/notifications/push-history.js';
 import {
+  currentServerUser,
   pushContentPolicy,
+  pendingPushActivations,
   pushSession,
   recordPush,
   roomMode,
   roomName,
+  settlePushActivation,
 } from '#lib/notifications/room-names.js';
-import { loadModel, roomTag } from '#lib/model/model.js';
+import { loadModel } from '#lib/model/model.js';
+import modelWasm from '#src/generated/wasm/sable_model_bg.wasm?url';
 import type { PushFetchView } from '#src/generated/protocol';
 import { reportWorkerError, watchWorkerOperation } from './telemetry.js';
+import { roomsToReconcile } from './read-reconcile.js';
+import { belongsToServerUser, clientHasServerIdentity } from './push-scope.js';
 
 const worker = globalThis.self as unknown as ServiceWorkerGlobalScope;
+
+// A worker from an older deploy must not depend on assets the next deploy removed.
+const MODEL_CACHE = `sable-model-${version}`;
+
+function supportsModelCache(): boolean {
+  return worker.location.protocol === 'https:' || worker.location.protocol === 'http:';
+}
+
+// The SPA fallback answers a missing asset with index.html and a 200, which cache.add would store as the model.
+async function fetchModel(): Promise<Response> {
+  const response = await fetch(modelWasm);
+  if (!response.ok || response.headers.get('content-type')?.includes('text/html')) {
+    throw new Error(`model wasm unavailable: ${String(response.status)}`);
+  }
+  return response;
+}
+
+worker.addEventListener('install', (event) => {
+  if (!supportsModelCache()) return;
+  event.waitUntil(
+    Promise.all([caches.open(MODEL_CACHE), fetchModel()]).then(([cache, response]) =>
+      cache.put(modelWasm, response)
+    )
+  );
+});
+
+worker.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches
+      .keys()
+      .then((names) =>
+        Promise.all(
+          names
+            .filter((name) => name.startsWith('sable-model-') && name !== MODEL_CACHE)
+            .map((name) => caches.delete(name))
+        )
+      )
+  );
+});
+
+async function cachedModel(): Promise<Response> {
+  if (!supportsModelCache()) return fetchModel();
+  const cached = await caches.match(modelWasm, { cacheName: MODEL_CACHE });
+  if (cached && !cached.headers.get('content-type')?.includes('text/html')) return cached;
+  const response = await fetchModel();
+  const cache = await caches.open(MODEL_CACHE);
+  await cache.put(modelWasm, response.clone());
+  return response;
+}
 
 worker.addEventListener('error', (event) => {
   void reportWorkerError('error', event.error ?? new Error(event.message)).catch(
@@ -64,10 +122,28 @@ worker.addEventListener('push', (event) => {
   event.waitUntil(
     watchWorkerOperation(
       'push',
-      loadModel().then(() => receive(raw))
-    )
+      loadModel(cachedModel()).then(() => receive(raw))
+    ).catch(showFallback)
   );
 });
+
+let workerName: Promise<string> | null = null;
+
+function workerAppName(): Promise<string> {
+  workerName ??= runtimeConfig().then((config) => config.branding.appName ?? DEFAULT_APP_NAME);
+  return workerName;
+}
+
+/** Safari revokes the subscription of a push that shows nothing. */
+async function showFallback(): Promise<void> {
+  await record('FALLBACK_SHOWN');
+  await worker.registration.showNotification(await workerAppName(), {
+    body: 'New message',
+    tag: 'sable-fallback',
+    icon: favicon,
+    badge: favicon,
+  });
+}
 
 async function receive(raw: string | undefined): Promise<void> {
   const validation = webPushValidation(raw);
@@ -75,14 +151,39 @@ async function receive(raw: string | undefined): Promise<void> {
     await watchWorkerOperation('push-validation', acknowledge(validation));
     return;
   }
-  await present(parsePushPayload(raw) ?? undefined);
+  const pushed = parsePushPayload(raw) ?? undefined;
+  const serverUserId = import.meta.env.VITE_SABLE_SERVER_URL ? await currentServerUser() : null;
+  if (serverUserId && pushed) {
+    if (
+      !(await belongsToServerUser(pushed.user_id, pushSession)) ||
+      (await currentServerUser()) !== serverUserId
+    ) {
+      await showFallback();
+      return;
+    }
+  }
+  await present(pushed, serverUserId);
+  if (serverUserId && (await currentServerUser()) !== serverUserId) return;
+  if (
+    pushed &&
+    pushed.unread !== 0 &&
+    !isDiagnosticPush(pushed) &&
+    (await pushContentPolicy()).clearOnRead &&
+    (await reconcileRead(pushed))
+  ) {
+    await record('READ_DISMISSED', pushTrace(pushed));
+  }
 }
 
 async function acknowledge(validation: WebPushValidation): Promise<void> {
-  const [, clients] = await Promise.all([
+  const [, pending] = await Promise.all([
     record('WEBPUSH_VALIDATION'),
-    worker.clients.matchAll({ type: 'window', includeUncontrolled: true }),
+    pendingPushActivations(Date.now()),
   ]);
+  const acked = await Promise.all(pending.map((userId) => acknowledgeFor(userId, validation)));
+  if (acked.includes(true)) return;
+
+  const clients = await worker.clients.matchAll({ type: 'window', includeUncontrolled: true });
   for (const client of clients) {
     client.postMessage({
       type: 'sable:webpush-ack',
@@ -90,6 +191,16 @@ async function acknowledge(validation: WebPushValidation): Promise<void> {
       ackToken: validation.ack_token,
     });
   }
+}
+
+async function acknowledgeFor(userId: string, validation: WebPushValidation): Promise<boolean> {
+  const session = await pushSession(userId);
+  if (!session) return false;
+  const acked = await acknowledgeWebPusher(session, validation, (input, init) =>
+    fetch(input, init)
+  );
+  if (acked) await settlePushActivation(userId);
+  return acked;
 }
 
 worker.addEventListener('message', (event) => {
@@ -102,6 +213,7 @@ worker.addEventListener('message', (event) => {
 });
 
 interface StashedShare {
+  serverUserId: string | null;
   text: string;
   files: File[];
 }
@@ -118,6 +230,7 @@ worker.addEventListener('fetch', (event) => {
 const SHARE_HOLD_MS = 15_000;
 
 async function stashShare(event: FetchEvent): Promise<Response> {
+  const serverUserId = import.meta.env.VITE_SABLE_SERVER_URL ? await currentServerUser() : null;
   const form = await event.request.formData();
   const text = ['title', 'text', 'url']
     .map((field) => form.get(field))
@@ -126,7 +239,7 @@ async function stashShare(event: FetchEvent): Promise<Response> {
   const files = form.getAll('files').filter((value): value is File => value instanceof File);
 
   const id = crypto.randomUUID();
-  shares.set(id, { text, files });
+  shares.set(id, { serverUserId, text, files });
   event.waitUntil(watchWorkerOperation('share-hold', holdShare(id)));
 
   return Response.redirect(resolve('/(app)'), 303);
@@ -146,12 +259,25 @@ async function handShares(): Promise<void> {
   if (shares.size === 0) return;
 
   const clients = await worker.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  const client = clients.at(0);
-  if (!client) return;
-
   for (const [id, share] of shares) {
+    let client: Client | undefined;
+    const serverUserId = share.serverUserId;
+    if (serverUserId === null) {
+      client = clients.at(0);
+    } else if ((await currentServerUser()) === serverUserId) {
+      const matches = await Promise.all(
+        clients.map((candidate) => clientHasServerIdentity(candidate, serverUserId))
+      );
+      client = clients.find((_, index) => matches[index]);
+    }
+    if (!client || shares.get(id) !== share) continue;
     shares.delete(id);
-    client.postMessage({ type: 'sable:share', text: share.text, files: share.files });
+    client.postMessage({
+      type: 'sable:share',
+      serverUserId: share.serverUserId,
+      text: share.text,
+      files: share.files,
+    });
   }
 }
 
@@ -159,7 +285,10 @@ function record(outcome: string, trace: Omit<PushHistoryEntry, 'at' | 'outcome'>
   return recordPush({ at: Date.now(), outcome, ...trace });
 }
 
-async function present(pushed: PushNotification | undefined): Promise<void> {
+async function present(
+  pushed: PushNotification | undefined,
+  serverUserId: string | null
+): Promise<void> {
   if (!pushed) {
     await record('INVALID_PAYLOAD');
     return;
@@ -175,7 +304,7 @@ async function present(pushed: PushNotification | undefined): Promise<void> {
       console.debug('[sable service-worker] app badge not set', error);
     });
   }
-  if (pushed.unread === 0 && (await pushContentPolicy()).clearOnRead) {
+  if (pushed.unread === 0 && pushed.event_id === null && (await pushContentPolicy()).clearOnRead) {
     await closeRead(pushed);
     await record('READ_DISMISSED', trace);
     return;
@@ -185,10 +314,16 @@ async function present(pushed: PushNotification | undefined): Promise<void> {
     await record('APP_FOCUSED', trace);
     return;
   }
-  const fetched = namesOnlyItsEvent(pushed);
-  const payload = fetched ? await fetchEvent(pushed) : pushed;
+  const fetched =
+    namesOnlyItsEvent(pushed) || isRtcInvite(pushed) || pushed.type === 'm.room.encrypted';
+  const payload: CompletedPushNotification | null = fetched ? await fetchEvent(pushed) : pushed;
   if (!payload) {
     await record('DISCARDED', trace);
+    return;
+  }
+  if (payload.unread === 0 && !isRtcInvite(payload) && (await pushContentPolicy()).clearOnRead) {
+    await closeRead(payload);
+    await record('READ_DISMISSED', trace);
     return;
   }
   if (fetched) await record(payload.type ? 'FETCHED' : 'FETCH_FAILED', trace);
@@ -205,21 +340,31 @@ async function present(pushed: PushNotification | undefined): Promise<void> {
     await record('BADGE_ONLY', trace);
     return;
   }
+  if (
+    policy.quietWhenActiveElsewhere &&
+    !showing.ring &&
+    !showing.invite &&
+    (await inUseElsewhere(payload.user_id ?? undefined))
+  ) {
+    await record('ACTIVE_ELSEWHERE', trace);
+    return;
+  }
 
-  const { lines: held, alertedAt } = await conversation(showing.tag);
-  const lines = appendLine(showContent ? held : hideLines(held), showing.line);
+  const alertedAt = await alertedAtFor(showing.room_id, payload.user_id ?? undefined);
   const now = Date.now();
   const renotify =
-    !policy.notifyOnce || held.length === 0 || payload.noisy || !alertCooling(alertedAt, now);
+    !policy.notifyOnce || alertedAt === undefined || payload.noisy || !alertCooling(alertedAt, now);
+  const tag = showing.event_id === null ? showing.tag : `${showing.tag}:${showing.event_id}`;
 
   const options: NotificationOptions & {
     renotify?: boolean;
     timestamp?: number;
     actions?: { action: string; title: string }[];
   } = {
-    body: lines.length > 1 ? summarise(lines) : showing.body,
-    tag: showing.tag,
+    body: showing.body,
+    tag,
     renotify,
+    silent: !renotify,
     icon: payload.icon ?? favicon,
     badge: favicon,
     timestamp: now,
@@ -228,7 +373,9 @@ async function present(pushed: PushNotification | undefined): Promise<void> {
       userId: payload.user_id ?? undefined,
       eventId: showing.event_id,
       invite: showing.invite,
-      lines,
+      call: isRtcInvite(payload),
+      callEventId: isRtcInvite(payload) ? showing.event_id : undefined,
+      callExpiresAtMs: isRtcInvite(payload) ? (payload.callExpiresAtMs ?? now + 120000) : undefined,
       alertedAt: renotify ? now : alertedAt,
     },
   };
@@ -246,14 +393,43 @@ async function present(pushed: PushNotification | undefined): Promise<void> {
     ];
   }
 
+  if (serverUserId && (await currentServerUser()) !== serverUserId) {
+    await showFallback();
+    return;
+  }
+  if (
+    'getNotifications' in worker.registration &&
+    (await worker.registration.getNotifications({ tag })).length > 0
+  ) {
+    await record('ALREADY_SHOWN', trace);
+    return;
+  }
   await worker.registration.showNotification(showing.title, options);
   await record('POSTED', trace);
 }
 
-async function fetchEvent(payload: PushNotification): Promise<PushNotification | null> {
+async function inUseElsewhere(userId: string | undefined): Promise<boolean> {
+  const session = await pushSession(userId);
+  if (!session?.deviceId) return false;
+  const content = await fetchDeviceActivity({
+    session,
+    fetch: (input, init) => fetch(input, init),
+  });
+  return content !== null && activeElsewhere(content, session.deviceId, Date.now());
+}
+
+const FETCH_DEADLINE_MS = 10_000;
+
+async function fetchEvent(payload: PushNotification): Promise<CompletedPushNotification | null> {
   const session = await pushSession(payload.user_id ?? undefined);
-  if (!session) return payload;
-  return completePushPayload(
+  if (!session) return isRtcInvite(payload) ? null : payload;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<CompletedPushNotification | null>((settle) => {
+    timer = setTimeout(() => {
+      settle(isRtcInvite(payload) ? null : payload);
+    }, FETCH_DEADLINE_MS);
+  });
+  const completed = completePushPayload(
     { ...payload, user_id: session.userId },
     {
       session,
@@ -262,6 +438,11 @@ async function fetchEvent(payload: PushNotification): Promise<PushNotification |
       decrypt: (roomId, eventId) => decryptInTab(roomId, eventId, session.userId),
     }
   );
+  try {
+    return await Promise.race([completed, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const DECRYPT_TIMEOUT_MS = 5000;
@@ -272,7 +453,9 @@ async function decryptInTab(
   userId: string
 ): Promise<PushFetchView | null> {
   const clients = await worker.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const serverUserId = import.meta.env.VITE_SABLE_SERVER_URL ? await currentServerUser() : null;
   for (const client of clients) {
+    if (serverUserId !== null && !(await clientHasServerIdentity(client, serverUserId))) continue;
     const answer = await new Promise<PushFetchView | null>((settle) => {
       const channel = new MessageChannel();
       const timer = setTimeout(() => {
@@ -282,7 +465,9 @@ async function decryptInTab(
         clearTimeout(timer);
         settle(readPushFetch(event.data));
       };
-      client.postMessage({ type: 'sable:push-event', roomId, eventId, userId }, [channel.port2]);
+      client.postMessage({ type: 'sable:push-event', roomId, eventId, userId, serverUserId }, [
+        channel.port2,
+      ]);
     });
     if (answer !== null) return answer;
   }
@@ -291,10 +476,39 @@ async function decryptInTab(
 
 async function closeRead(pushed: PushNotification): Promise<void> {
   if (!('getNotifications' in worker.registration)) return;
-  const tag = pushed.room_id ? roomTag(pushed.user_id, pushed.room_id) : undefined;
-  for (const notification of await worker.registration.getNotifications(tag ? { tag } : {})) {
+  const userId = pushed.user_id;
+  for (const notification of await worker.registration.getNotifications()) {
+    const data = notification.data as PresentedAlertData | undefined;
+    if (isRingingCall(data)) continue;
+    if (pushed.room_id !== null && data?.roomId !== pushed.room_id) continue;
+    if (userId !== null && typeof data?.userId === 'string' && data.userId !== userId) {
+      continue;
+    }
     notification.close();
   }
+}
+
+async function reconcileRead(pushed: PushNotification): Promise<boolean> {
+  if (!('getNotifications' in worker.registration)) return false;
+  const session = await pushSession(pushed.user_id ?? undefined);
+  if (!session) return false;
+  const userId = pushed.user_id ?? session.userId;
+  const notifications = await worker.registration.getNotifications();
+  const rooms = roomsToReconcile(notifications, userId, pushed.room_id);
+  const read = await readPushRooms({ session, fetch: (input, init) => fetch(input, init) }, rooms);
+  if (read === null) return false;
+  const readRooms = new Set(read);
+  let closed = false;
+  for (const notification of notifications) {
+    const data = notification.data as PresentedAlertData | undefined;
+    if (isRingingCall(data)) continue;
+    if (data?.userId !== userId || typeof data.roomId !== 'string' || !readRooms.has(data.roomId)) {
+      continue;
+    }
+    notification.close();
+    closed = true;
+  }
+  return closed;
 }
 
 async function focused(): Promise<boolean> {
@@ -302,17 +516,22 @@ async function focused(): Promise<boolean> {
   return clients.some((client) => client.focused);
 }
 
-async function conversation(
-  tag: string
-): Promise<{ lines: ReturnType<typeof readLines>; alertedAt: number | undefined }> {
-  if (!('getNotifications' in worker.registration)) return { lines: [], alertedAt: undefined };
-  const open = await worker.registration.getNotifications({ tag });
-  const previous = open.at(-1)?.data as { lines?: unknown; alertedAt?: unknown } | undefined;
-  const alertedAt = previous?.alertedAt;
-  return {
-    lines: readLines(previous?.lines),
-    alertedAt: typeof alertedAt === 'number' ? alertedAt : undefined,
-  };
+async function alertedAtFor(
+  roomId: string,
+  userId: string | undefined
+): Promise<number | undefined> {
+  if (!('getNotifications' in worker.registration)) return undefined;
+  let alertedAt: number | undefined;
+  for (const notification of await worker.registration.getNotifications()) {
+    const data = notification.data as
+      | { roomId?: unknown; userId?: unknown; alertedAt?: unknown }
+      | undefined;
+    if (data?.roomId !== roomId) continue;
+    if (userId !== undefined && typeof data.userId === 'string' && data.userId !== userId) continue;
+    if (typeof data.alertedAt !== 'number') continue;
+    if (alertedAt === undefined || data.alertedAt > alertedAt) alertedAt = data.alertedAt;
+  }
+  return alertedAt;
 }
 
 worker.addEventListener('notificationclick', (event) => {

@@ -29,16 +29,33 @@ password=<password>
 storeFile=<absolute path to upload-keystore.jks>
 ```
 
-### Desktop auto-updater
+Release APKs built without `keystore.properties` are unsigned. Sign them before
+installation.
+
+### Release checksums
+
+Keep the primary key offline. CI only gets a signing subkey.
 
 ```bash
-# TAURI_SIGNING_PRIVATE_KEY_PASSWORD may be empty
-pnpm tauri signer generate -w ~/.tauri/sable.key
+gpg --batch --passphrase '' --quick-generate-key \
+  'Sable Releases <releases@sable.moe>' ed25519 cert never
+primary=$(gpg --list-keys --with-colons 'Sable Releases' | awk -F: '/^fpr/ {print $10; exit}')
+gpg --batch --passphrase '' --quick-add-key "$primary" ed25519 sign 1y
+gpg --armor --export "$primary" > docs/release-signing-key.asc
+
+# RELEASE_GPG_KEY_ID: the newest signing subkey
+subkey=$(gpg --list-keys --with-colons "$primary" \
+  | awk -F: '/^sub/ {s=1; next} s && /^fpr/ {f=$10; s=0} END {print f}')
+# RELEASE_GPG_KEY
+gpg --armor --export-secret-subkeys "$subkey!"
 ```
 
-- `TAURI_SIGNING_PRIVATE_KEY`: contents of `~/.tauri/sable.key`
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the chosen password
-- `~/.tauri/sable.key.pub` goes in `plugins.updater.pubkey` in
-  `src-tauri/tauri.conf.json`
+To rotate, add a new subkey, update both secrets and re-export
+`docs/release-signing-key.asc`.
 
-Losing the private key prevents publishing updates to installed apps.
+```bash
+# Verify a download
+gpg --import release-signing-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```

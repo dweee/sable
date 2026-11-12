@@ -1,17 +1,24 @@
 // @vitest-environment happy-dom
 
-import { screen } from '@testing-library/svelte';
+import { render, screen } from '@testing-library/svelte';
 import { renderWithTooltips } from '#lib/test-support/render-with-tooltips.js';
 import { userEvent } from '@testing-library/user-event';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
+import type { PresenceView } from '#src/generated/protocol';
+
+vi.mock('#lib/core/context.js');
 
 import { preferences } from '#lib/settings/preferences.svelte.js';
 import RoomHeader from './RoomHeader.svelte';
+import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.ts';
+import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
 
 const members = [
   {
     user_id: '@bob:example.org',
     display_name: 'Bob',
+    real_name: 'Bob',
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership: 'join' as const,
@@ -22,6 +29,8 @@ const members = [
   {
     user_id: '@carol:example.org',
     display_name: 'Carol',
+    real_name: 'Carol',
+    real_avatar_url: null,
     avatar_url: null,
     power_level: 0,
     membership: 'join' as const,
@@ -38,9 +47,13 @@ function mountHeader(props: {
   chatOpen?: boolean;
   searchOpen?: boolean;
   membersOpen?: boolean;
+  encrypted?: boolean | null;
+  presence?: PresenceView | null;
+  phone?: boolean;
 }) {
-  return renderWithTooltips(RoomHeader, {
-    props: {
+  return render(
+    RoomHeader,
+    {
       roomId: '!general:example.org',
       roomName: 'General',
       roomAvatar: null,
@@ -50,7 +63,8 @@ function mountHeader(props: {
       onSearch: () => {},
       ...props,
     },
-  });
+    { wrapper: TooltipProvider }
+  );
 }
 
 test('a voice room with nobody in it is marked as a voice room', () => {
@@ -130,4 +144,69 @@ test('the hidden events toggle appears only when enabled and flips the preferenc
     preferences.hiddenEventsHeaderToggle = false;
     preferences.showHiddenEvents = false;
   }
+});
+
+test('opens the room image from the header', async () => {
+  const openStandaloneSpy = vi.spyOn(mediaViewerState, 'openStandalone');
+  renderWithTooltips(RoomHeader, {
+    props: {
+      roomId: '!general:example.org',
+      roomName: 'General',
+      roomAvatar: 'mxc://example.org/room',
+      members,
+      isVoice: false,
+      callParticipants: [],
+      onBack: () => {},
+      onMembers: () => {},
+      onSearch: () => {},
+    },
+  });
+  await userEvent.setup().click(screen.getByRole('button', { name: 'View avatar of General' }));
+  expect(openStandaloneSpy).toHaveBeenCalledExactlyOnceWith('mxc://example.org/room', 'General');
+});
+
+test('the header shows whether the room is end-to-end encrypted', () => {
+  const { unmount } = mountHeader({ isVoice: false, callParticipants: [], encrypted: true });
+  expect(
+    screen.getByRole('img', { name: 'Messages in this room are end-to-end encrypted.' })
+  ).toBeInTheDocument();
+  unmount();
+
+  mountHeader({ isVoice: false, callParticipants: [], encrypted: false });
+  const status = screen.getByRole('img', {
+    name: 'Messages in this room are not end-to-end encrypted.',
+  });
+  expect(status).toBeInTheDocument();
+  // Encryption is room metadata, not an action in the roving toolbar.
+  expect(screen.getByRole('toolbar', { name: 'Room actions' })).not.toContainElement(status);
+});
+
+test('the header claims nothing while encryption is unknown', () => {
+  const { container } = mountHeader({ isVoice: false, callParticipants: [], encrypted: null });
+
+  expect(container.querySelector('.encryption-state')).not.toBeInTheDocument();
+});
+
+test('updates DM presence beside the title on mobile', async () => {
+  const { rerender } = mountHeader({
+    isVoice: false,
+    callParticipants: [],
+    phone: true,
+  });
+
+  const title = screen.getByRole('heading', { name: 'General' });
+  expect(title.parentElement?.querySelector('.presence-dot')).not.toBeInTheDocument();
+
+  await rerender({ presence: 'online' });
+  expect(title.parentElement).toContainElement(screen.getByRole('img', { name: 'Online' }));
+
+  await rerender({ presence: 'unavailable' });
+  expect(title.parentElement).toContainElement(screen.getByRole('img', { name: 'Away' }));
+  expect(screen.queryByRole('img', { name: 'Online' })).not.toBeInTheDocument();
+
+  await rerender({ presence: 'offline' });
+  expect(title.parentElement?.querySelector('.presence-dot')).not.toBeInTheDocument();
+
+  await rerender({ presence: null });
+  expect(title.parentElement?.querySelector('.presence-dot')).not.toBeInTheDocument();
 });

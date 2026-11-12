@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { StoredThemes } from './custom-themes.svelte';
 import { preferences } from './preferences.svelte';
-import type { Preferences } from './preferences.svelte';
+import type { Preferences } from './definitions';
 import { fingerprint } from './fingerprint';
 import { applySettings, mergeSettings, prepareSettings } from './sync';
 
@@ -56,6 +56,7 @@ describe('prepareSettings', () => {
     expect(content.settings).not.toHaveProperty('systemNotifications');
     expect(content.settings).not.toHaveProperty('settingsSync');
     expect(content.settings).not.toHaveProperty('searchUnmeteredOnly');
+    expect(content.settings).not.toHaveProperty('searchSharing');
     expect(content.settings).not.toHaveProperty('threadPresentation');
   });
 
@@ -198,25 +199,25 @@ describe('applySettings', () => {
     expect(applied?.preferences.pronounPillLimit).toBe(base.pronounPillLimit);
   });
 
-  it('carries the latching scope across devices', () => {
-    const { content } = prepareSettings({ ...base, personaLatching: 'room' }, noThemes);
+  it('carries the profile selection scope across devices', () => {
+    const { content } = prepareSettings({ ...base, personaSelectionScope: 'room' }, noThemes);
 
-    expect(content.settings.personaLatching).toBe('room');
+    expect(content.settings.personaSelectionScope).toBe('room');
 
     const applied = applySettings(content, base, noThemes, []);
 
-    expect(applied?.preferences.personaLatching).toBe('room');
+    expect(applied?.preferences.personaSelectionScope).toBe('room');
   });
 
-  it('ignores a latching scope outside the accepted set', () => {
+  it('ignores a profile selection scope outside the accepted set', () => {
     const applied = applySettings(
-      { v: 1, settings: { personaLatching: 'everywhere' }, themes: noThemes },
+      { v: 1, settings: { personaSelectionScope: 'everywhere' }, themes: noThemes },
       base,
       noThemes,
       []
     );
 
-    expect(applied?.preferences.personaLatching).toBe(base.personaLatching);
+    expect(applied?.preferences.personaSelectionScope).toBe(base.personaSelectionScope);
   });
 
   it('refuses content from another schema version', () => {
@@ -224,16 +225,34 @@ describe('applySettings', () => {
     expect(applySettings(null, base, noThemes, [])).toBeNull();
   });
 
-  it('keeps a local theme that was too large to upload', () => {
-    const large = theme('large', oversized());
-    const local: StoredThemes = stored({ themes: [large], darkThemeId: 'large' });
-    const { content } = prepareSettings(base, stored({ themes: [theme('remote', 'body{}')] }));
+  it('applies remote default themes while keeping installed custom themes', () => {
+    const themes = [
+      { ...theme('light', 'body{}'), kind: 'light' as const },
+      theme('dark', 'body{}'),
+    ];
+    const local = stored({ themes, lightThemeId: 'light', darkThemeId: 'dark' });
+    const { content } = prepareSettings(base, stored({ themes }));
 
-    const applied = applySettings(content, base, local, ['large']);
+    const applied = applySettings(content, base, local, []);
 
-    expect(applied?.themes.themes.map((entry) => entry.id)).toEqual(['remote', 'large']);
-    expect(applied?.themes.darkThemeId).toBe('large');
+    expect(applied?.themes.themes).toEqual(themes);
+    expect(applied?.themes.lightThemeId).toBeNull();
+    expect(applied?.themes.darkThemeId).toBeNull();
   });
+
+  it.each(['lightThemeId', 'darkThemeId'] as const)(
+    'keeps %s selected when its local theme was too large to upload',
+    (key) => {
+      const large = theme('large', oversized());
+      const local: StoredThemes = stored({ themes: [large], [key]: 'large' });
+      const { content } = prepareSettings(base, stored({ themes: [theme('remote', 'body{}')] }));
+
+      const applied = applySettings(content, base, local, ['large']);
+
+      expect(applied?.themes.themes.map((entry) => entry.id)).toEqual(['remote', 'large']);
+      expect(applied?.themes[key]).toBe('large');
+    }
+  );
 
   describe('catalog themes', () => {
     const source = 'https://git.sable.moe/SableClient/themes/raw/branch/main/dark/night.sable.css';

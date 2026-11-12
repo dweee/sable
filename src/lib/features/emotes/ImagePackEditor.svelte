@@ -10,6 +10,7 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { pickFiles } from '#lib/platform/files.js';
+  import { nativeFilePicker } from '#lib/platform/native-file-picker.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -69,7 +70,7 @@
   let transferFailed = $state<'export' | 'import' | null>(null);
 
   let dirty = $derived(draft !== null);
-  let rejected = $derived(draft === null ? null : invalidShortcode(draft.images));
+  let rejected = $derived(draft === null ? null : invalidShortcode(draft.images, saved.images));
   let leaving = $state.raw<{ proceed: () => void; stay?: () => void } | null>(null);
 
   holdUnsaved({
@@ -116,7 +117,8 @@
   }
 
   function commitRename(target: PackImageDraft): void {
-    const wanted = normalizeShortcode(renameDraft);
+    const wanted =
+      renameDraft === target.shortcode ? target.shortcode : normalizeShortcode(renameDraft);
     const body = bodyDraft.trim() === '' ? null : bodyDraft.trim();
     renaming = null;
     const next =
@@ -339,6 +341,7 @@
           </Button>
           <input
             bind:this={avatarInput}
+            use:nativeFilePicker
             class="file-input"
             type="file"
             accept="image/*"
@@ -398,6 +401,34 @@
     title={i18n.t('emotes.images')}
     description={i18n.t('emotes.imageCount', { count: current.images.length })}
   >
+    {#if canEdit}
+      <div class="settings-form">
+        <div class="inline">
+          <TextInput
+            bind:value={shortcode}
+            placeholder={i18n.t('emotes.shortcodePlaceholder')}
+            aria-label={i18n.t('emotes.shortcode')}
+          />
+          <Button disabled={busy} onclick={() => imageInput?.click()}>
+            {i18n.t('emotes.upload')}
+          </Button>
+        </div>
+        <input
+          bind:this={imageInput}
+          use:nativeFilePicker
+          class="file-input"
+          type="file"
+          accept="image/*"
+          multiple
+          tabindex="-1"
+          aria-hidden="true"
+          onchange={(event) => {
+            void addImages(event);
+          }}
+        />
+      </div>
+    {/if}
+
     {#if current.images.length > 0}
       <ul class="settings-rows">
         {#each current.images as image (image.shortcode)}
@@ -489,33 +520,6 @@
     {:else}
       <p class="status settings-form">{i18n.t('emotes.noImages')}</p>
     {/if}
-
-    {#if canEdit}
-      <div class="settings-form">
-        <div class="inline">
-          <TextInput
-            bind:value={shortcode}
-            placeholder={i18n.t('emotes.shortcodePlaceholder')}
-            aria-label={i18n.t('emotes.shortcode')}
-          />
-          <Button disabled={busy} onclick={() => imageInput?.click()}>
-            {i18n.t('emotes.upload')}
-          </Button>
-        </div>
-        <input
-          bind:this={imageInput}
-          class="file-input"
-          type="file"
-          accept="image/*"
-          multiple
-          tabindex="-1"
-          aria-hidden="true"
-          onchange={(event) => {
-            void addImages(event);
-          }}
-        />
-      </div>
-    {/if}
   </SettingsSection>
 
   <SettingsSection
@@ -574,7 +578,7 @@
     {/if}
     <div class={['save-bar', { pending: dirty }]}>
       {#if dirty}
-        <p class="save-status" role="status">{i18n.t('common.youHaveUnsavedChanges')}</p>
+        <p class="save-status" role="status">{i18n.t('common.unsavedChangesNotice')}</p>
       {/if}
       <Button
         size="small"

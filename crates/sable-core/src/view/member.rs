@@ -1,25 +1,68 @@
+use sable_model::text::visible_name;
+
 use matrix_sdk::room::RoomMember;
 use matrix_sdk::ruma::Int;
 use matrix_sdk::ruma::UserId;
-use matrix_sdk::ruma::events::room::member::MembershipState;
+use matrix_sdk::ruma::events::room::member::{MembershipState, OriginalSyncRoomMemberEvent};
 use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, UserPowerLevel};
 use matrix_sdk::ruma::events::{MessageLikeEventType, StateEventType};
 
 use crate::protocol::{MemberView, MembershipView, RoomPermissionsView, RoomPowerLevelsView};
 
 #[must_use]
-pub fn member_view(member: &RoomMember) -> MemberView {
-    MemberView {
+pub fn member_view(member: &RoomMember, nicknames: &crate::nicknames::Nicknames) -> MemberView {
+    let real_name = member
+        .display_name()
+        .and_then(visible_name)
+        .map(str::to_owned);
+    let real_avatar_url = member.avatar_url().map(ToString::to_string);
+    let mut view = MemberView {
         user_id: member.user_id().to_owned(),
-        display_name: member.display_name().map(str::to_owned),
-        avatar_url: member.avatar_url().map(ToString::to_string),
+        display_name: None,
+        avatar_url: None,
+        real_name,
+        real_avatar_url,
         power_level: clamp_power_level(member.power_level()),
         membership: membership_view(member.membership()),
         member_ts: member.event().timestamp().map(u64::from),
         kicked: matches!(member.membership(), MembershipState::Leave)
             && member.event().sender() != member.user_id(),
         service: member.is_service_member(),
-    }
+    };
+    nicknames.apply_member(&mut view);
+    view
+}
+
+/// Builds the view from the event itself, since sliding sync leaves a timeline member event out of
+/// the stored member list.
+#[must_use]
+pub fn member_event_view(
+    event: &OriginalSyncRoomMemberEvent,
+    power_levels: Option<&RoomPowerLevels>,
+    service: bool,
+    nicknames: &crate::nicknames::Nicknames,
+) -> Option<MemberView> {
+    let user_id = UserId::parse(&event.state_key).ok()?;
+    let membership = &event.content.membership;
+    let mut view = MemberView {
+        power_level: power_levels.map_or(0, |levels| clamp_power_level(levels.for_user(&user_id))),
+        real_name: event
+            .content
+            .displayname
+            .as_deref()
+            .and_then(visible_name)
+            .map(str::to_owned),
+        real_avatar_url: event.content.avatar_url.as_ref().map(ToString::to_string),
+        display_name: None,
+        avatar_url: None,
+        membership: membership_view(membership),
+        member_ts: Some(u64::from(event.origin_server_ts.get())),
+        kicked: matches!(membership, MembershipState::Leave) && event.sender != user_id,
+        service,
+        user_id,
+    };
+    nicknames.apply_member(&mut view);
+    Some(view)
 }
 
 const fn membership_view(state: &MembershipState) -> MembershipView {
@@ -33,10 +76,19 @@ const fn membership_view(state: &MembershipState) -> MembershipView {
 }
 
 #[must_use]
-pub fn room_permissions(power_levels: &RoomPowerLevels, user_id: &UserId) -> RoomPermissionsView {
+pub fn room_permissions(
+    power_levels: &RoomPowerLevels,
+    user_id: &UserId,
+    encrypted: bool,
+) -> RoomPermissionsView {
+    let message_type = if encrypted {
+        MessageLikeEventType::RoomEncrypted
+    } else {
+        MessageLikeEventType::RoomMessage
+    };
     RoomPermissionsView {
         own_power_level: clamp_power_level(power_levels.for_user(user_id)),
-        can_post: power_levels.user_can_send_message(user_id, MessageLikeEventType::RoomMessage),
+        can_post: power_levels.user_can_send_message(user_id, message_type),
         can_react: power_levels.user_can_send_message(user_id, MessageLikeEventType::Reaction),
         can_redact_own: power_levels.user_can_redact_own_event(user_id),
         can_redact_others: power_levels.user_can_redact_event_of_other(user_id),
@@ -91,6 +143,26 @@ mod tests {
     use serde_json::json;
 
     use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
+
+    #[test]
+    fn posting_in_an_encrypted_room_needs_the_encrypted_level() {
+        use matrix_sdk::ruma::events::room::power_levels::{
+            RoomPowerLevels, RoomPowerLevelsEventContent,
+        };
+
+        let content: RoomPowerLevelsEventContent = serde_json::from_value(json!({
+            "events": {"m.room.message": 0, "m.room.encrypted": 50},
+        }))
+        .unwrap();
+        let levels = RoomPowerLevels::new(
+            content.into(),
+            &matrix_sdk::ruma::room_version_rules::AuthorizationRules::V1,
+            [],
+        );
+        let user = matrix_sdk::ruma::user_id!("@user:example.org");
+        assert!(room_permissions(&levels, user, false).can_post);
+        assert!(!room_permissions(&levels, user, true).can_post);
+    }
 
     #[test]
     fn power_levels_keep_every_matrix_integer() {

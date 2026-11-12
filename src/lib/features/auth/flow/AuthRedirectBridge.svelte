@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { removeLocalValue } from '#lib/platform/local-json.js';
+  import { readText, removeLocalValue, scopedKey, writeText } from '#lib/platform/local-json.js';
 
   import {
     callbackChannelName,
@@ -20,6 +20,7 @@
   }
 
   let { onCallback, onRegistrationComplete, onCallbackWindow }: Props = $props();
+  const HANDLED_CALLBACK_KEY = 'sable-handled-auth-callback';
   let removeDeepLinkListener: (() => void) | undefined;
   let disposed = false;
 
@@ -35,15 +36,21 @@
   }
 
   function handleStorage(event: StorageEvent): void {
-    if (event.key !== 'sable-registration-complete' || !event.newValue) return;
-    removeLocalValue(event.key);
+    if (event.key !== scopedKey('sable-registration-complete') || !event.newValue) return;
+    removeLocalValue('sable-registration-complete');
     onRegistrationComplete();
+  }
+
+  function handleCallback(url: string): void {
+    if (url === readText(HANDLED_CALLBACK_KEY)) return;
+    writeText(HANDLED_CALLBACK_KEY, url);
+    onCallback(url);
   }
 
   async function watchDeepLinks(): Promise<void> {
     const unlisten = await subscribeDeepLinks((urls) => {
       const url = urls.find((candidate) => redirectLoginType(candidate));
-      if (url) onCallback(url);
+      if (url) handleCallback(url);
     });
 
     if (disposed) {
@@ -52,8 +59,8 @@
     }
     removeDeepLinkListener = unlisten;
 
-    const url = (await currentDeepLinks()).find((candidate) => redirectLoginType(candidate));
-    if (url) onCallback(url);
+    const url = (await currentDeepLinks((candidate) => !!redirectLoginType(candidate)))[0];
+    if (url) handleCallback(url);
   }
 
   onMount(() => {

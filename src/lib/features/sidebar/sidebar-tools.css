@@ -13,9 +13,10 @@
 .sidebar-popover {
   --menu-min-width: min(20rem, calc(100vw - 2rem));
   --menu-max-height: calc(100dvh - 2rem);
+  --menu-padding: var(--space-150);
 
   gap: var(--space-100);
-  padding: var(--space-150);
+  padding: var(--menu-padding);
   width: min(20rem, calc(100vw - 2rem));
 }
 
@@ -59,25 +60,6 @@
 
 .mobile-tool[aria-current='page'] {
   color: var(--primary-on-container);
-}
-
-.mobile-tool {
-  align-items: center;
-  border: 0;
-  border-radius: var(--radius-pill);
-  display: flex;
-  flex: 0 0 var(--control-height-large);
-  height: var(--control-height-large);
-  justify-content: center;
-  min-width: var(--control-height-large);
-  padding: 0;
-  width: var(--control-height-large);
-
-  .unread-badge {
-    position: absolute;
-    right: 0.125rem;
-    top: 0.125rem;
-  }
 }
 
 .quick-tool.mobile-tool:focus-visible {

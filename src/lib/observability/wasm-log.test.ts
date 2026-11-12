@@ -1,12 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import {
-  isReportableCoreWarning,
-  isUndecryptableToDevice,
-  wasmErrorFingerprint,
-  wasmErrorTitle,
-  wasmLogLevel,
-} from './wasm-log';
+import { readCoreLine, wasmErrorFingerprint, wasmErrorTitle, wasmLogLevel } from './wasm-log';
 
 const REMOVE_7 =
   'ERROR room_updates_task{room_id="!a:b.org"}:remove_events: matrix_sdk: failed to remove duplicated events: The item index is invalid: `7`';
@@ -26,22 +20,6 @@ describe('wasmLogLevel', () => {
   });
 });
 
-describe('isUndecryptableToDevice', () => {
-  test('reads an Olm decryption warning as a lost to-device message', () => {
-    const line =
-      'WARN sync_once{conn_id="encryption"}:receive_sync_changes: matrix_sdk_crypto::olm::account: Failed to decrypt a non-pre-key message with all available sessions';
-    expect(isUndecryptableToDevice(line)).toBe(true);
-    expect(wasmErrorTitle(line)).toMatch(/^sync_once/);
-  });
-
-  test('leaves other crypto warnings alone', () => {
-    expect(isUndecryptableToDevice('WARN matrix_sdk_crypto::machine: careful')).toBe(false);
-    expect(
-      isUndecryptableToDevice('INFO matrix_sdk_crypto::olm::account: uploaded one-time keys')
-    ).toBe(false);
-  });
-});
-
 describe('wasmErrorTitle', () => {
   test('drops the level and scrubs identifiers', () => {
     const title = wasmErrorTitle('ERROR sable_core: no event $abcdefghijkl for @alice:example.org');
@@ -58,6 +36,24 @@ describe('wasmErrorTitle', () => {
       'matrix_sdk_ui::sync_service: Error while processing room list: Some( Http( Timeout, ), )'
     );
   });
+
+  test('drops the span chain so the message and its fields fit', () => {
+    const title = wasmErrorTitle(
+      'WARN next_sync_with_lock:sync_once{conn_id="encryption" timeout=30000}:handle_response:receive_to_device_event{sender="@a:b.org"}: matrix_sdk_crypto::olm::account: Failed to decrypt a non-pre-key message with all available sessions errors_by_olm_session=[("Xc2bUfTFHxJ0Ycs5kd8CmWyDJM5aRjMTXCVqU7yjNmE", Decryption(InvalidMAC(MacError)))]'
+    );
+    expect(title).toBe(
+      'matrix_sdk_crypto::olm::account: Failed to decrypt a non-pre-key message with all available sessions errors_by_olm_session=[("[KEY]", Decryption(InvalidMAC(MacError)))]'
+    );
+  });
+});
+
+describe('wasmErrorTitle on a fetch failure', () => {
+  test('drops the JavaScript stack so a build hash cannot split the issue', () => {
+    const line = (hash: string) =>
+      `ERROR matrix_sdk_ui::sync_service: Reqwest( reqwest::Error { kind: Request, source: "JsValue(TypeError: Failed to fetch\\n at https://app/core.worker-${hash}.js:2:4600)", } )`;
+    expect(wasmErrorFingerprint(line('AAA'))).toBe(wasmErrorFingerprint(line('BBB')));
+    expect(wasmErrorTitle(line('AAA'))).not.toContain('JsValue');
+  });
 });
 
 describe('wasmErrorFingerprint', () => {
@@ -72,22 +68,28 @@ describe('wasmErrorFingerprint', () => {
   });
 });
 
-describe('isReportableCoreWarning', () => {
-  test('reports the warnings that explain a failed decryption', () => {
-    for (const line of [
-      'WARN sable_core::utd: unable to decrypt a message cause=Unknown',
-      'WARN sable_core::calls::runtime: no call media key has arrived from a member in the call',
-      'WARN sable_core::calls::keys: call member device is unknown, cannot send it a media key',
-      'WARN matrix_sdk_crypto::session_manager::sessions: Failed to claim one-time keys',
-    ]) {
-      expect(isReportableCoreWarning(line)).toBe(true);
-    }
+describe('readCoreLine', () => {
+  test('reads the mark the core puts on a line it reports', () => {
+    expect(readCoreLine('\u001eERROR sable_core: boom')).toEqual({
+      text: 'ERROR sable_core: boom',
+      reported: true,
+    });
   });
 
-  test('ignores other warnings and the same text at a lower level', () => {
-    expect(isReportableCoreWarning('WARN sable_core: slow call')).toBe(false);
-    expect(isReportableCoreWarning('INFO sable_core::utd: unable to decrypt a message')).toBe(
-      false
-    );
+  test('leaves any other line alone', () => {
+    expect(readCoreLine('ERROR matrix_sdk: boom')).toEqual({
+      text: 'ERROR matrix_sdk: boom',
+      reported: false,
+    });
+  });
+});
+
+describe('wasmErrorTitle on a reported warning', () => {
+  test('keeps the marker field out of the title', () => {
+    expect(
+      wasmErrorTitle(
+        'WARN sable_core::utd: unable to decrypt a message reported=true cause=Unknown'
+      )
+    ).toBe('sable_core::utd: unable to decrypt a message cause=Unknown');
   });
 });

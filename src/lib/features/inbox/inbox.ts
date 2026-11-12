@@ -1,11 +1,16 @@
-import type { BookmarkView, InboxItemView, RoomListItemView } from '#src/generated/protocol';
+import type {
+  BookmarkView,
+  InboxFilter,
+  InboxItemView,
+  RoomListItemView,
+} from '#src/generated/protocol';
 
 import { formatTime } from '#lib/ui/date-time.js';
 import { currentLocale } from '#lib/i18n.js';
 import { hasUnread, type RoomUnread, roomUnread } from '#lib/rooms/unread.js';
 import type { UnreadCount } from '#lib/rooms/unread.js';
 
-export type NotificationFilter = 'all' | 'mentions' | 'direct';
+export type NotificationFilter = InboxFilter;
 export type InboxTab = 'notifications' | 'invites' | 'requests';
 
 export const NOTIFICATION_GROUP_LIMIT = 5;
@@ -48,7 +53,7 @@ export function parseInboxTab(
 }
 
 export function parseFilter(value: string | null): NotificationFilter {
-  return value === 'mentions' || value === 'direct' ? value : 'all';
+  return value === 'mentions' || value === 'direct' || value === 'threads' ? value : 'all';
 }
 
 export function notificationCount(counts: UnreadCount): number {
@@ -65,13 +70,11 @@ function matchesFilter(
       return room.is_direct && hasUnread(counts);
     case 'mentions':
       return counts.highlight > 0;
+    case 'threads':
+      return false;
     default:
       return hasUnread(counts);
   }
-}
-
-function byRecency(left: RoomListItemView, right: RoomListItemView): number {
-  return (right.latest_event?.timestamp ?? 0) - (left.latest_event?.timestamp ?? 0);
 }
 
 export function notifications(
@@ -79,12 +82,10 @@ export function notifications(
   filter: NotificationFilter,
   unreadFor: RoomUnread = roomUnread
 ): RoomListItemView[] {
-  return rooms
-    .filter((room) => {
-      if (room.state !== 'joined' || room.room_kind === 'space') return false;
-      return matchesFilter(room, filter, unreadFor(room));
-    })
-    .sort(byRecency);
+  return rooms.filter((room) => {
+    if (room.state !== 'joined' || room.room_kind === 'space') return false;
+    return matchesFilter(room, filter, unreadFor(room));
+  });
 }
 
 export function countNotifications(
@@ -132,7 +133,7 @@ export function backfillSignal(rooms: readonly RoomListItemView[]): string {
 }
 
 export function pendingInvites(rooms: readonly RoomListItemView[]): RoomListItemView[] {
-  return rooms.filter((room) => room.state === 'invited').sort(byRecency);
+  return rooms.filter((room) => room.state === 'invited');
 }
 
 export function countInvites(rooms: readonly RoomListItemView[]): number {

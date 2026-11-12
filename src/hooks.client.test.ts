@@ -6,8 +6,10 @@ import * as Sentry from '@sentry/sveltekit';
 
 vi.mock('@sentry/sveltekit', () => ({
   captureException: vi.fn(),
+  browserApiErrorsIntegration: vi.fn(),
   consoleLoggingIntegration: vi.fn(),
   captureConsoleIntegration: vi.fn(() => ({ name: 'CaptureConsole' })),
+  browserProfilingIntegration: vi.fn(() => ({ name: 'BrowserProfiling' })),
   init: vi.fn(),
 }));
 const updatedCheck = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
@@ -23,6 +25,7 @@ vi.mock('#src/transport', () => ({
 }));
 vi.mock('#lib/model/model.js', () => ({
   loadModel: vi.fn(() => Promise.resolve()),
+  ModelAssetError: class ModelAssetError extends Error {},
 }));
 
 afterEach(() => {
@@ -78,6 +81,20 @@ test('fully samples call traces and inherits sampling for every other trace', as
   expect(inheritOrSampleWith).toHaveBeenCalledWith(0.1);
 });
 
+test('profiles the sampled sessions alongside their traces', async () => {
+  preferences.errorReporting = true;
+  vi.stubEnv('VITE_SENTRY_DSN', 'https://public@example.invalid/1');
+
+  await import('./hooks.client.js');
+
+  const options = vi.mocked(Sentry.init).mock.calls[0][0];
+  expect(options.integrations).toContainEqual({ name: 'BrowserProfiling' });
+  expect(options).toMatchObject({
+    profileLifecycle: 'trace',
+    profileSessionSampleRate: 0.1,
+  });
+});
+
 test('scrubs matrix identifiers from every streamed span', async () => {
   preferences.errorReporting = true;
   vi.stubEnv('VITE_SENTRY_DSN', 'https://public@example.invalid/1');
@@ -100,6 +117,14 @@ test('captures handled console errors as issues', async () => {
   await import('./hooks.client.js');
 
   expect(Sentry.captureConsoleIntegration).toHaveBeenCalledWith({ levels: ['error'] });
+});
+
+test('leaves event listeners unwrapped, which every row mount would pay for', async () => {
+  preferences.errorReporting = true;
+  vi.stubEnv('VITE_SENTRY_DSN', 'https://public@example.invalid/1');
+  await import('./hooks.client.js');
+
+  expect(Sentry.browserApiErrorsIntegration).toHaveBeenCalledWith({ eventTarget: false });
 });
 
 test('continues reporting new errors after fifty events', async () => {
@@ -140,5 +165,20 @@ test('a model that fails to load is reported without stopping the app from start
   const { init } = await import('./hooks.client.js');
 
   await expect(init()).resolves.toBeUndefined();
+  expect(Sentry.captureException).toHaveBeenCalledWith(failure);
+});
+
+test('a failed compatibility import does not skip model initialization', async () => {
+  const failure = new Error('Compatibility import failed');
+  const compatibility = await import('#lib/platform/browser-compat.js');
+  vi.spyOn(compatibility, 'installBrowserCompatibility').mockRejectedValueOnce(failure);
+  const { loadModel } = await import('#lib/model/model.js');
+  vi.mocked(loadModel).mockClear();
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+  const { init } = await import('./hooks.client.js');
+
+  await expect(init()).resolves.toBeUndefined();
+  expect(loadModel).toHaveBeenCalledOnce();
   expect(Sentry.captureException).toHaveBeenCalledWith(failure);
 });

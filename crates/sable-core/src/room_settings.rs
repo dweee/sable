@@ -1,13 +1,14 @@
+use sable_model::text::visible_name;
+
 use crate::Core;
 use crate::ResultExt;
 use crate::api::room_state::EnableEncryptionParams;
 use crate::api::room_state::SetHistoryVisibilityParams;
 use crate::api::room_state::SetMemberListThresholdParams;
 use crate::probed_state::Probed;
-use crate::protocol::{CoreEvent, CreateJoinRuleView, RoomStateEventView, RpcError};
+use crate::protocol::{CoreEvent, CreateJoinRuleView, RoomStateEventView, RpcCode, RpcError};
 use crate::view;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
-use matrix_sdk::ruma::EventEncryptionAlgorithm;
 use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::InitialStateEvent;
@@ -336,7 +337,7 @@ impl Core {
         self.write_room_state(
             room_id,
             ENCRYPTION_EVENT,
-            &RoomEncryptionEventContent::new(EventEncryptionAlgorithm::MegolmV1AesSha2),
+            &RoomEncryptionEventContent::with_recommended_defaults(),
         )
         .await
     }
@@ -554,6 +555,18 @@ fn room_state_by_type(
     state
 }
 
+fn has_out_of_range_integer(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64().map_or_else(
+            || number.is_u64(),
+            |int| !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&int),
+        ),
+        serde_json::Value::Array(values) => values.iter().any(has_out_of_range_integer),
+        serde_json::Value::Object(map) => map.values().any(has_out_of_range_integer),
+        _ => false,
+    }
+}
+
 impl Core {
     /// Every global account data write goes through here so the pack cache
     /// never serves what we just replaced.
@@ -579,23 +592,26 @@ impl Core {
         content: &impl serde::Serialize,
     ) -> Result<OwnedEventId, RpcError> {
         let content = &serde_json::to_value(content).or_failed(self, "send_state")?;
+        if has_out_of_range_integer(content) {
+            return Err(RpcCode::IntegerOutOfRange.into());
+        }
         let response = self
             .room(&room_id)
             .await?
             .send_state_event_raw(event_type, state_key, content)
             .await
-            .map_err(|error| self.room_error("send_state_event", error))?;
+            .or_failed(self, "send_state_event")?;
         self.pack_cache
             .lock()
             .await
-            .forget_room(&room_id, event_type);
+            .note_state(&room_id, event_type, state_key, content);
         self.forget_room_state(&room_id, event_type);
         self.probed_state().remember_written(
             &room_id,
             event_type,
             state_key,
             content.clone(),
-            crate::probed_state::now_ms(),
+            crate::now_ms(),
         );
         if self.note_cosmetic_state(&room_id, event_type, state_key, content) {
             self.emit(CoreEvent::RoomCosmeticsChanged {
@@ -612,7 +628,10 @@ impl Core {
                     .and_then(|value| value.as_str())
                     .map(ToOwned::to_owned)
             };
-            let (display_name, avatar_url) = (text("displayname"), text("avatar_url"));
+            let (display_name, avatar_url) = (
+                text("displayname").and_then(visible_name),
+                text("avatar_url"),
+            );
             self.overlay_profile(&room_id, &user_id, display_name.clone(), avatar_url.clone())
                 .await;
             self.emit(CoreEvent::ProfileChanged {
@@ -630,6 +649,22 @@ impl Core {
         &self,
         room_id: &OwnedRoomId,
     ) -> Result<crate::protocol::RoomPermissionsView, RpcError> {
+        self.room_access(room_id)
+            .await
+            .map(|(permissions, _)| permissions)
+    }
+
+    /// Permissions and the power levels they come from, in one read.
+    pub(crate) async fn room_access(
+        &self,
+        room_id: &OwnedRoomId,
+    ) -> Result<
+        (
+            crate::protocol::RoomPermissionsView,
+            crate::protocol::RoomPowerLevelsView,
+        ),
+        RpcError,
+    > {
         let room = self.room(room_id).await?;
         let user_id = room
             .client()
@@ -638,9 +673,18 @@ impl Core {
             .to_owned();
         // An invited room carries only stripped state, so the levels are
         // often absent. Spec defaults beat failing the whole command.
-        let power_levels = room.power_levels_or_default().await;
+        let power_levels = self
+            .with_open_stores(async || room.power_levels_or_default().await)
+            .await;
 
-        Ok(view::room_permissions(&power_levels, &user_id))
+        Ok((
+            view::room_permissions(
+                &power_levels,
+                &user_id,
+                room.encryption_state().is_encrypted(),
+            ),
+            view::room_power_levels(&power_levels),
+        ))
     }
 
     pub(crate) async fn room_state_events(
@@ -650,10 +694,10 @@ impl Core {
     ) -> Result<Vec<RoomStateEventView>, RpcError> {
         let client = self.client().await?;
         let room = self.room(room_id).await?;
-        let stored = room
-            .get_state_events(event_type.into())
+        let stored = self
+            .with_open_stores(async || room.get_state_events(event_type.into()).await)
             .await
-            .map_err(|error| self.room_error("room_state_events", error))?;
+            .or_failed(self, "room_state_events")?;
 
         let events: Vec<RoomStateEventView> = stored
             .iter()
@@ -686,7 +730,7 @@ impl Core {
         let snapshot = self
             .room_state_snapshot(&client, room.room_id())
             .await
-            .map_err(|error| self.room_error("room_state_events", error))?;
+            .or_failed(self, "room_state_events")?;
         let state = room_state_by_type(&snapshot);
         let events = state.get(event_type).cloned().unwrap_or_default();
         self.probed_state().remember_full(room_id, state);
@@ -700,19 +744,19 @@ impl Core {
         event_type: String,
         state_key: String,
     ) -> Result<Option<serde_json::Value>, RpcError> {
-        let written = self.probed_state().written(
-            &room_id,
-            &event_type,
-            &state_key,
-            crate::probed_state::now_ms(),
-        );
+        let written =
+            self.probed_state()
+                .written(&room_id, &event_type, &state_key, crate::now_ms());
         if written.is_some() {
             return Ok(written);
         }
         let client = self.client().await?;
         let room = self.room(&room_id).await?;
-        let event = room
-            .get_state_event(event_type.clone().into(), &state_key)
+        let event = self
+            .with_open_stores(async || {
+                room.get_state_event(event_type.clone().into(), &state_key)
+                    .await
+            })
             .await
             .ok()
             .flatten();
@@ -748,7 +792,7 @@ impl Core {
             Ok(response) => state_event_content(response.event_or_content.get()),
             Err(error) if error.client_api_error_kind() == Some(&ErrorKind::NotFound) => None,
             Err(error) => {
-                return Err(self.room_error("room_state_event", error.into()));
+                return Err(self.rpc_error("room_state_event", &error));
             }
         };
         self.probed_state()
@@ -770,8 +814,25 @@ mod tests {
 
     use super::{
         AclEdit, abbreviations, abbreviations_content, always_listed_from, banner_url,
-        canonical_alias, canonical_alias_content, history_visibility, server_acl_content,
+        canonical_alias, canonical_alias_content, has_out_of_range_integer, history_visibility,
+        server_acl_content,
     };
+
+    #[test]
+    fn integers_beyond_the_matrix_range_are_caught_anywhere_in_the_content() {
+        assert!(!has_out_of_range_integer(&json!({
+            "users_default": 9_007_199_254_740_991_i64,
+            "kick": -9_007_199_254_740_991_i64,
+            "ratio": 1.5,
+        })));
+        assert!(has_out_of_range_integer(
+            &json!({ "users_default": 9_007_199_254_740_992_i64 })
+        ));
+        assert!(has_out_of_range_integer(
+            &json!({ "users": { "@a:b": -9_007_199_254_740_992_i64 } })
+        ));
+        assert!(has_out_of_range_integer(&json!({ "list": [u64::MAX] })));
+    }
 
     fn to_json(content: impl serde::Serialize) -> serde_json::Value {
         serde_json::to_value(content).unwrap()

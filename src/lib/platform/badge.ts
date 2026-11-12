@@ -1,40 +1,52 @@
-import { invoke, isTauri } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
+import { type as osType } from '@tauri-apps/plugin-os';
 
-export type BadgeStrategy = 'tauri-window' | 'tauri-tray' | 'web-app-badge' | 'none';
+import { electronBridge } from './electron';
+import { isNativeMobile } from './os';
 
-export function pickBadgeStrategy(
-  runningInTauri: boolean,
-  os: string,
-  hasWebBadge: boolean
-): BadgeStrategy {
-  if (runningInTauri) {
-    if (os === 'android' || os === 'ios') return 'none';
-    return os === 'linux' ? 'tauri-tray' : 'tauri-window';
-  }
-  return hasWebBadge ? 'web-app-badge' : 'none';
+const OVERLAY_SIZE = 32;
+
+async function overlayIcon(count: number): Promise<string | null> {
+  if (count === 0 || typeof OffscreenCanvas === 'undefined') return null;
+  const canvas = new OffscreenCanvas(OVERLAY_SIZE, OVERLAY_SIZE);
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  const half = OVERLAY_SIZE / 2;
+  context.fillStyle = '#e02d2d';
+  context.beginPath();
+  context.arc(half, half, half, 0, Math.PI * 2);
+  context.fill();
+  const label = count > 9 ? '9+' : String(count);
+  context.fillStyle = '#ffffff';
+  context.font = `bold ${label.length > 1 ? 16 : 20}px sans-serif`;
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(label, half, half + 1);
+  const blob = await canvas.convertToBlob();
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return `data:image/png;base64,${btoa(String.fromCharCode(...bytes))}`;
 }
 
 export async function setUnreadBadge(count: number): Promise<void> {
   const value = count > 0 ? count : null;
 
-  if (!isTauri()) {
-    if (pickBadgeStrategy(false, '', 'setAppBadge' in navigator) !== 'web-app-badge') return;
-    if (value === null) await navigator.clearAppBadge();
-    else await navigator.setAppBadge(value);
+  const electron = electronBridge();
+  if (electron) {
+    const unread = value ?? 0;
+    await electron.setBadge(
+      unread,
+      electron.platform === 'win32' ? await overlayIcon(unread) : null
+    );
     return;
   }
 
-  const { type } = await import('@tauri-apps/plugin-os');
-  const strategy = pickBadgeStrategy(true, type(), false);
-
-  try {
-    if (strategy === 'tauri-tray') {
-      await invoke('set_tray_unread', { unread: value !== null });
-    } else if (strategy === 'tauri-window') {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      await getCurrentWindow().setBadgeCount(value ?? undefined);
-    }
-  } catch (error) {
-    console.debug('[sable badge] badge not updated', error);
+  if (isNativeMobile()) {
+    // Android's badge follows its notifications.
+    if (osType() === 'ios') await invoke('set_badge_count', { count: value ?? 0 }).catch(() => {});
+    return;
   }
+
+  if (!('setAppBadge' in navigator)) return;
+  if (value === null) await navigator.clearAppBadge();
+  else await navigator.setAppBadge(value);
 }

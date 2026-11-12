@@ -1,4 +1,5 @@
 import type { MemberView } from '#src/generated/protocol';
+import { sleep } from '#lib/sleep.js';
 
 export const MEMBER_RETRY_DELAYS_MS = [2000, 5000, 15_000];
 
@@ -6,7 +7,7 @@ export class RoomMemberLoader {
   members = $state.raw<MemberView[]>([]);
   loading = $state(false);
 
-  private attemptedRoomId: string | null = null;
+  roomId = $state<string | null>(null);
   private generation = 0;
   private refreshingGeneration: number | null = null;
   private refreshRequests = 0;
@@ -15,17 +16,17 @@ export class RoomMemberLoader {
     this.generation += 1;
     this.members = [];
     this.loading = false;
-    this.attemptedRoomId = null;
+    this.roomId = null;
   }
 
   async load(
     roomId: string,
     fetchMembers: (roomId: string) => Promise<MemberView[]>
   ): Promise<void> {
-    if (this.loading || this.attemptedRoomId === roomId) return;
+    if (this.loading || this.roomId === roomId) return;
 
     const generation = ++this.generation;
-    this.attemptedRoomId = roomId;
+    this.roomId = roomId;
 
     this.loading = true;
 
@@ -43,7 +44,7 @@ export class RoomMemberLoader {
           console.debug('[sable room] members unavailable', error);
           if (last) return;
         }
-        await new Promise((resolve) => setTimeout(resolve, MEMBER_RETRY_DELAYS_MS[attempt]));
+        await sleep(MEMBER_RETRY_DELAYS_MS[attempt]);
         if (generation !== this.generation) return;
       }
     } finally {
@@ -55,7 +56,7 @@ export class RoomMemberLoader {
     roomId: string,
     fetchMembers: (roomId: string) => Promise<MemberView[]>
   ): Promise<void> {
-    if (this.attemptedRoomId !== roomId) return;
+    if (this.roomId !== roomId) return;
     const generation = this.generation;
     if (this.refreshingGeneration === generation) {
       this.refreshRequests += 1;
@@ -78,11 +79,19 @@ export class RoomMemberLoader {
     }
   }
 
+  upsert(roomId: string, member: MemberView): void {
+    if (this.roomId !== roomId) return;
+    const at = this.members.findIndex((known) => known.user_id === member.user_id);
+    this.members =
+      at === -1
+        ? [...this.members, member]
+        : this.members.map((known, index) => (index === at ? member : known));
+  }
+
   setPowerLevel(roomId: string, userId: string, level: number): void {
-    if (this.attemptedRoomId !== roomId) return;
-    const members = this.members.map((member) =>
+    if (this.roomId !== roomId) return;
+    this.members = this.members.map((member) =>
       member.user_id === userId ? { ...member, power_level: level } : member
     );
-    this.members = members;
   }
 }

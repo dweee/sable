@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { matrixLinkAction } from '#lib/rooms/matrix-link.js';
   import { CoreError } from '#src/transport';
   import type {
     LobbyAction,
@@ -15,7 +16,7 @@
   import SquaresFourIcon from 'phosphor-svelte/lib/SquaresFourIcon';
   import UsersThreeIcon from 'phosphor-svelte/lib/UsersThreeIcon';
   import { onDestroy, untrack } from 'svelte';
-  import { MediaQuery, SvelteMap, SvelteSet } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
   import { goto } from '$app/navigation';
   import { afterOverlayPops } from '#lib/platform/overlay-back.svelte.js';
@@ -26,7 +27,7 @@
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { createDragList, type DropEdge, type DropInstruction } from '#lib/ui/drag-list.js';
   import { joinErrorMessage } from '#lib/rooms/join-errors.js';
-  import { copyRoomLink, roomSectionPath, viaFor } from '#lib/rooms/permalink.js';
+  import { matrixLinkPath, copyRoomLink, joinVia, roomSectionPath } from '#lib/rooms/permalink.js';
   import { roomPathParam, roomPathParamFromId, useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { layoutSpaceIds, withoutSpace, withSpace } from '#lib/spaces/sidebar-layout.js';
   import { useSpaceSidebar } from '#lib/spaces/sidebar-layout.svelte.js';
@@ -44,7 +45,7 @@
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { backToRoomList } from '#lib/features/room/room-navigation.js';
 
   import {
@@ -76,7 +77,7 @@
   import FormattedBody from '../messages/FormattedBody.svelte';
   import { splitVia } from '#lib/rooms/join-address.js';
   import type { MatrixLink } from '#lib/rooms/matrix-link.js';
-  import { topicHtml } from '../topic-html';
+  import { topicToHtml } from '#lib/model/model.js';
   import type { AddExistingKind } from './add-existing';
   import LeaveRoomDialog from '../LeaveRoomDialog.svelte';
   import LobbyRoomPlaceholder from './LobbyRoomPlaceholder.svelte';
@@ -105,7 +106,7 @@
   const closed = new SvelteSet<string>();
   const visibleLevels = new SvelteSet<string>();
 
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   const hierarchy = new SpaceHierarchyLoader(core);
   let fetched = $derived(hierarchy.fetched);
   let overrides = $state.raw<ChildOrderOverride[]>([]);
@@ -122,7 +123,15 @@
   });
 
   function openTopicLink(link: MatrixLink, anchor: HTMLAnchorElement): void {
-    if (link.kind === 'user') return;
+    if (link.kind === 'user' || matrixLinkAction(anchor.href, link) !== null) {
+      const target = matrixLinkPath(anchor.href);
+      if (target !== null) {
+        topicOpen = false;
+        // eslint-disable-next-line svelte/no-navigation-without-resolve -- matrixLinkPath resolves the permalink route
+        void afterOverlayPops().then(() => goto(target));
+      }
+      return;
+    }
     topicOpen = false;
     const { via } = splitVia(anchor.href);
     const target = roomSectionPath(
@@ -131,6 +140,7 @@
       link.kind === 'event' ? link.event_id : null,
       via
     );
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     void afterOverlayPops().then(() => goto(target));
   }
   let permissionsById = $state.raw(new Map<string, RoomPermissionsView>());
@@ -180,7 +190,8 @@
           section.rooms.length > 0 ||
           !section.loaded ||
           section.failed ||
-          (section.space !== null && canManageIn(section.parent_id))
+          (section.space !== null &&
+            (canManageIn(section.parent_id) || !joinedIds.has(section.parent_id)))
       );
   });
   let moveTargets = $derived(
@@ -351,10 +362,12 @@
     suggestedOverrides = [...suggestedOverrides.filter(others), override];
 
     try {
+      const edge = childEdges(merged, parentId).find((child) => child.room_id === roomId);
       await core.rpc.spaces.setChildSuggested({
         space_id: parentId,
         room_id: roomId,
         suggested,
+        via: edge?.origin_server_ts === 0 ? edge.via : null,
       });
     } catch (error) {
       console.warn('[sable lobby] suggestion not saved', error);
@@ -397,11 +410,8 @@
     parentId: string,
     action: LobbyAction
   ): Promise<boolean> {
-    const address = child.canonical_alias ?? child.room_id;
-    let routing = viaFor(address, via);
-    if (routing.length === 0 && child.canonical_alias === null) {
-      routing = await core.rpc.rooms.viaServers({ room_id: parentId });
-    }
+    const address = child.room_id;
+    const routing = await joinVia(core, via, joinedIds.has(parentId) ? parentId : spaceId);
     if (action === 'knock') {
       await knockRoom(core.rpc, address, routing);
       knocked.add(child.room_id);
@@ -428,7 +438,9 @@
     joining.add(child.room_id);
     joinErrors.delete(child.room_id);
     try {
-      return await attemptJoin(child, via, parentId, action);
+      const joined = await attemptJoin(child, via, parentId, action);
+      if (joined && child.is_space) hierarchy.retry(child.room_id);
+      return joined;
     } finally {
       joining.delete(child.room_id);
     }
@@ -455,6 +467,7 @@
 
     try {
       await core.rpc.spaces.remove({ space_id: parentId, room_id: entry.room.room_id });
+      hierarchy.forgetChild(parentId, entry.room.room_id);
       removed.add(entry.key);
     } catch (error) {
       console.warn('[sable lobby] remove failed', error);
@@ -470,6 +483,7 @@
         space_id: section.owner_id,
         room_id: section.parent_id,
       });
+      hierarchy.forgetChild(section.owner_id, section.parent_id);
     } catch (error) {
       console.warn('[sable lobby] remove failed', error);
       hierarchy.fail();
@@ -486,6 +500,7 @@
     }
     try {
       await core.rpc.spaces.remove({ space_id: from, room_id: roomId });
+      hierarchy.forgetChild(from, roomId);
       for (const section of sections) {
         if (section.parent_id !== from) continue;
         for (const entry of section.rooms) {
@@ -534,11 +549,18 @@
     ];
 
     try {
-      for (const change of changes) {
+      const pending = [...changes].sort(
+        (a, b) =>
+          Number(siblings.find((edge) => edge.room_id === b.roomId)?.origin_server_ts === 0) -
+          Number(siblings.find((edge) => edge.room_id === a.roomId)?.origin_server_ts === 0)
+      );
+      for (const change of pending) {
+        const edge = siblings.find((sibling) => sibling.room_id === change.roomId);
         await core.rpc.spaces.setChildOrder({
           space_id: parentId,
           room_id: change.roomId,
           order: change.order,
+          via: edge?.origin_server_ts === 0 ? edge.via : null,
         });
       }
     } catch (error) {
@@ -663,6 +685,7 @@
                 size="small"
                 label={i18n.t('room.menuShowSpaceTimeline')}
                 onclick={() => {
+                  // eslint-disable-next-line svelte/no-navigation-without-resolve -- spaceTimelinePath() resolves the route itself
                   void goto(spaceTimelinePath(space, roomList.rooms));
                 }}
               >
@@ -686,6 +709,7 @@
     <Avatar
       id={spaceId}
       src={space?.avatar_url ?? null}
+      openable={true}
       name={space?.name ?? ''}
       size="large"
       uniform
@@ -863,7 +887,10 @@
           void join(child, via, parentId, action);
         }}
         onCopyLink={(child: HierarchyRoomView) => {
-          void copyRoomLink(core, child);
+          void copyRoomLink(core, child).then((copied) => {
+            if (!copied) toasts.error(i18n.t('errors.copyFailed'));
+            else toasts.info(i18n.t('timeline.linkCopied'));
+          });
         }}
         onRemove={(section: HierarchySection, entry: HierarchyRoom) => {
           void remove(section, entry);
@@ -923,7 +950,9 @@
     {/if}
     <div class="topic-full" {@attach scrollHint}>
       <FormattedBody
-        html={topicHtml((topicRoom ? topicRoom.topic : space?.topic) ?? '')}
+        html={topicRoom
+          ? topicToHtml(topicRoom.topic ?? '')
+          : (space?.topic_html ?? topicToHtml(space?.topic ?? ''))}
         onMatrixLink={openTopicLink}
       />
     </div>
@@ -978,10 +1007,12 @@
   .lobby {
     display: grid;
     gap: var(--space-400);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .hero {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     justify-items: center;
     padding: var(--space-500) 0 var(--space-100);
     position: relative;
@@ -1037,6 +1068,7 @@
     font-size: var(--font-size-heading);
     line-height: var(--line-height-heading);
     margin: var(--space-300) 0 0;
+    overflow-wrap: anywhere;
   }
 
   .topic {
@@ -1058,6 +1090,7 @@
     -webkit-line-clamp: 3;
     line-clamp: 3;
     overflow: hidden;
+    overflow-wrap: anywhere;
     white-space: pre-wrap;
   }
 

@@ -122,12 +122,14 @@
   let dragging = $state<string | null>(null);
   let dropState = $state<DropState<LobbyDragItem> | null>(null);
   let headerDrop = $state(false);
+  let parentId = $derived(section.parent_id);
+  let unloaded = $derived(section.space !== null && !section.loaded && !section.failed);
 
   function dropTarget(roomId: string | null) {
     return dragList.dropTarget(
-      { parentId: section.parent_id, roomId },
+      { parentId, roomId },
       {
-        accepts: (source) => canDropInto(source, section.parent_id),
+        accepts: (source) => canDropInto(source, parentId),
         onState: (next) => {
           if (roomId === null) headerDrop = next !== null;
           else dropState = next;
@@ -152,7 +154,7 @@
 
 <div
   class="section"
-  {@attach section.space && !closed && !section.loaded && !section.failed
+  {@attach unloaded && !closed
     ? whenVisible(() => {
         onVisible(section.key);
       })
@@ -312,6 +314,7 @@
       <ul class="rooms">
         {#each section.rooms as entry (entry.key)}
           {@const child = entry.room}
+          {@const roomId = child.room_id}
           {@const joined = joinedIds.has(child.room_id)}
           {@const action = entry.action}
           <li
@@ -326,14 +329,11 @@
               },
             ]}
             {@attach canManage
-              ? dragList.draggable(
-                  { parentId: section.parent_id, roomId: child.room_id },
-                  (next) => {
-                    dragging = next?.roomId ?? null;
-                  }
-                )
+              ? dragList.draggable({ parentId, roomId }, (next) => {
+                  dragging = next?.roomId ?? null;
+                })
               : undefined}
-            {@attach canManage ? dropTarget(child.room_id) : undefined}
+            {@attach canManage ? dropTarget(roomId) : undefined}
           >
             {#if canManage}
               <span class="drag-handle" aria-hidden="true"><DotsSixVerticalIcon /></span>
@@ -518,6 +518,7 @@
   .section {
     display: grid;
     gap: var(--space-200);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .section-header {
@@ -586,6 +587,7 @@
 
   .rooms {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     list-style: none;
     margin: 0;
     padding: 0;
@@ -637,6 +639,7 @@
     display: grid;
     flex: 1;
     gap: var(--space-050);
+    grid-template-columns: minmax(0, 1fr);
     min-width: 0;
   }
 
@@ -646,6 +649,7 @@
     font-weight: var(--font-weight-medium);
     gap: var(--space-200);
     min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .room-meta {

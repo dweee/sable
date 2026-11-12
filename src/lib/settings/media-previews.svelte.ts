@@ -1,4 +1,5 @@
 import type {
+  InviteAvatarsView,
   MediaPreviewConfigView,
   MediaPreviewsView,
   RoomJoinRuleView,
@@ -12,7 +13,7 @@ export const MEDIA_PREVIEW_EVENT = 'm.media_preview_config';
 export const UNSTABLE_MEDIA_PREVIEW_EVENT = 'io.element.msc4278.media_preview_config';
 
 export type MediaPreviews = MediaPreviewsView;
-export type InviteAvatars = 'on' | 'off';
+export type InviteAvatars = InviteAvatarsView;
 
 export type MediaPreviewConfig = Partial<MediaPreviewConfigView>;
 
@@ -60,6 +61,13 @@ class MediaPreviewSettings {
     const core = this.sync.core;
     if (core === null) return {};
     return core.rpc.account.mediaPreviewConfig({ room_id: roomId });
+  }
+
+  /** `null` drops the room's own value so the account's applies. */
+  async setRoom(roomId: string, previews: MediaPreviewsView | null): Promise<MediaPreviewConfig> {
+    const core = this.sync.core;
+    if (core === null) return {};
+    return core.rpc.account.setRoomMediaPreviews({ room_id: roomId, media_previews: previews });
   }
 
   async set(next: MediaPreviewConfig): Promise<void> {

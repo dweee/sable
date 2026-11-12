@@ -13,6 +13,8 @@ declare global {
       overlay?: number;
       /** Phone room-list drawer state, kept in history for native back gestures. */
       mobileDrawer?: 'open' | 'closed';
+      /** Back returns to the room list. */
+      mobileDrawerBack?: boolean;
       /** Event a notification tap lands the live timeline on, once. */
       notified?: string;
     }
@@ -21,7 +23,7 @@ declare global {
   const __SABLE_STABLE__: boolean;
 
   interface Window {
-    /** Injected by Tauri on desktop platforms. Set to false if updates are handled by a package manager. */
+    /** Injected by the Electron preload. Set to false if updates are handled by a package manager. */
     __SABLE_AUTO_UPDATE__?: boolean;
   }
 
@@ -30,6 +32,8 @@ declare global {
     readonly VITE_SENTRY_DSN?: string;
     readonly VITE_SENTRY_ENVIRONMENT?: string;
     readonly VITE_APP_VERSION?: string;
+    readonly VITE_SABLE_SERVER_URL?: string;
+    readonly VITE_SABLE_SERVER_VERSION?: string;
   }
 }
 

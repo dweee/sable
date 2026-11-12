@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import type { RoomPermissionsView } from '#src/generated/protocol';
   import { goto } from '$app/navigation';
@@ -10,6 +12,7 @@
   import ConversationComposer from '#lib/features/room/conversation/ConversationComposer.svelte';
   import ThreadView from '#lib/features/room/conversation/ThreadView.svelte';
   import { Conversation } from '#lib/features/room/conversation/conversation.svelte.js';
+  import { donateSentMessage } from '#lib/features/share/donate-sent-message.js';
   import {
     PinnedEvents,
     pinErrorMessage,
@@ -32,7 +35,7 @@
   import RoomBannerStrip from '#lib/features/room/RoomBannerStrip.svelte';
   import { copyRoomLink } from '#lib/rooms/permalink.js';
   import { RoomMemberLoader } from '#lib/rooms/room-members.svelte.js';
-  import { preferences, readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import { holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
   import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
@@ -89,18 +92,20 @@
     roomId: () => resolvedRoomId,
     spaceIds: (id) => personaSpaces(roomList.rooms, id, page.params.spaceId).order,
     encrypted: () => resolvedRoom?.encrypted ?? null,
+    afterSend: (id) => donateSentMessage(core, roomList.byId(id)),
   });
 
   $effect(() => {
     autoFills = 0;
-    void forumThreads.start(resolvedRoomId);
+    const id = resolvedRoomId;
+    void untrack(() => forumThreads.start(id));
     return () => {
       void forumThreads.stop();
     };
   });
 
   $effect(() => {
-    if (forumThreads.threads.length > 0) return;
+    if (forumThreads.error || forumThreads.threads.length > 0) return;
     if (forumThreads.loading || forumThreads.backwardPagination !== 'idle') return;
     if (autoFills >= AUTO_FILL_ROUNDS) return;
     autoFills += 1;
@@ -154,7 +159,6 @@
     await core.rpc.timeline.markRead({
       room_id: resolvedRoomId,
       event_id: eventId,
-      private_receipt: readReceiptIsPrivate(),
       thread_root: null,
       subscription: forumThreads.roomTimeline.subscriptionId,
       fully_read: false,
@@ -192,6 +196,7 @@
       eventId
     ).then((copied) => {
       if (!copied) toasts.error(i18n.t('errors.copyFailed'));
+      else toasts.info(i18n.t('timeline.linkCopied'));
     });
   }
 
@@ -248,9 +253,7 @@
   };
 </script>
 
-<svelte:head>
-  <title>{roomName}</title>
-</svelte:head>
+<PageTitle title={roomName} />
 
 <TimelineReadReceipt
   timeline={forumThreads.roomTimeline}
@@ -273,6 +276,7 @@
       onSearch={() => searchInRoom(resolvedRoom, resolvedRoomId)}
       onEventTimeline={preferences.developerTools
         ? () => {
+            // eslint-disable-next-line svelte/no-navigation-without-resolve -- eventTimelinePath() resolves the route itself
             void goto(eventTimelinePath(resolvedRoomId));
           }
         : undefined}
@@ -298,8 +302,10 @@
       </div>
       <ForumThreadList
         threads={forumThreads.threads}
+        failed={forumThreads.error}
+        onRetry={() => void forumThreads.retry()}
         loading={forumThreads.loading || forumThreads.backwardPagination === 'loading'}
-        canLoadMore={forumThreads.backwardPagination === 'idle'}
+        canLoadMore={forumThreads.canLoadMore}
         onOpen={openThread}
         canDelete={canDeleteThread}
         onEdit={permissions?.can_post === false ? undefined : editThread}

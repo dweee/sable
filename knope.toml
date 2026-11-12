@@ -15,6 +15,7 @@ extra_changelog_sections = [
   ] },
   { name = "Features", types = [
     "minor",
+    "feature",
   ] },
   { name = "Fixes", types = [
     "patch",
@@ -55,7 +56,15 @@ command = "node scripts/release/flatpak-metainfo-release.mjs $version"
 
 [[workflows.steps]]
 type = "Command"
-command = "git add packaging/flatpak/moe.sable.client.metainfo.xml"
+command = "git add packaging/flatpak"
+
+[[workflows.steps]]
+type = "Command"
+command = "node scripts/release/settings-changes-release.mjs $version"
+
+[[workflows.steps]]
+type = "Command"
+command = "git add src/generated/settings-changes.json"
 
 [[workflows.steps]]
 type = "Command"
@@ -68,6 +77,14 @@ command = "git push --force --set-upstream origin release"
 [[workflows.steps]]
 type = "Command"
 command = "node scripts/release/forgejo-release-pr.mjs pr"
+
+[[workflows]]
+name = "release"
+help_text = "Create the release and tag the prepared commit"
+
+[[workflows.steps]]
+type = "Command"
+command = "node scripts/release/forgejo-release-pr.mjs release"
 
 [[workflows]]
 name = "document-change"

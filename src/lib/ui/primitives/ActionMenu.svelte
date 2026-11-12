@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import { DropdownMenu } from 'bits-ui';
   import type { Snippet } from 'svelte';
 
   import { i18n } from '#lib/i18n.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
   import BottomSheet from './BottomSheet.svelte';
   import { setActionMenuSurface } from './action-menu.js';
@@ -41,7 +41,7 @@
     children,
   }: Props = $props();
 
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   let sheet = $derived(!appLayout.current);
 
   setActionMenuSurface({
@@ -89,10 +89,12 @@
         {side}
         {align}
         {sideOffset}
+        collisionPadding={collisionPadding()}
         {preventScroll}
-        {@attach scrollHint}
       >
-        {@render children()}
+        <div class="menu-scroll-content" {@attach scrollHint}>
+          {@render children()}
+        </div>
       </DropdownMenu.Content>
     </DropdownMenu.Portal>
   </DropdownMenu.Root>

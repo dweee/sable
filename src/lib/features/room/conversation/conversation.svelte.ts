@@ -41,16 +41,18 @@ import { runSlash, SlashError } from '#lib/features/composer/slash-commands.js';
 import { knockPagePath } from '#lib/rooms/join-or-knock.js';
 import { gifFilename, proxiedGif, type GifResult } from '#lib/gif/providers.js';
 import { replyPreviewBody, type ReplyVersion } from '#lib/features/room/messages/reply-preview.js';
-import { previewableLinks } from '#lib/features/room/media/link-preview.js';
+import { isMediaCaptionContent } from '#lib/features/room/messages/media-caption.js';
+import { previewableLinks, previewWhitelistEntry } from '#lib/features/room/media/link-preview.js';
 import { previewSources, resolveUrlPreview } from '#lib/features/room/media/link-preview-cache.js';
-import { projectPersona, resolvePersona, applyProxy, resolveProxy } from '#lib/personas/persona.js';
+import { projectPersona } from '#lib/personas/persona.js';
 import type { PersonaStore } from '#lib/personas/personas.svelte.js';
+import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
 import type { RoomTimeline } from '#lib/rooms/timeline.svelte.js';
 import { stateEventText } from '#lib/features/room/timeline/state-event-text.js';
 import { isMessageRow } from '#lib/features/room/timeline/timeline-format.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 
-const NO_MENTIONS: OutgoingMentions = { userIds: [], room: false };
+const NO_MENTIONS: OutgoingMentions = { user_ids: [], room: false };
 
 export type ConversationSendResult = { kind: 'gifSearch'; query: string };
 
@@ -62,6 +64,7 @@ export type ConversationDeps = {
   spaceIds?: (roomId: string) => readonly string[];
   encrypted?: () => boolean | null;
   beforeSend?: () => Promise<void>;
+  afterSend?: (roomId: string) => void;
   threadRoot?: string | null;
 };
 
@@ -86,6 +89,7 @@ export class Conversation {
   readonly #encrypted: () => boolean | null;
   readonly #threadRoot: string | null;
   readonly #beforeSend: () => Promise<void>;
+  readonly #afterSend: (roomId: string) => void;
   /* eslint-disable-next-line svelte/prefer-svelte-reactivity */
   readonly #requestedDetails = new Set<string>();
 
@@ -97,6 +101,7 @@ export class Conversation {
     spaceIds = () => [],
     encrypted,
     beforeSend = () => Promise.resolve(),
+    afterSend = () => {},
     threadRoot = null,
   }: ConversationDeps) {
     this.#core = core;
@@ -107,6 +112,7 @@ export class Conversation {
     this.#encrypted = encrypted ?? (() => null);
     this.#threadRoot = threadRoot;
     this.#beforeSend = beforeSend;
+    this.#afterSend = afterSend;
     this.restored = readReply(this.#replyKey(), this.#accountId()) ?? null;
     this.#context = this.restored;
   }
@@ -144,15 +150,18 @@ export class Conversation {
     dismissed: readonly string[]
   ): Promise<{ previews: UrlPreviewView[]; suppressed: boolean }> {
     const sources = previewSources(this.#encrypted());
-    if (!sources.server && !sources.client) return { previews: [], suppressed: false };
     if (!html) return { previews: [], suppressed: false };
-    const links = previewableLinks(html, body);
+    const links = previewableLinks(html, body).filter((url) => body.includes(url));
     const wanted = links.filter((url) => !dismissed.includes(url));
     const previews = await Promise.all(
-      wanted.map((url) => resolveUrlPreview(this.#core.rpc.messages, url, sources))
+      wanted.map(
+        async (url) =>
+          (await resolveUrlPreview(this.#core.rpc.messages, url, sources)) ??
+          previewWhitelistEntry(url)
+      )
     );
     return {
-      previews: previews.filter((preview) => preview !== null),
+      previews,
       suppressed: links.length > 0 && wanted.length === 0,
     };
   }
@@ -195,14 +204,15 @@ export class Conversation {
         edited?.event_id ?? (pending.eventId.startsWith('$') ? pending.eventId : null),
         body,
         {
-          transactionId: edited?.event_id ? null : edited?.transaction_id,
+          transaction_id: edited?.event_id ? null : edited?.transaction_id,
           formatted,
-          mentions,
+          mentions: [...mentions.user_ids],
+          mentions_room: mentions.room,
           kind: editedKind(edited),
-          mediaCaption: pending.mediaCaption,
-          threadRoot: this.#threadRoot,
+          media_caption: pending.mediaCaption,
+          thread_root: this.#threadRoot,
           persona: pending.persona ?? null,
-          forumTitle: this.forumTitle,
+          forum_title: this.forumTitle,
         }
       );
       this.forumTitle = '';
@@ -224,6 +234,8 @@ export class Conversation {
       formatted,
       developerTools: preferences.developerTools,
       rpc: this.#core.rpc,
+      e2eePolicy: () => this.#core.e2eePolicy(),
+      persona: () => this.#personaFor(targetRoomId, '', null).persona,
     });
     if (outcome.kind === 'done') {
       this.context = null;
@@ -240,10 +252,12 @@ export class Conversation {
     }
     if (outcome.kind === 'knock') {
       this.context = null;
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- knockPagePath() resolves the route itself
       void goto(knockPagePath(outcome.address, outcome.via));
       return;
     }
 
+    await this.#personas.load();
     const untouched = outcome.body === body;
     const outgoing = this.#personaFor(
       targetRoomId,
@@ -259,18 +273,20 @@ export class Conversation {
       dismissed
     );
     await sendMessage(this.#core.rpc, targetRoomId, outgoing.body, {
-      inReplyTo: pending?.eventId ?? null,
-      threadRoot: this.#threadRoot,
+      in_reply_to: pending?.eventId ?? null,
+      thread_root: this.#threadRoot,
       formatted: outgoing.formatted,
-      mentions: untouched || outcome.verbatim === true ? mentions : NO_MENTIONS,
-      silentReply: pending?.silentReply ?? false,
+      mentions: [...(untouched || outcome.verbatim === true ? mentions.user_ids : [])],
+      mentions_room: untouched || outcome.verbatim === true ? mentions.room : false,
+      silent_reply: pending?.silentReply ?? false,
       kind: outcome.msgtype,
       persona: outgoing.persona,
-      linkPreviews,
-      noLinkPreviews: suppressed,
-      imageSourcePacks,
-      forumTitle: this.#threadRoot === null && !pending?.eventId ? this.forumTitle : null,
+      link_previews: linkPreviews,
+      no_link_previews: suppressed,
+      image_source_packs: imageSourcePacks,
+      forum_title: this.#threadRoot === null && !pending?.eventId ? this.forumTitle : null,
     });
+    this.#afterSend(targetRoomId);
     this.forumTitle = '';
     this.context = null;
   };
@@ -283,12 +299,15 @@ export class Conversation {
   ): Promise<void> => {
     const pending = this.context?.kind === 'reply' ? this.context : null;
     await this.#beforeSend();
+    const profile = this.#personaFor(targetRoomId, '', null).persona;
     await sendMessage(this.#core.rpc, targetRoomId, body, {
-      inReplyTo: pending?.eventId ?? null,
-      threadRoot: this.#threadRoot,
-      mentions: { userIds: [bot], room: false },
-      silentReply: pending?.silentReply ?? false,
-      botCommand: invocation,
+      in_reply_to: pending?.eventId ?? null,
+      thread_root: this.#threadRoot,
+      mentions: [bot],
+      mentions_room: false,
+      silent_reply: pending?.silentReply ?? false,
+      bot_command: invocation,
+      persona: profile ? { ...profile, has_fallback: false } : null,
     });
     if (pending) this.context = null;
   };
@@ -314,6 +333,7 @@ export class Conversation {
       threadRoot: this.#threadRoot,
       persona: outgoing.persona,
     });
+    this.#afterSend(targetRoomId);
   };
 
   readonly sendGallery = async (
@@ -322,13 +342,22 @@ export class Conversation {
     options: SendGalleryOptions = {}
   ): Promise<void> => {
     await this.#beforeSend();
+    const outgoing = this.#personaFor(
+      targetRoomId,
+      options.caption ?? '',
+      options.formattedCaption ?? null
+    );
     const reply = this.#consumeReply();
     await this.#core.media.sendGallery(targetRoomId, files, {
       ...options,
+      caption: options.caption == null ? options.caption : outgoing.body,
+      formattedCaption: outgoing.formatted,
+      persona: outgoing.persona,
       inReplyTo: reply?.eventId ?? null,
       silentReply: reply?.silentReply ?? options.silentReply ?? false,
       threadRoot: this.#threadRoot,
     });
+    this.#afterSend(targetRoomId);
   };
 
   readonly sendSticker = async (
@@ -383,6 +412,7 @@ export class Conversation {
     await this.#beforeSend();
     await this.#core.rpc.messages.createPoll({
       room_id: targetRoomId,
+      persona: $state.snapshot(this.#personaFor(targetRoomId, '', null).persona),
       question,
       answers: [...answers],
       undisclosed,
@@ -400,6 +430,7 @@ export class Conversation {
     const reply = this.#consumeReply();
     await this.#core.rpc.messages.sendLocation({
       room_id: targetRoomId,
+      persona: $state.snapshot(this.#personaFor(targetRoomId, '', null).persona),
       body,
       geo_uri: geoUri,
       in_reply_to: reply?.eventId ?? null,
@@ -445,11 +476,13 @@ export class Conversation {
   ): Promise<void> {
     const accountId = this.#core.session?.account_id ?? '';
     const deviceId = this.#core.session?.device_id ?? '';
+    const outgoing = this.#personaFor(targetRoomId, body, formatted);
     try {
       await this.#core.rpc.messages.schedule({
         room_id: targetRoomId,
-        body,
-        formatted,
+        body: outgoing.body,
+        formatted: outgoing.formatted,
+        persona: $state.snapshot(outgoing.persona),
         delay_ms: delayMs,
       });
       return;
@@ -464,8 +497,9 @@ export class Conversation {
       {
         id: crypto.randomUUID(),
         roomId: targetRoomId,
-        body,
-        formatted,
+        body: outgoing.body,
+        formatted: outgoing.formatted,
+        persona: $state.snapshot(outgoing.persona),
         dueTs,
         owner: deviceId,
       },
@@ -483,7 +517,7 @@ export class Conversation {
   };
 
   readonly setTyping = async (targetRoomId: string, typing: boolean): Promise<void> => {
-    if (!preferences.sendTypingNotifications) return;
+    if (!preferences.sendTypingNotifications || !targetRoomId.startsWith('!')) return;
     await this.#core.rpc.messages.setTyping({ room_id: targetRoomId, typing });
   };
 
@@ -525,12 +559,7 @@ export class Conversation {
     const items = this.#timeline.items;
     for (let index = items.length - 1; index >= 0; index--) {
       const item = items[index];
-      if (
-        !item.event_id ||
-        (!isMessageRow(item) && item.content.kind !== 'unable_to_decrypt') ||
-        item.content.kind === 'redacted'
-      )
-        continue;
+      if (!item.event_id || !isMessageRow(item) || item.content.kind === 'redacted') continue;
       await this.#toggleReaction(item.event_id, key, sourcePack);
       return;
     }
@@ -555,6 +584,7 @@ export class Conversation {
       shortcode: null,
       thread_root: this.#threadRoot,
       subscription: this.#timeline.subscriptionId,
+      persona: $state.snapshot(this.#personaFor(this.#roomId(), '', null).persona),
     });
   }
 
@@ -564,6 +594,7 @@ export class Conversation {
         room_id: this.#roomId(),
         event_id: eventId,
         answers: [...answers],
+        persona: $state.snapshot(this.#personaFor(this.#roomId(), '', null).persona),
         thread_root: this.#threadRoot,
       })
       .catch(failed('vote'));
@@ -571,7 +602,12 @@ export class Conversation {
 
   readonly endPoll = (eventId: string): void => {
     void this.#core.rpc.messages
-      .endPoll({ room_id: this.#roomId(), event_id: eventId, thread_root: this.#threadRoot })
+      .endPoll({
+        room_id: this.#roomId(),
+        event_id: eventId,
+        thread_root: this.#threadRoot,
+        persona: $state.snapshot(this.#personaFor(this.#roomId(), '', null).persona),
+      })
       .catch(failed('end poll'));
   };
 
@@ -650,7 +686,7 @@ export class Conversation {
       this.edit(itemId, item.content.body, item.content.html);
       return true;
     }
-    if (item.content.kind === 'image') {
+    if (isMediaCaptionContent(item.content)) {
       this.edit(itemId, item.content.caption ?? '', item.content.html, true);
       return true;
     }
@@ -671,13 +707,14 @@ export class Conversation {
       if (body === null) break;
       await this.#beforeSend();
       await editMessage(this.#core.rpc, targetRoomId, item.event_id, body, {
-        transactionId: item.event_id ? null : item.transaction_id,
+        transaction_id: item.event_id ? null : item.transaction_id,
         formatted: rich?.formatted ?? null,
-        mentions: rich?.mentions,
+        mentions: [...(rich?.mentions.user_ids ?? [])],
+        mentions_room: rich?.mentions.room ?? false,
         kind: editedKind(item),
-        threadRoot: this.#threadRoot,
+        thread_root: this.#threadRoot,
         persona: item.per_message_profile ?? null,
-        forumTitle: item.forum_title ?? '',
+        forum_title: item.forum_title ?? '',
       });
       return;
     }
@@ -785,37 +822,17 @@ export class Conversation {
     body: string,
     formatted: string | null
   ): { body: string; formatted: string | null; persona: PerMessageProfileView | null } {
-    const personas = this.#personas;
-    const proxied = preferences.personaProxying ? resolveProxy(personas.personas, body) : undefined;
-    const persona = resolvePersona({
-      personas: personas.personas,
-      proxied: proxied?.persona,
-      room: personas.associationFor(targetRoomId),
-      spaces: this.#spaceIds(targetRoomId).map((id) => personas.associationFor(id)),
-      account: personas.selectionFor(null) ?? undefined,
-      now: Date.now(),
-    });
-
-    if (!persona) return { body, formatted, persona: null };
-    if (proxied && preferences.personaLatching !== 'off') {
-      void personas
-        .select(preferences.personaLatching === 'room' ? targetRoomId : null, proxied.persona.id)
-        .catch(failed('latching persona'));
-    }
-
-    persona.last_used = Date.now();
-    personas.save(persona, persona.id).catch(failed('updating persona timestamp'));
-
-    return {
-      ...(proxied ? applyProxy(body, proxied, formatted) : { body, formatted }),
-      persona: projectPersona(persona, preferences.personaFallback),
-    };
+    return outgoingPersona(
+      this.#personas,
+      targetRoomId,
+      this.#spaceIds(targetRoomId),
+      body,
+      formatted
+    );
   }
 }
 
 function editedKind(edited: TimelineItemView | undefined): MessageKind {
   const content = edited?.content;
-  if (content?.kind !== 'message') return 'text';
-  if (content.emote) return 'emote';
-  return content.notice ? 'notice' : 'text';
+  return content?.kind === 'message' ? content.msgtype : 'text';
 }

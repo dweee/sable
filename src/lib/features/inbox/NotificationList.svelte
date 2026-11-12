@@ -21,6 +21,7 @@
   } from './inbox';
   import { InboxFeed } from './inbox-feed.svelte';
   import InboxFeedRow from './InboxFeedRow.svelte';
+  import NotificationReason from './NotificationReason.svelte';
   import MessagePreview from '#lib/features/room/messages/MessagePreview.svelte';
   import MentionProfile from '#lib/features/room/members/MentionProfile.svelte';
   import { MemberProfile } from '#lib/features/room/members/member-profile.svelte.js';
@@ -31,7 +32,6 @@
   import InboxSectionHeader from './InboxSectionHeader.svelte';
   import { markRoomUnread, markRoomsRead } from '#lib/features/sidebar/nav-rooms.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
 
@@ -56,16 +56,18 @@
   });
   const marking = new SvelteSet<string>();
   const readNow = new SvelteSet<string>();
-  const filters: readonly NotificationFilter[] = ['direct', 'mentions', 'all'];
+  const filters: readonly NotificationFilter[] = ['direct', 'mentions', 'threads', 'all'];
   const filterLabels: Record<NotificationFilter, string> = {
     all: 'inbox.filterAll',
     mentions: 'inbox.filterMentions',
     direct: 'inbox.filterDirect',
+    threads: 'inbox.filterThreads',
   };
   const emptyLabels: Record<NotificationFilter, string> = {
     all: 'inbox.notificationsEmptyAll',
     mentions: 'inbox.notificationsEmptyMentions',
     direct: 'inbox.notificationsEmptyDirect',
+    threads: 'inbox.notificationsEmptyThreads',
   };
   let section = $state<HTMLElement>();
   let heading = $state<HTMLElement>();
@@ -116,11 +118,26 @@
     roomList.rooms.filter((room) => countNotifications([room], roomList.badgeUnreadFor) > 0)
   );
 
-  function markAllRead(): void {
-    markRoomsRead(unreadRooms, core.rpc.timeline, readReceiptIsPrivate());
+  let unreadGroups = $derived(groups.filter((group) => !group.read));
+
+  async function markAllRead(): Promise<void> {
+    const listed = new Set(unreadGroups.map((group) => group.roomId));
+    markRoomsRead(
+      unreadRooms.filter((room) => !listed.has(room.room_id)),
+      core.rpc.timeline
+    );
+    await Promise.all(
+      unreadGroups.map(async (group) => {
+        if (!(await markRoomRead(group.roomId))) return;
+        for (const item of feed.items) {
+          if (item.room_id === group.roomId) readNow.add(item.event_id);
+        }
+      })
+    );
   }
 
   function openMessage(roomId: string, eventId: string): void {
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     void afterOverlayPops().then(() => goto(roomSectionPath(roomList.rooms, roomId, eventId)));
   }
 
@@ -144,6 +161,7 @@
         link.kind === 'event' ? link.event_id : null,
         splitVia(anchor.href).via
       );
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
       void afterOverlayPops().then(() => goto(path));
     }
   }
@@ -171,21 +189,22 @@
     pageSize += PAGE_SIZE;
   }
 
-  async function markRoomRead(roomId: string): Promise<void> {
-    if (marking.has(roomId)) return;
+  async function markRoomRead(roomId: string): Promise<boolean> {
+    if (marking.has(roomId)) return false;
     marking.add(roomId);
     try {
       await core.rpc.timeline.markRead({
         room_id: roomId,
         event_id: null,
-        private_receipt: readReceiptIsPrivate(),
         thread_root: null,
         subscription: null,
-        fully_read: false,
+        fully_read: true,
       });
+      return true;
     } catch (error) {
       console.warn('[sable inbox] marking the room read failed', error);
       toasts.error(i18n.t('errors.actionFailed'));
+      return false;
     } finally {
       marking.delete(roomId);
     }
@@ -203,10 +222,9 @@
       await core.rpc.timeline.markRead({
         room_id: item.room_id,
         event_id: item.event_id,
-        private_receipt: readReceiptIsPrivate(),
         thread_root: null,
         subscription: null,
-        fully_read: false,
+        fully_read: true,
       });
       for (const candidate of covered) readNow.add(candidate.event_id);
       await tick();
@@ -244,8 +262,13 @@
           {i18n.t(filterLabels[value])}
         </Button>
       {/each}
-      {#if !compact && unreadRooms.length > 0}
-        <Button variant="ghost" size="small" class="filter choice" onclick={markAllRead}>
+      {#if !compact && (unreadRooms.length > 0 || unreadGroups.length > 0)}
+        <Button
+          variant="ghost"
+          size="small"
+          class="filter choice"
+          onclick={() => void markAllRead()}
+        >
           {i18n.t('inbox.markAllRead')}
         </Button>
       {/if}
@@ -302,6 +325,7 @@
           </span>
           {#snippet message()}
             {#each group.items as item, index (item.event_id)}
+              <NotificationReason {item} />
               <MessagePreview
                 timeline
                 roomId={group.roomId}

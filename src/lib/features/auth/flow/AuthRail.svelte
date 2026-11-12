@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { afterNavigate } from '$app/navigation';
   import { untrack, type Snippet } from 'svelte';
   import CaretLeftIcon from 'phosphor-svelte/lib/CaretLeftIcon';
   import CaretRightIcon from 'phosphor-svelte/lib/CaretRightIcon';
@@ -38,6 +39,25 @@
   let swipeGesture: SwipeGesture | undefined;
   let swipeStartScroll = 0;
   let swipeOffset = 0;
+
+  function focusCard(card: HTMLElement): void {
+    const content = card.querySelector<HTMLElement>('.card-content');
+    const heading = content?.querySelector<HTMLElement>('h1, h2, h3');
+    heading?.setAttribute('tabindex', '-1');
+    const target =
+      heading ??
+      content?.querySelector<HTMLElement>(
+        'input:not(:disabled), button:not(:disabled), a[href], [tabindex="0"]'
+      );
+    target?.focus({ preventScroll: true });
+  }
+
+  afterNavigate(() => {
+    // Navigation can reset focus after the rail mounts.
+    if (!railElement || document.activeElement !== document.body) return;
+    const card = cardElements(railElement)[activeIndex];
+    if (card) focusCard(card);
+  });
 
   function cardTarget(rail: HTMLDivElement, card: HTMLElement): number {
     return Math.max(0, card.offsetLeft - (rail.clientWidth - card.offsetWidth) / 2);
@@ -210,7 +230,9 @@
     });
     activeCardHeight = card.offsetHeight;
     sizeObserver.observe(card);
-    const shouldFocus = lastActiveIndex !== null && lastActiveIndex !== index;
+    const shouldFocus =
+      lastActiveIndex !== index &&
+      (lastActiveIndex !== null || document.activeElement === document.body);
     leavingCard?.removeAttribute('data-leaving');
     leavingCard =
       lastActiveIndex === null || lastActiveIndex === index
@@ -229,10 +251,7 @@
     }
 
     if (shouldFocus) {
-      const heading = card.querySelector<HTMLElement>('h1, h2, h3');
-      heading?.setAttribute('tabindex', '-1');
-      const focusTarget = heading ?? card.querySelector<HTMLElement>('input, button, [tabindex]');
-      focusTarget?.focus({ preventScroll: true });
+      focusCard(card);
     }
 
     return () => {
@@ -281,12 +300,13 @@
   >
     {@render children()}
   </div>
-  {#if total > 1}
-    <div class="mobile-nav" role="group" aria-label={i18n.t('auth.stageNavigation')}>
+  {#if total > 1 && (canBack || canForward)}
+    <div class="mobile-nav">
       {#if canBack}
         <button
           class="panel-nav previous"
           type="button"
+          tabindex="0"
           onclick={onBack}
           aria-label={i18n.t('common.back')}><CaretLeftIcon /></button
         >
@@ -295,6 +315,7 @@
         <button
           class="panel-nav next"
           type="button"
+          tabindex="0"
           onclick={onForward}
           aria-label={i18n.t('auth.next')}><CaretRightIcon /></button
         >
@@ -323,9 +344,10 @@
   }
 
   .rail-shell {
-    --auth-card-width: min(24rem, calc(100vw - 3rem));
+    --auth-card-width: min(24rem, calc(100cqw - 2rem));
     --auth-rail-edge-fade: 1.5rem;
 
+    container-type: inline-size;
     isolation: isolate;
     min-width: 0;
     position: relative;
@@ -339,7 +361,7 @@
     inset-block: 0;
     pointer-events: none;
     position: absolute;
-    width: var(--auth-rail-edge-fade);
+    width: min(var(--auth-rail-edge-fade), max(0px, calc((100% - var(--auth-card-width)) / 2)));
     z-index: 3;
   }
 
@@ -385,6 +407,7 @@
 
   .rail :global(.auth-card) {
     flex: 0 0 var(--auth-card-width);
+    min-width: 0;
     pointer-events: auto;
     position: relative;
     scroll-snap-align: center;
@@ -487,11 +510,11 @@
   }
 
   .panel-nav.previous {
-    left: calc(50vw - var(--auth-card-width) / 2 - 2.625rem);
+    left: max(0px, calc(50% - var(--auth-card-width) / 2 - 2.625rem));
   }
 
   .panel-nav.next {
-    right: calc(50vw - var(--auth-card-width) / 2 - 2.625rem);
+    right: max(0px, calc(50% - var(--auth-card-width) / 2 - 2.625rem));
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -520,11 +543,7 @@
     animation: none;
   }
 
-  @media (width <= 48rem) {
-    .rail-shell {
-      --auth-card-width: min(24rem, calc(100vw - 5rem));
-    }
-
+  @media (--compact-layout) {
     .rail {
       scroll-snap-type: x mandatory;
       touch-action: pan-y;

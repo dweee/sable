@@ -23,9 +23,13 @@ for (const mobile of [false, true]) {
       await expect(heading).toHaveText(title, { timeout: 30_000 });
       const rooms = sidebar.locator('.room-row');
       const names = await rooms.allTextContents();
-      const selected = await sidebar
-        .locator('.rail [aria-current="page"], .room-nav [aria-current="page"]')
-        .evaluateAll((links) => links.map((link) => link.getAttribute('href')));
+      const selectedNavigation = () =>
+        sidebar
+          .locator('.rail [aria-current="page"], .room-nav [aria-current="page"]')
+          .evaluateAll((links) =>
+            links.map((link) => link.getAttribute('aria-label') ?? link.getAttribute('href'))
+          );
+      const selected = await selectedNavigation();
       if (
         mobile &&
         (await page.locator('#drawer-toggle').getAttribute('aria-pressed')) === 'false'
@@ -39,13 +43,7 @@ for (const mobile of [false, true]) {
       ).toBeVisible();
       await expect(heading).toHaveText(title);
       expect(await rooms.allTextContents()).toEqual(names);
-      for (const href of selected) {
-        if (href)
-          await expect(sidebar.locator(`a[href="${href}"]`).first()).toHaveAttribute(
-            'aria-current',
-            'page'
-          );
-      }
+      expect(await selectedNavigation()).toEqual(selected);
       await page.getByRole('tab', { name: en.room.membersRequests, exact: true }).click();
       await expect(page).toHaveURL(/\/inbox\?tab=requests$/);
       await expect(heading).toHaveText(title);

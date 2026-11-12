@@ -13,7 +13,16 @@ test.beforeEach(async ({ page, app, installRoomCore }) => {
   });
   await installRoomCore('ready');
   await app.openRoom('!room:example.test');
-  await page.getByRole('button', { name: "Open Alice's profile" }).last().click();
+  if ((page.viewportSize()?.width ?? 0) >= 900) {
+    // Timeline history can replace a grouped sender avatar while this test is
+    // hovering the card. Use the stable member-list trigger for this UI check.
+    await page
+      .getByRole('complementary', { name: 'Members', exact: true })
+      .getByRole('button', { name: 'Alice', exact: true })
+      .click();
+  } else {
+    await page.getByRole('button', { name: 'Open Alice’s profile' }).last().click();
+  }
 });
 
 test('a hovered status leaves the message action clickable', async ({ page }) => {

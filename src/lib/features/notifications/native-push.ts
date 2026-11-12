@@ -6,15 +6,22 @@ import {
   unregisterNativePushConfig,
   listPushDistributors,
   setPushDistributor,
+  type NativePushAccount,
 } from '#lib/platform/push.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 
 import {
+  embeddedServer,
   hasCompleteOverride,
   pushConfig,
   type PushOverride,
 } from '#lib/notifications/push-config.js';
-import { clearPushFailure, PushConfigMissing, recordPushFailure } from './push-failure';
+import {
+  clearPushFailure,
+  lastPushFailure,
+  PushConfigMissing,
+  recordPushFailure,
+} from './push-failure';
 
 export class NoDistributorError extends Error {
   constructor() {
@@ -30,7 +37,7 @@ async function register(
   accounts: readonly SessionInfo[],
   provider: PushProvider = selectedPushProvider()
 ): Promise<void> {
-  if (!(await deliversNativePush())) return;
+  if (!deliversNativePush()) return;
 
   const { resolved, details } = await pushConfig(override);
   if (!resolved) throw new PushConfigMissing();
@@ -50,7 +57,7 @@ async function register(
         ? (details.iosPushAppID ?? null)
         : null,
     unifiedPushGatewayUrl: details?.unifiedPushGatewayUrl ?? null,
-    embeddedGatewayUrl: details?.unifiedPushEmbeddedServerUrl ?? 'https://ntfy.sh',
+    embeddedGatewayUrl: preferences.pushEmbeddedServerUrl.trim() || embeddedServer(details),
     provider,
     eventIdOnly: !preferences.richPushPayloads,
     userId: session?.user_id ?? null,
@@ -82,24 +89,100 @@ function enqueue(operation: () => Promise<void>): Promise<void> {
   return result;
 }
 
+let queuedRegistration: { key: string; result: Promise<void> } | null = null;
+
+type PushRequest = {
+  override: PushOverride;
+  session: SessionInfo | null;
+  accounts: readonly SessionInfo[];
+};
+
+const RETRY_DELAYS_MS = [15_000, 60_000, 300_000];
+const RETRYABLE_STAGES = new Set(['platform', 'capabilities', 'homeserver']);
+let wanted: PushRequest | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let retryAttempt = 0;
+
+function cancelRetry(): void {
+  clearTimeout(retryTimer);
+  retryTimer = undefined;
+}
+
+function scheduleRetry(): void {
+  const failure = lastPushFailure();
+  if (!wanted || retryTimer !== undefined || !failure || !RETRYABLE_STAGES.has(failure.stage)) {
+    return;
+  }
+  const delay = RETRY_DELAYS_MS[Math.min(retryAttempt, RETRY_DELAYS_MS.length - 1)];
+  retryAttempt += 1;
+  retryTimer = setTimeout(() => {
+    retryTimer = undefined;
+    void retryNativePushNow();
+  }, delay);
+}
+
+export async function retryNativePushNow(): Promise<void> {
+  const failure = lastPushFailure();
+  if (!wanted || !failure || !RETRYABLE_STAGES.has(failure.stage)) return;
+  cancelRetry();
+  await registerNativePush(wanted.override, wanted.session, wanted.accounts).catch(() => undefined);
+}
+
 export function registerNativePush(
   override: PushOverride,
   session: SessionInfo | null,
   accounts: readonly SessionInfo[]
 ): Promise<void> {
-  return enqueue(async () => {
+  wanted = { override, session, accounts };
+  const key = JSON.stringify([
+    override,
+    session?.user_id,
+    session?.device_id,
+    accounts.map((account) => [account.user_id, account.device_id, account.needs_reauth]),
+    selectedPushProvider(),
+    preferences.richPushPayloads,
+    preferences.pushEmbeddedServerUrl,
+  ]);
+  if (queuedRegistration?.key === key) return queuedRegistration.result;
+  const result = enqueue(async () => {
     try {
       await register(override, session, accounts);
       clearPushFailure();
+      cancelRetry();
+      retryAttempt = 0;
     } catch (error) {
       recordPushFailure(error);
+      scheduleRetry();
       throw error;
     }
   });
+  const entry = { key, result };
+  queuedRegistration = entry;
+  const settle = (): void => {
+    if (queuedRegistration === entry) queuedRegistration = null;
+  };
+  result.then(settle, settle);
+  return result;
 }
 
-export function unregisterNativePush(): Promise<void> {
-  return enqueue(() => unregisterNativePushConfig());
+export function unregisterNativePush(account?: NativePushAccount): Promise<void> {
+  if (
+    !account ||
+    (wanted?.session?.user_id === account.user_id && wanted.session.device_id === account.device_id)
+  ) {
+    wanted = null;
+    cancelRetry();
+    retryAttempt = 0;
+  } else if (wanted) {
+    wanted = {
+      ...wanted,
+      accounts: wanted.accounts.filter(
+        (candidate) =>
+          candidate.user_id !== account.user_id || candidate.device_id !== account.device_id
+      ),
+    };
+  }
+  return enqueue(() => unregisterNativePushConfig(account));
 }
 
 export function switchPushProvider(

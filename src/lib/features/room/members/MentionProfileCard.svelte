@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PronounPill from '#lib/ui/primitives/PronounPill.svelte';
   import UserSupporterBadge from '#lib/supporter/UserSupporterBadge.svelte';
   import { profileSupporterAppearance } from '#lib/supporter/variants.js';
   import { SUPPORTER_BADGE_FIELD } from '#lib/profile/fields.js';
@@ -9,6 +10,7 @@
     MutualRoomView,
     ProfileFieldView,
     PerMessageProfileView,
+    PresenceUserSharingView,
   } from '#src/generated/protocol';
   import IconContext from 'phosphor-svelte/lib/IconContext';
   import ArrowSquareOutIcon from 'phosphor-svelte/lib/ArrowSquareOutIcon';
@@ -27,6 +29,7 @@
   import PaperPlaneRightIcon from 'phosphor-svelte/lib/PaperPlaneRightIcon';
   import FlagIcon from 'phosphor-svelte/lib/FlagIcon';
   import ProhibitIcon from 'phosphor-svelte/lib/ProhibitIcon';
+  import PulseIcon from 'phosphor-svelte/lib/PulseIcon';
   import ShareNetworkIcon from 'phosphor-svelte/lib/ShareNetworkIcon';
   import ShieldIcon from 'phosphor-svelte/lib/ShieldIcon';
   import LockKeyIcon from 'phosphor-svelte/lib/LockKeyIcon';
@@ -39,13 +42,16 @@
   import { useRoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { hasDirectRoom, roomPathParamFromId, useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { sendMessage } from '#lib/core/api/messages.svelte.js';
+  import { openDirectMessage as openDm } from '#lib/core/api/rooms.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import { lastSeenBucket, lastSeenMs, usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { resolveUserStatus } from '#lib/rooms/user-status.js';
+  import { roleColorOnDark, roleColorOnLight } from '#lib/ui/primitives/readable-color.js';
   import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
+  import { presenceSharing } from '#lib/rooms/presence-sharing.svelte.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -92,7 +98,6 @@
     pmp?: PerMessageProfileView | null;
     onOpenAccount?: () => void;
     onNestedMenuOpenChange?: (open: boolean) => void;
-    onAvatarClick?: (source: string, displayName: string) => void;
     onMatrixLink?: (link: MatrixLink, anchor: HTMLAnchorElement) => void;
     onPowerLevelChange?: (roomId: string, userId: string, level: number) => void;
     failed?: boolean;
@@ -110,7 +115,6 @@
     pmp = null,
     onOpenAccount,
     onNestedMenuOpenChange,
-    onAvatarClick,
     onMatrixLink,
     onPowerLevelChange,
     failed = false,
@@ -164,20 +168,20 @@
     }
   });
 
-  let ownIdentity = $derived({
-    name: roomMember ? roomMember.display_name : (currentProfile?.display_name ?? null),
-    avatar: roomMember ? roomMember.avatar_url : (currentProfile?.avatar_url ?? null),
-  });
-  let realName = $derived(ownIdentity.name ?? userId);
-  let realAvatar = $derived(ownIdentity.avatar);
-  let displayName = $derived(profileOverrides.name(userId, realName));
-  let avatarUrl = $derived(profileOverrides.avatar(userId, realAvatar));
+  let shown = $derived(roomMember ?? currentProfile);
+  let realName = $derived(shown?.real_name ?? userId);
+  let realAvatar = $derived(shown?.real_avatar_url ?? null);
+  let displayName = $derived(shown?.display_name ?? userId);
+  let avatarUrl = $derived(shown?.avatar_url ?? null);
   let overrideColors = $derived(profileOverrides.colors(userId));
   let overrideOpen = $state(false);
   let reportOpen = $state(false);
   let securityOpen = $state(false);
   let color = $derived(currentProfile?.hero_color ?? senderColor(userId));
   let cosmetics = $derived(roomCosmetics?.for(userId) ?? null);
+  let pronouns = $derived(
+    cosmetics?.pronouns.length ? cosmetics.pronouns : (currentProfile?.pronouns ?? [])
+  );
   let localTime = $derived.by(() => {
     const timezone = currentProfile?.timezone;
     if (!timezone) return null;
@@ -186,6 +190,7 @@
       const time = new Intl.DateTimeFormat(undefined, {
         hour: 'numeric',
         minute: '2-digit',
+        hour12: !preferences.hour24Clock,
         timeZone: timezone,
       }).format(new Date());
       return { time, timezone };
@@ -227,6 +232,11 @@
   let sending = $state(false);
   let sendFailed = $state<'send' | 'open' | null>(null);
   let confirmingDirect = $state(false);
+
+  function setConfirmingDirect(next: boolean): void {
+    confirmingDirect = next;
+    onNestedMenuOpenChange?.(next);
+  }
   let homeserver = $derived(userId.slice(userId.indexOf(':') + 1));
   let elevated = $derived(roomMember !== null && roomMember.power_level >= 50);
   let roleTag = $derived(
@@ -313,6 +323,20 @@
     profileActions.openServer(homeserver);
   }
 
+  let presenceChoices = $derived([
+    { sharing: null, label: i18n.t('timeline.profilePresenceDefault') },
+    { sharing: 'allow' as const, label: i18n.t('timeline.profilePresenceAllow') },
+    { sharing: 'deny' as const, label: i18n.t('timeline.profilePresenceDeny') },
+  ]);
+  let presenceChoice = $derived(presenceSharing.userSharing(userId));
+
+  function setPresenceSharing(sharing: PresenceUserSharingView | null): void {
+    presenceSharing.edit({ kind: 'user', user_id: userId, sharing }).catch((error: unknown) => {
+      console.warn('[sable profile] presence sharing not changed', error);
+      toasts.error(i18n.t('errors.actionFailed'));
+    });
+  }
+
   async function toggleIgnored(): Promise<void> {
     const next = !ignored;
     try {
@@ -385,6 +409,7 @@
   }
 
   function openRoom(target: string): void {
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     void goto(roomSectionPath(roomList.rooms, target));
   }
 
@@ -395,7 +420,7 @@
     sending = true;
     sendFailed = null;
     try {
-      const dmId = await core.rpc.rooms.createDm({ user_id: userId, encrypted: null });
+      const dmId = await openDm(core, userId);
       if (body) {
         step = 'send';
         await sendMessage(core.rpc, dmId, body);
@@ -413,7 +438,7 @@
 
   function messageUser(): void {
     if (hasDirectRoom(roomList.rooms, userId)) void openDirectMessage('');
-    else confirmingDirect = true;
+    else setConfirmingDirect(true);
   }
 
   function sendDirectMessage(event: SubmitEvent): void {
@@ -423,6 +448,9 @@
 </script>
 
 {#snippet pronounRow()}
+  {#if pronouns.length > 0}
+    <PronounPill class="profile-pronoun-pill" {pronouns} />
+  {/if}
   {#if currentProfile?.supporter_awards}
     <UserSupporterBadge
       {userId}
@@ -479,26 +507,33 @@
     </ActionMenu>
   {/if}
   {#if !isSelf}
-    <ActionMenu
-      label={mutualLabel}
-      class="profile-mutual-menu"
-      align="start"
-      onOpenChange={onNestedMenuOpenChange}
-    >
-      {#snippet trigger({ props })}
-        <Pill {...props}>
-          <ChatsIcon size={14} />
-          {mutualLabel}
-        </Pill>
-      {/snippet}
-      {#if sharedSpaces.length > 0}
-        {@render mutualRows(sharedSpaces)}
-      {/if}
-      {#if sharedSpaces.length > 0 && sharedRooms.length > 0}
-        <ActionMenuSeparator />
-      {/if}
-      {@render mutualRoomRows()}
-    </ActionMenu>
+    {#if sharedRooms.length > 0 || sharedSpaces.length > 0}
+      <ActionMenu
+        label={mutualLabel}
+        class="profile-mutual-menu"
+        align="start"
+        onOpenChange={onNestedMenuOpenChange}
+      >
+        {#snippet trigger({ props })}
+          <Pill {...props}>
+            <ChatsIcon size={14} />
+            {mutualLabel}
+          </Pill>
+        {/snippet}
+        {#if sharedSpaces.length > 0}
+          {@render mutualRows(sharedSpaces)}
+        {/if}
+        {#if sharedSpaces.length > 0 && sharedRooms.length > 0}
+          <ActionMenuSeparator />
+        {/if}
+        {@render mutualRoomRows()}
+      </ActionMenu>
+    {:else}
+      <Pill>
+        <ChatsIcon size={14} />
+        {mutualLabel}
+      </Pill>
+    {/if}
   {/if}
   <ActionMenu label={i18n.t('timeline.moreActions')} onOpenChange={onNestedMenuOpenChange}>
     {#snippet trigger({ props })}
@@ -596,6 +631,24 @@
           <PencilSimpleIcon />
           {i18n.t('timeline.profileOverride')}
         </ActionMenuItem>
+        {#if presenceSharing.supported}
+          <ActionMenuSub label={i18n.t('timeline.profilePresenceSharing')}>
+            {#snippet trigger()}
+              <PulseIcon />
+              {i18n.t('timeline.profilePresenceSharing')}
+            {/snippet}
+            {#each presenceChoices as choice (choice.label)}
+              <ActionMenuItem
+                checked={presenceChoice === choice.sharing}
+                onSelect={() => {
+                  setPresenceSharing(choice.sharing);
+                }}
+              >
+                {choice.label}
+              </ActionMenuItem>
+            {/each}
+          </ActionMenuSub>
+        {/if}
         <ActionMenuSeparator />
         <ActionMenuItem destructive onSelect={toggleIgnored}>
           <ProhibitIcon />
@@ -713,6 +766,7 @@
       miscOpen = !miscOpen;
       activeExtra = null;
     }}
+    size="small"
     block
   >
     {#if miscOpen}
@@ -776,7 +830,7 @@
     accountProfile={currentProfile}
     member={roomMember}
     {powerTags}
-    {onAvatarClick}
+    {onMatrixLink}
     {variant}
     below={profileBelow}
     headerAction={variant === 'popover' && canMessage ? messageAction : undefined}
@@ -787,8 +841,6 @@
     {displayName}
     {userId}
     {avatarUrl}
-    avatarLabel={i18n.t('timeline.profileAvatar', { name: displayName })}
-    {onAvatarClick}
     {color}
     heroColor={currentProfile?.hero_color}
     heroBrightness={currentProfile?.hero_brightness}
@@ -802,13 +854,13 @@
       : (overrideColors?.light ??
         cosmetics?.colorOnLight ??
         profileColors?.name_color_light ??
-        roleTag?.color)}
+        roleColorOnLight(roleTag?.color))}
     nameColorDark={overrideColors === null
       ? null
       : (overrideColors?.dark ??
         cosmetics?.colorOnDark ??
         profileColors?.name_color_dark ??
-        roleTag?.color)}
+        roleColorOnDark(roleTag?.color))}
     meta={profileLoading ? metaPlaceholder : hasMeta ? metaRow : undefined}
     below={profileBelow}
     pronouns={pronounRow}
@@ -849,13 +901,14 @@
 />
 
 <ConfirmDialog
-  bind:open={confirmingDirect}
+  open={confirmingDirect}
+  onOpenChange={setConfirmingDirect}
   title={i18n.t('direct.confirmTitle', { name: displayName })}
   description={i18n.t('direct.confirmBody')}
   confirmLabel={i18n.t('direct.submit')}
   confirmVariant="primary"
   onConfirm={() => {
-    confirmingDirect = false;
+    setConfirmingDirect(false);
     void openDirectMessage('');
   }}
 />
@@ -914,6 +967,14 @@
 <style>
   :global(.profile-mutual-menu) {
     --menu-max-height: min(32rem, 80dvh);
+
+    max-width: 300px;
+  }
+
+  :global(.profile-mutual-menu .menu-item) {
+    --menu-item-padding: var(--control-padding-150);
+
+    min-width: 0;
   }
 
   :global(.profile-mutual-menu .avatar-root) {
@@ -921,7 +982,6 @@
   }
 
   .profile-mutual-name {
-    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -931,6 +991,12 @@
     align-self: center;
     margin-inline: auto calc(-1 * var(--space-100));
     order: 1;
+  }
+
+  :global(.profile-pronoun-pill) {
+    --pronoun-pill-ground: var(--profile-pronoun-ground, var(--profile-panel-ground));
+
+    color: var(--profile-text-muted);
   }
 
   .profile-meta-item {

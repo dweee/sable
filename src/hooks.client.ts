@@ -2,15 +2,21 @@ import * as Sentry from '@sentry/sveltekit';
 import type { ClientInit, HandleClientError } from '@sveltejs/kit/hooks';
 
 import { tolerateUnknownListeners } from '#lib/platform/tauri-events.js';
+import { installBrowserCompatibility } from '#lib/platform/browser-compat.js';
 import { syncTelemetryConsent } from '#lib/platform/telemetry.js';
-import { installDynamicImportRecovery } from '#lib/observability/dynamic-import-recovery.js';
+import {
+  installDynamicImportRecovery,
+  isReloadingForNewBuild,
+  recoverStaleAsset,
+} from '#lib/observability/dynamic-import-recovery.js';
 import { sanitizePayload, scrubMatrixIds, scrubMatrixUrl } from '#lib/observability/scrubbers.js';
+import { tagCoreError } from '#lib/observability/core-failure.js';
 import { scrubSentryEvent } from '#lib/observability/sentry-event.js';
 import { untrackFetch } from '#lib/observability/untracked-fetch.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
-import { loadModel } from '#lib/model/model.js';
+import { loadModelForApp } from '#lib/model/model-load.svelte.js';
 import { CoreError } from '#src/transport';
-import { prewarmTransport } from './transport/create';
+import { prewarmTransport } from '#src/transport/create';
 
 const dsn = import.meta.env.VITE_SENTRY_DSN;
 const environment = import.meta.env.VITE_SENTRY_ENVIRONMENT ?? import.meta.env.MODE;
@@ -43,8 +49,12 @@ if (dsn && preferences.errorReporting) {
     },
 
     integrations: [
+      // Wrapping every listener costs more than the handler name it adds to a report, and
+      // listener errors still reach the global error handler.
+      Sentry.browserApiErrorsIntegration({ eventTarget: false }),
       Sentry.consoleLoggingIntegration({ levels: ['error', 'warn'] }),
       Sentry.captureConsoleIntegration({ levels: ['error'] }),
+      Sentry.browserProfilingIntegration(),
       ...(preferences.sessionReplay
         ? [
             Sentry.replayIntegration({
@@ -62,6 +72,8 @@ if (dsn && preferences.errorReporting) {
     },
     replaysSessionSampleRate: sampleEverything ? 1 : 0.1,
     replaysOnErrorSampleRate: 1,
+    profileSessionSampleRate: sampleEverything ? 1 : 0.1,
+    profileLifecycle: 'trace',
 
     beforeSendLog(log) {
       if (log.level === 'debug' && environment === 'production') return null;
@@ -87,11 +99,13 @@ if (dsn && preferences.errorReporting) {
     },
 
     beforeSend(event, hint) {
-      if (hint.originalException instanceof CoreError) {
-        event.fingerprint = ['{{ default }}', hint.originalException.detail.code];
-      }
+      if (isReloadingForNewBuild(hint.originalException)) return null;
+      const tagged =
+        hint.originalException instanceof CoreError
+          ? tagCoreError(event, hint.originalException)
+          : event;
 
-      return scrubSentryEvent(event);
+      return tagged && scrubSentryEvent(tagged);
     },
   });
   untrackFetch(window);
@@ -101,10 +115,16 @@ syncTelemetryConsent(preferences.errorReporting);
 
 export const init: ClientInit = async () => {
   try {
-    await loadModel();
+    await installBrowserCompatibility();
   } catch (error) {
     Sentry.captureException(error);
-    console.error('[sable] the model failed to load', error);
+    console.error('[sable] browser compatibility setup failed', error);
+  }
+  try {
+    await loadModelForApp();
+  } catch (error) {
+    if (await recoverStaleAsset(error)) return;
+    Sentry.captureException(error);
   }
 };
 

@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
   import { Popover } from 'bits-ui';
   import type { Snippet } from 'svelte';
 
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding as insetCollisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
   import BottomSheet from './BottomSheet.svelte';
 
@@ -50,7 +50,7 @@
     children,
   }: Props = $props();
 
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   let desktop = $derived(appLayout.current);
 
   $effect(() => {
@@ -94,7 +94,7 @@
         {side}
         {align}
         {sideOffset}
-        {collisionPadding}
+        collisionPadding={insetCollisionPadding(collisionPadding)}
         {sticky}
         {onCloseAutoFocus}
       >

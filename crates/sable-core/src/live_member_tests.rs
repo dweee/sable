@@ -14,12 +14,12 @@ use serde_json::{Value, json};
 
 use crate::{Core, protocol::CoreEvent, store::MemorySessionStore};
 
-struct Account {
+pub(crate) struct Account {
     token: String,
-    user_id: String,
+    pub(crate) user_id: String,
 }
 
-async fn register(http: &reqwest::Client, base: &str, name: &str) -> Account {
+pub(crate) async fn register(http: &reqwest::Client, base: &str, name: &str) -> Account {
     let url = format!("{base}/_matrix/client/v3/register?kind=user");
     let probe = send(
         http,
@@ -86,7 +86,7 @@ async fn announced(
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             match events.recv().await {
-                Some(CoreEvent::MembersChanged { room_id }) if &room_id == room => return,
+                Some(CoreEvent::MembersChanged { room_id, .. }) if &room_id == room => return,
                 Some(_) => {}
                 None => panic!("closed"),
             }

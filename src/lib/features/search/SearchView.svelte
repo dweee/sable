@@ -1,7 +1,7 @@
 <script lang="ts">
   import { MediaQuery } from 'svelte/reactivity';
   import type { SearchContextView, SearchHitView, SearchOrder } from '#src/generated/protocol';
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import WarningIcon from 'phosphor-svelte/lib/WarningIcon';
@@ -10,7 +10,6 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { splitDisplayNamePronouns, withDisplayNamePronouns } from '#lib/personas/pronouns.js';
-  import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
   import { roomSectionPath } from '#lib/rooms/permalink.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
@@ -78,7 +77,7 @@
   let destroyed = false;
 
   search.query = untrack(() => (panel ? initialQuery : (page.url.searchParams.get('q') ?? '')));
-  search.order = untrack(() => (panel ? 'rank' : orderFrom(page.url.searchParams.get('order'))));
+  search.order = untrack(() => (panel ? 'recent' : orderFrom(page.url.searchParams.get('order'))));
   if (search.query !== '') {
     search.schedule();
     scheduleLookup();
@@ -128,8 +127,8 @@
               rooms: roomList.rooms.map((room) => ({
                 id: room.room_id,
                 alias: room.canonical_alias,
-                name: room.name,
-                avatarUrl: room.avatar_url,
+                name: room.display_name,
+                avatarUrl: room.display_avatar_url,
               })),
               senders: knownSenders(),
               spaces: spaces.map((space) => ({
@@ -149,7 +148,14 @@
 
   let terms = $derived([...search.parsed.text.split(/\s+/), ...search.parsed.phrases]);
 
-  onMount(() => void core.refreshSearchCoverage());
+  onMount(() => {
+    void core.refreshSearchCoverage().then(() => {
+      if (!destroyed) search.updateCoverage(core.searchCoverage);
+    });
+    return core.subscribeEvents((event) => {
+      if (event.type === 'search_coverage') search.updateCoverage(event.coverage);
+    });
+  });
 
   let coverage = $derived(
     coverageMessage(core.searchCoverage, core.searchCoverageUnavailable, (key, options) =>
@@ -205,7 +211,7 @@
   });
 
   function orderFrom(value: string | null): SearchOrder {
-    return value === 'recent' || value === 'oldest' ? value : 'rank';
+    return value === 'rank' || value === 'oldest' ? value : 'recent';
   }
 
   function knownSenders(): SenderIdentity[] {
@@ -326,11 +332,28 @@
     runSearch();
   }
 
+  async function editChip(chip: SearchToken): Promise<void> {
+    const token = chipText(search.query, chip);
+    const kept = field.chips
+      .filter((entry) => entry.start !== chip.start)
+      .map((entry) => chipText(search.query, entry));
+    const draft = [field.draft.trimEnd(), token].filter(Boolean).join(' ');
+    search.query = composeQuery(kept, draft);
+    activeSuggestion = 0;
+    navigated = false;
+    showOperatorList = false;
+    runSearch();
+    await tick();
+    input?.focus();
+    suggestionsOpen = true;
+    input?.setSelectionRange(draft.length - token.length + token.indexOf(':') + 1, draft.length);
+  }
+
   function onKeydown(event: KeyboardEvent): void {
     if (event.isComposing) return;
     if (event.key === 'Backspace' && field.draft === '' && field.chips.length > 0) {
       event.preventDefault();
-      dropChip(field.chips[field.chips.length - 1]);
+      void editChip(field.chips[field.chips.length - 1]);
       return;
     }
     if (event.key === 'Escape') {
@@ -363,13 +386,16 @@
 
     if (event.key === 'ArrowDown') {
       event.preventDefault();
+      activeSuggestion = suggestionHighlighted ? (activeSuggestion + 1) % suggestions.length : 0;
       navigated = true;
-      activeSuggestion = (activeSuggestion + 1) % suggestions.length;
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
+      activeSuggestion = suggestionHighlighted
+        ? (activeSuggestion - 1 + suggestions.length) % suggestions.length
+        : suggestions.length - 1;
       navigated = true;
-      activeSuggestion = (activeSuggestion - 1 + suggestions.length) % suggestions.length;
     } else if (event.key === 'Tab') {
+      if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
       if (field.draft.trim() === '' && !navigated) return;
       event.preventDefault();
       accept(suggestions[activeSuggestion]);
@@ -443,11 +469,12 @@
     if (panel) return;
     const parts: string[] = [];
     if (search.query !== '') parts.push(`q=${encodeURIComponent(search.query)}`);
-    if (search.order !== 'rank') parts.push(`order=${search.order}`);
+    if (search.order !== 'recent') parts.push(`order=${search.order}`);
     const space = page.url.searchParams.get('space');
     if (space !== null) parts.push(`space=${encodeURIComponent(space)}`);
 
     const encoded = parts.join('&');
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- rewrites the query of the current, already resolved URL
     void goto(encoded === '' ? page.url.pathname : `${page.url.pathname}?${encoded}`, {
       replace: true,
       shallow: true,
@@ -465,6 +492,7 @@
 
   async function openHit(hit: SearchHitView): Promise<void> {
     remember();
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
     await goto(roomSectionPath(roomList.rooms, hit.room_id, hit.event_id));
   }
 
@@ -476,7 +504,21 @@
 </script>
 
 {#snippet loadMore()}
-  {#if !search.exhausted}
+  {#if search.pageFailed || search.failed}
+    <Alert variant="critical" role="alert">
+      <p>{i18n.t(search.pageFailed ? 'search.loadFailed' : 'search.refreshFailed')}</p>
+      <div class="alert-actions">
+        <Button
+          size="small"
+          disabled={search.searching}
+          onclick={() => {
+            if (search.pageFailed) void search.retryPage();
+            else search.refresh();
+          }}>{i18n.t('common.tryAgain')}</Button
+        >
+      </div>
+    </Alert>
+  {:else if !search.exhausted}
     <div class="load-more">
       <div
         class="load-sentinel"
@@ -534,12 +576,21 @@
             <ul class="chips" aria-label={i18n.t('search.activeFilters')}>
               {#each field.chips as chip (chip.start)}
                 <li class={['chip', { negated: chip.negated, unresolved: isUnresolved(chip) }]}>
-                  {#if isUnresolved(chip)}<WarningIcon />{/if}
-                  <span class="chip-operator">{chip.negated ? '-' : ''}{chip.operator}:</span>
-                  <span class="chip-value">{chipLabel(chip)}</span>
-                  {#if isUnresolved(chip)}
-                    <span class="visually-hidden">{i18n.t('search.chipUnresolved')}</span>
-                  {/if}
+                  <button
+                    class="chip-edit"
+                    type="button"
+                    aria-label={i18n.t('search.editFilter', {
+                      filter: `${chip.negated ? '-' : ''}${chip.operator}:${chipLabel(chip)}`,
+                    })}
+                    onclick={() => void editChip(chip)}
+                  >
+                    {#if isUnresolved(chip)}<WarningIcon />{/if}
+                    <span class="chip-operator">{chip.negated ? '-' : ''}{chip.operator}:</span>
+                    <span class="chip-value">{chipLabel(chip)}</span>
+                    {#if isUnresolved(chip)}
+                      <span class="visually-hidden">{i18n.t('search.chipUnresolved')}</span>
+                    {/if}
+                  </button>
                   <button
                     class="chip-remove"
                     type="button"
@@ -672,7 +723,7 @@
           <p class="hint">{i18n.t('search.hintExample')}</p>
           <p class="hint">{i18n.t('search.hintSyntax')}</p>
         </div>
-      {:else if search.failed}
+      {:else if search.failed && search.hits.length === 0}
         <Alert variant="critical" role="alert">
           <p>{i18n.t('search.failed')}</p>
           <div class="alert-actions">
@@ -720,9 +771,21 @@
           </ul>
         </div>
       {:else}
-        <p class="count">
-          {countLabel}{#if showCoverage}<span class="count-coverage">{coverage}</span>{/if}
-        </p>
+        <div class="results-summary">
+          <p class="count">
+            {countLabel}{#if showCoverage}<span class="count-coverage">{coverage}</span>{/if}
+          </p>
+          {#if search.refreshAvailable}
+            <Button
+              size="small"
+              variant="ghost"
+              disabled={search.searching}
+              onclick={() => search.refresh()}
+            >
+              {i18n.t('search.refreshResults')}
+            </Button>
+          {/if}
+        </div>
         {#each search.groups as group (group.key)}
           {@const room = roomList.byId(group.roomId)}
           {@const label = roomList.labelFor(group.roomId)}
@@ -771,18 +834,13 @@
                         {#snippet fallback()}
                           {@const sender = senders.identity(hit.sender)}
                           {@const profile = senders.profile(hit.sender)}
-                          {@const name = profileOverrides.name(hit.sender, sender.displayName)}
+                          {@const name = sender.displayName}
                           {@const parsedName =
                             preferences.showPronouns && preferences.showPronounPills
                               ? splitDisplayNamePronouns(name)
                               : { name, pronouns: [] }}
                           <span class="hit-fallback">
-                            <Avatar
-                              id={hit.sender}
-                              src={profileOverrides.avatar(hit.sender, sender.avatarUrl)}
-                              {name}
-                              size="small"
-                            />
+                            <Avatar id={hit.sender} src={sender.avatarUrl} {name} size="small" />
                             <span class="hit-text">
                               <span class="hit-meta">
                                 <SenderName
@@ -949,7 +1007,27 @@
     gap: var(--space-050);
     max-width: 100%;
     min-width: 0;
-    padding-inline: var(--space-200) var(--space-050);
+    padding-inline-end: var(--space-050);
+  }
+
+  .chip-edit {
+    align-items: center;
+    background: none;
+    border: 0;
+    border-radius: inherit;
+    color: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    font: inherit;
+    gap: var(--space-050);
+    min-width: 0;
+    padding: 0;
+    padding-inline-start: var(--space-200);
+  }
+
+  .chip-edit:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
   }
 
   .chip.negated {
@@ -1059,15 +1137,14 @@
     opacity: 0.55;
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .results {
-      transition: none;
-    }
-  }
-
   @media (pointer: coarse) {
-    .starter-filter {
+    .starter-filter,
+    .chip-edit {
       min-block-size: var(--target-hit);
+    }
+
+    .chip-remove {
+      --target: var(--target-hit);
     }
   }
 
@@ -1085,6 +1162,14 @@
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
     margin: 0;
+  }
+
+  .results-summary {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-200);
+    justify-content: space-between;
   }
 
   .search-bar {
@@ -1180,6 +1265,12 @@
     flex-direction: column;
     gap: var(--space-400);
     transition: opacity 150ms ease-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .results {
+      transition: none;
+    }
   }
 
   .group h2 {
@@ -1313,7 +1404,7 @@
     white-space: nowrap;
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .hit-context:not([hidden]) {
       display: block;
     }

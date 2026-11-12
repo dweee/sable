@@ -49,8 +49,7 @@ function item(id: string, body: string, patch: Partial<TimelineItemView> = {}): 
       kind: 'message',
       body,
       html: body,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -67,6 +66,7 @@ function item(id: string, body: string, patch: Partial<TimelineItemView> = {}): 
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
     ...patch,
   });
 }
@@ -228,7 +228,7 @@ test('a short receipted notice keeps its text on one line', async () => {
       content: {
         ...base.content,
         html: '<p>miam miam</p>',
-        notice: true,
+        msgtype: 'notice',
       } as TimelineItemView['content'],
       read_by: TWO_READERS,
     },
@@ -310,5 +310,27 @@ test('a receipt never takes a line of its own or covers text when the last line 
       ).toBe(false);
       await screen.unmount();
     }
+  }
+}, 120_000);
+
+test('the text wraps the same for one reader as for many', async () => {
+  await page.viewport(1280, 720);
+  const readers = [...FOUR_READERS, '@frank:example.test', '@gina:example.test'];
+  for (let length = 60; length <= 140; length += 1) {
+    const body = 'word '.repeat(40).slice(0, length).trim();
+    const widths: number[] = [];
+    for (const count of [1, 2, 4, 6]) {
+      const screen = await mountItem(
+        item('general-19', body, { read_by: readers.slice(0, count) })
+      );
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const text = document.querySelector('[data-item-id="general-19"] .formatted-body');
+      if (!text) throw new Error('missing body');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      widths.push(new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size);
+      await screen.unmount();
+    }
+    expect(new Set(widths).size, `length ${String(length)}: ${widths.join(',')}`).toBe(1);
   }
 }, 120_000);

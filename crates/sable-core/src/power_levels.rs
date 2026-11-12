@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use matrix_sdk::ruma::OwnedRoomId;
+use sable_model::color::is_hex_color;
 pub(crate) use sable_model::power_levels::{TAGS_EVENT, level_at, with_level};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -8,7 +9,7 @@ use serde_with::{DefaultOnError, serde_as};
 
 use crate::protocol::{
     PowerLevelAction, PowerLevelLocation, PowerLevelTagView, PowerLevelTagsView,
-    RoomPowerLevelsView, RpcError,
+    RoomPowerLevelsView, RpcCode, RpcError,
 };
 use crate::view;
 use crate::{Core, ResultExt};
@@ -160,12 +161,6 @@ pub(crate) fn power_levels_content(
     content
 }
 
-fn is_hex_color(color: &str) -> bool {
-    color
-        .strip_prefix('#')
-        .is_some_and(|digits| digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
 fn tag_level(key: &str) -> Option<i64> {
     let level = key.parse::<i64>().ok()?;
     ((-MAX_SAFE_LEVEL..=MAX_SAFE_LEVEL).contains(&level) || level == FOUNDER_LEVEL).then_some(level)
@@ -198,7 +193,7 @@ fn tag(value: &Value) -> Option<PowerLevelTagView> {
     let name = tag.name.filter(|name| !name.trim().is_empty())?;
     Some(PowerLevelTagView {
         name,
-        color: tag.color.filter(|color| is_hex_color(color)),
+        color: tag.color.filter(|color| is_hex_color(color, &[6])),
         icon: tag
             .icon
             .and_then(|icon| icon.key)
@@ -264,7 +259,7 @@ pub(crate) fn with_tag(
         .and_then(|stored| serde_json::from_value(stored).ok())
         .unwrap_or_default();
     entry.name.clone_from(&tag.name);
-    entry.color = tag.color.clone().filter(|color| is_hex_color(color));
+    entry.color = tag.color.clone().filter(|color| is_hex_color(color, &[6]));
     entry.icon = tag
         .icon
         .as_deref()
@@ -306,7 +301,7 @@ impl Core {
         let user_id = room
             .client()
             .user_id()
-            .ok_or(RpcError::NotLoggedIn)?
+            .ok_or(RpcCode::NotLoggedIn)?
             .to_owned();
         let levels = room.power_levels_or_default().await;
         Ok((
@@ -588,6 +583,25 @@ mod tests {
                 .get("m.room.topic"),
             Some(&100)
         );
+    }
+
+    #[test]
+    fn setting_send_messages_also_gates_encrypted_messages() {
+        let next = with_level(&room(), &PowerLevelLocation::event("m.room.message"), 50);
+        assert_eq!(next.events.get("m.room.message"), Some(&50));
+        assert_eq!(next.events.get("m.room.encrypted"), Some(&50));
+    }
+
+    #[test]
+    fn setting_a_call_or_pack_permission_also_gates_its_other_event_types() {
+        let join = with_level(&room(), &PowerLevelLocation::event("m.rtc.member"), 10);
+        assert_eq!(join.events.get("org.matrix.msc4143.rtc.member"), Some(&10));
+        assert_eq!(join.events.get("org.matrix.msc3401.call.member"), Some(&10));
+        let start = with_level(&room(), &PowerLevelLocation::state("m.rtc.slot"), 20);
+        assert_eq!(start.events.get("org.matrix.msc4143.rtc.slot"), Some(&20));
+        assert_eq!(start.events.get("org.matrix.msc3401.call"), Some(&20));
+        let packs = with_level(&room(), &PowerLevelLocation::state("m.room.image_pack"), 30);
+        assert_eq!(packs.events.get("im.ponies.room_emotes"), Some(&30));
     }
 
     #[test]

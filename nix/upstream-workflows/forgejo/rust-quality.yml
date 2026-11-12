@@ -12,6 +12,7 @@ on:
       - '.cargo/**'
       - '.clippy.toml'
       - '.forgejo/workflows/rust-quality.yml'
+      - '.mise/config.toml'
       - '.forgejo/actions/rust/**'
       - '.forgejo/webdriver.json'
   push:
@@ -26,6 +27,7 @@ on:
       - '.cargo/**'
       - '.clippy.toml'
       - '.forgejo/workflows/rust-quality.yml'
+      - '.mise/config.toml'
       - '.forgejo/actions/rust/**'
       - '.forgejo/webdriver.json'
 
@@ -77,7 +79,7 @@ jobs:
         run: cargo clippy --locked --workspace --exclude app --all-targets --all-features -- -D warnings
 
       - name: Install cargo-nextest
-        uses: https://github.com/taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        uses: https://github.com/taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cargo-nextest@0.9.146
 
@@ -87,8 +89,8 @@ jobs:
       - name: Check generated bindings are current
         run: cargo run --locked -p sable-core --example generate-types --features typegen -- --check
 
-  # --all-features would turn on both desktop runtimes and download CEF, so the
-  # app crate stays on its default runtime. The Linux release job covers CEF.
+  # The app crate is the Android and iOS shell. This job lints and tests it on
+  # the Linux host. The android and ios jobs lint the real targets.
   app:
     name: App crate
     runs-on: ubuntu-latest
@@ -115,7 +117,7 @@ jobs:
         run: cargo clippy --locked -p app --all-targets -- -D warnings
 
       - name: Install cargo-nextest
-        uses: https://github.com/taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        uses: https://github.com/taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cargo-nextest@0.9.146
 
@@ -180,6 +182,67 @@ jobs:
           WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ github.workspace }}/.forgejo/webdriver.json
         run: cargo test --locked -p sable-wasm --target wasm32-unknown-unknown --profile wasm-test
 
+  android:
+    name: Android target
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+      MISE_ENV: tauri
+    steps:
+      - name: Check out repository
+        uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up the Rust workspace
+        uses: ./.forgejo/actions/rust
+        with:
+          components: clippy
+          targets: aarch64-linux-android
+          mise: 'true'
+          cache-key: android
+
+      - name: Install the Android SDK and NDK
+        run: |
+          sudo_cmd=()
+          [ "$(id -u)" -eq 0 ] || sudo_cmd=(sudo)
+          "${sudo_cmd[@]}" apt-get update
+          "${sudo_cmd[@]}" apt-get install --no-install-recommends -y build-essential libclang-dev unzip
+          mise install
+          mise run --skip-deps tauri:setup:android
+
+      - name: Run Clippy
+        run: mise run check:android
+
+  ios:
+    name: iOS target
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Check out repository
+        uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up the Rust workspace
+        uses: ./.forgejo/actions/rust
+        with:
+          components: clippy
+          targets: aarch64-apple-ios
+          cache-key: ios
+
+      - name: Run Clippy
+        run: cargo clippy --locked -p app --target aarch64-apple-ios -- -D warnings
+
   policy:
     name: Format and dependency policy
     runs-on: ubuntu-latest
@@ -194,15 +257,15 @@ jobs:
       # cargo-deny resolves the graph through `cargo metadata`, so cargo has to
       # be on PATH, but it compiles nothing and wants no artifact cache.
       - name: Set up Rust
-        uses: https://github.com/dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: https://github.com/dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: rustfmt
 
       - name: Set up mise
-        uses: https://github.com/jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        uses: https://github.com/jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          version: '2026.10.4'
+          version: '2026.10.25'
           github_token: ''
           cache: true
           env: false
@@ -213,7 +276,7 @@ jobs:
 
       # Prebuilt, rather than a `cargo install` that compiles it every run.
       - name: Check dependency policy
-        run: mise exec aqua:EmbarkStudios/cargo-deny@0.20.2 -- cargo-deny check
+        run: mise exec aqua:EmbarkStudios/cargo-deny@0.20.2 -- cargo-deny --config .cargo/deny.toml check
 
       - name: Check Rust formatting
         if: ${{ !cancelled() }}

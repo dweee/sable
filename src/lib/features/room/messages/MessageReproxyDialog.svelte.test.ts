@@ -5,20 +5,16 @@ import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 
 import type { PersonaView } from '#src/generated/protocol';
+import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
 
 import MessageReproxyDialog from './MessageReproxyDialog.svelte';
+import { testPersona } from '#lib/personas/persona.ts';
 
 function persona(id: string, display_name: string): PersonaView {
   return {
+    ...testPersona,
     id,
     display_name,
-    avatar_url: null,
-    pronouns: [],
-    color_on_light: null,
-    color_on_dark: null,
-    triggers: [],
-    pluralkit: null,
-    last_used: null,
   };
 }
 
@@ -30,8 +26,8 @@ test.each([
   { desktop: true, sheet: false },
   { desktop: false, sheet: true },
 ])('uses the draggable sheet only on mobile (desktop: $desktop)', async ({ desktop, sheet }) => {
-  vi.stubGlobal('matchMedia', () => ({
-    matches: desktop,
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query === BREAKPOINTS.wide && desktop,
     addEventListener: () => {},
     removeEventListener: () => {},
   }));

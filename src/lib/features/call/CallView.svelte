@@ -26,6 +26,7 @@
 
   import CallControls from './CallControls.svelte';
   import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { electronBridge } from '#lib/platform/electron.js';
   import CallModeDebug from './CallModeDebug.svelte';
   import CallPlayback from './CallPlayback.svelte';
   import CallParticipantTile from './CallParticipantTile.svelte';
@@ -42,6 +43,7 @@
   } from './call-layout';
   import type { CallSession } from './call-session.svelte.js';
   import { callFailureKey, callStatusKey } from './call-status';
+  import { callFullscreen } from './call-fullscreen.svelte.js';
 
   interface Props {
     session: CallSession;
@@ -115,9 +117,6 @@
       session.watchedScreenShareIds
     )
   );
-  let remoteVideoKey = $derived(
-    tiles.find((tile) => tile.source === 'screen' && tile.watching && !tile.participant.local)?.key
-  );
   let others = $derived(
     tiles.filter((tile) => tile.source === 'camera' && !tile.participant.local).length
   );
@@ -163,20 +162,17 @@
     microphone: 'call.microphoneUnavailable',
     camera: 'call.cameraUnavailable',
     screen: 'call.screenShareUnavailable',
-    screenAudio: 'call.screenAudioUnavailable',
+    screenAudio:
+      electronBridge()?.platform === 'darwin'
+        ? 'call.screenAudioUnavailableMac'
+        : 'call.screenAudioUnavailable',
   } as const;
 
   let stage = $state<HTMLElement>();
-  let fullscreen = $state(false);
-  const fullscreenAvailable =
-    typeof document !== 'undefined' &&
-    document.fullscreenEnabled &&
-    typeof HTMLElement.prototype.requestFullscreen === 'function';
-
-  function toggleFullscreen(): void {
-    if (fullscreen) void document.exitFullscreen();
-    else void stage?.requestFullscreen();
-  }
+  const fullscreen = callFullscreen(
+    () => stage,
+    () => session.localVideo !== undefined || session.remoteVideo !== undefined
+  );
 
   let chromeVisible = $derived.by(() => {
     void settled;
@@ -209,7 +205,7 @@
   }
 
   function openCallSettings(event: MouseEvent): void {
-    if (fullscreen) void document.exitFullscreen();
+    fullscreen.exit();
     onOpenSettings?.(event);
   }
 
@@ -223,11 +219,9 @@
   });
 </script>
 
-<svelte:document onfullscreenchange={() => (fullscreen = document.fullscreenElement === stage)} />
-
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <section
-  class={['stage', { resting: !chromeVisible }]}
+  class={['stage', { resting: !chromeVisible, expanded: fullscreen.expanded }]}
   aria-label={i18n.t('call.title')}
   bind:this={stage}
   onpointermove={wake}
@@ -302,14 +296,14 @@
           {/if}
         </IconButton>
       {/if}
-      {#if fullscreenAvailable}
+      {#if fullscreen.available}
         <IconButton
           variant="secondary"
           size="small"
-          label={i18n.t(fullscreen ? 'call.exitFullscreen' : 'call.fullscreen')}
-          onclick={toggleFullscreen}
+          label={i18n.t(fullscreen.active ? 'call.exitFullscreen' : 'call.fullscreen')}
+          onclick={fullscreen.toggle}
         >
-          {#if fullscreen}
+          {#if fullscreen.active}
             <CornersInIcon weight="bold" />
           {:else}
             <CornersOutIcon weight="bold" />
@@ -322,14 +316,15 @@
   {#if !failed}
     <div class="dock chrome">
       <CallControls
-        microphoneEnabled={session.transport.microphoneEnabled}
+        microphoneEnabled={session.microphoneEnabled && !session.deafened}
+        pushToTalk={session.inputMode === 'push-to-talk'}
+        onPushToTalk={(held, source) => void session.setTalking(held, source)}
         cameraEnabled={session.transport.cameraEnabled}
         screenShareEnabled={session.transport.screenShareEnabled}
         deafened={session.deafened}
         {ready}
         canScreenShare={session.canScreenShare}
-        onToggleMicrophone={() =>
-          void session.setMicrophoneEnabled(!session.transport.microphoneEnabled)}
+        onToggleMicrophone={() => void session.toggleMicrophone()}
         onToggleCamera={() => void session.setCameraEnabled(!session.transport.cameraEnabled)}
         onToggleScreenShare={() => void session.toggleScreenShare()}
         onToggleDeafen={() => session.setDeafened(!session.deafened)}
@@ -349,6 +344,11 @@
   {/if}
 
   <div class="notices" bind:clientHeight={noticeHeight}>
+    {#if session.desktopShortcutStatus === 'error'}
+      <Alert variant="warning" class="notice">
+        <p>{i18n.t('call.desktopShortcutsUnavailable')}</p>
+      </Alert>
+    {/if}
     {#if session.listenOnly}
       <Alert variant="warning" class="notice">
         <p>{i18n.t('call.listenOnly')}</p>
@@ -482,7 +482,7 @@
     source={item.source}
     room={session.roomFor(item.participant.backendId)}
     localVideo={item.participant.local ? session.localVideo : undefined}
-    remoteVideo={item.key === remoteVideoKey ? session.remoteVideo : undefined}
+    remoteVideo={item.participant.local ? undefined : session.remoteVideo}
     name={tileNames.get(item.participant.identity) ?? profile.name}
     userId={profile.userId}
     avatar={profile.avatar}
@@ -495,11 +495,14 @@
     onWatchScreen={item.source === 'screen' && !item.participant.local && screenShare
       ? () => session.toggleWatchScreenShare(screenShare.id)
       : undefined}
-    onVolumeChange={(identity, volume) => void session.setParticipantVolume(identity, volume)}
   />
 {/snippet}
 
 <style>
+  :global(body:has(> .stage.expanded, > .tile.expanded)) {
+    overflow: hidden;
+  }
+
   .stage {
     background: var(--surface-container);
     box-sizing: border-box;
@@ -515,6 +518,13 @@
 
   .stage.resting {
     cursor: none;
+  }
+
+  .stage.expanded {
+    inset: 0;
+    padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+    position: fixed;
+    z-index: var(--layer-overlay);
   }
 
   .chrome {
@@ -540,6 +550,10 @@
     pointer-events: none;
     position: absolute;
     z-index: 2;
+  }
+
+  .expanded .top {
+    inset: var(--safe-top) var(--safe-right) auto var(--safe-left);
   }
 
   .top > * {
@@ -830,6 +844,10 @@
     order: -1;
   }
 
+  .expanded .dock {
+    margin-block-end: var(--safe-bottom);
+  }
+
   .dock > :global(*) {
     pointer-events: auto;
   }
@@ -840,5 +858,19 @@
 
   .resting .dock {
     translate: 0 0.5rem;
+  }
+
+  @supports not (color: color-mix(in srgb, black, white)) {
+    .live-dot {
+      box-shadow: 0 0 0 0.1875rem var(--success-main);
+    }
+
+    .live-dot.reconnecting {
+      box-shadow: 0 0 0 0.1875rem var(--warn-main);
+    }
+
+    .live-dot.failed {
+      box-shadow: 0 0 0 0.1875rem var(--crit-main);
+    }
   }
 </style>

@@ -12,7 +12,7 @@ use serde_with::{DefaultOnError, serde_as};
 use crate::Core;
 use crate::ResultExt;
 use crate::api::packs::ListOk;
-use crate::protocol::{ReactionShortcodeView, RpcError};
+use crate::protocol::{ReactionShortcodeView, RpcCode, RpcError};
 
 const MAX_SHORTCODE_BYTES: usize = 100;
 
@@ -79,7 +79,7 @@ impl Core {
         if can_annotate(event.raw()) && !is_redacted(event.raw()) {
             Ok(())
         } else {
-            Err(RpcError::Unsupported)
+            Err(RpcCode::Unsupported.into())
         }
     }
 
@@ -94,8 +94,11 @@ impl Core {
         event_id: &OwnedEventId,
     ) -> Result<Vec<ReactionShortcodeView>, RpcError> {
         let room = self.room(room_id).await?;
-        let (cache, _handles) = room
+        let client = room.client();
+        let (cache, _handles) = client
             .event_cache()
+            .ok_or(RpcCode::Unavailable)?
+            .room(room_id)
             .await
             .or_failed(self, "reaction_shortcodes")?;
         let related = cache
@@ -214,17 +217,20 @@ mod tests {
         reason = "one sequential flow kept in a single function"
     )]
     async fn nested_reactions_are_ignored() {
-        use std::{collections::BTreeSet, sync::Arc};
+        use std::sync::Arc;
 
         use crate::{
-            Core, api::timeline::TimelineFocusView, protocol::RpcError, session::Session,
+            Core,
+            api::timeline::TimelineFocusView,
+            protocol::{RpcCode, RpcError},
+            session::Session,
             store::MemorySessionStore,
         };
         use matrix_sdk::{
             ruma::{event_id, room_id},
             test_utils::mocks::MatrixMockServer,
         };
-        use matrix_sdk_test::{ALICE, JoinedRoomBuilder, event_factory::EventFactory};
+        use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
         use matrix_sdk_ui::sync_service::SyncService;
 
         for reactions_first in [false, true] {
@@ -232,7 +238,7 @@ mod tests {
             let client = server.client_builder().build().await;
             server.mock_room_state_encryption().plain().mount().await;
             let room_id = room_id!("!reactions:example.org");
-            let factory = EventFactory::new().room(room_id).sender(*ALICE);
+            let factory = EventFactory::new().room(room_id).sender(User::Alice);
             let original = event_id!("$original");
             let annotation = event_id!("$annotation");
             let replacement = event_id!("$replacement");
@@ -241,7 +247,7 @@ mod tests {
             let custom = |event_id, relation| {
                 Raw::new(&json!({
                     "type": "com.example.custom", "event_id": event_id,
-                    "sender": *ALICE, "origin_server_ts": 1,
+                    "sender": User::Alice, "origin_server_ts": 1,
                     "content": {"m.relates_to": {"rel_type": relation, "event_id": original}},
                 }))
                 .unwrap()
@@ -250,7 +256,7 @@ mod tests {
             let image_reaction = |target, event_id| {
                 Raw::new(&json!({
                     "type": "m.reaction", "event_id": event_id,
-                    "sender": *ALICE, "origin_server_ts": 2,
+                    "sender": User::Alice, "origin_server_ts": 2,
                     "content": {
                         "shortcode": "invalid",
                         "m.relates_to": {"rel_type": "m.annotation", "event_id": target, "key": "mxc://example.org/invalid"},
@@ -299,7 +305,6 @@ mod tests {
                     crate::view::timeline_item(
                         item,
                         client.user_id(),
-                        &BTreeSet::new(),
                         &crate::view::Highlights::default(),
                         &crate::view::LocalContent::default(),
                     )
@@ -349,6 +354,7 @@ mod tests {
                 );
                 assert!(matches!(
                     Box::pin(core.run(crate::api::messages::ReactParams {
+                        persona: None,
                         room_id: room_id.to_owned(),
                         event_id: target.to_owned(),
                         key: "👍".to_owned(),
@@ -358,7 +364,10 @@ mod tests {
                         subscription: None,
                     }))
                     .await,
-                    Err(RpcError::Unsupported)
+                    Err(RpcError {
+                        code: RpcCode::Unsupported,
+                        ..
+                    })
                 ));
             }
         }
@@ -478,7 +487,7 @@ mod tests {
             ruma::{event_id, room_id},
             test_utils::mocks::MatrixMockServer,
         };
-        use matrix_sdk_test::{ALICE, JoinedRoomBuilder, event_factory::EventFactory};
+        use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
         use matrix_sdk_ui::timeline::RoomExt as _;
 
         let server = MatrixMockServer::new().await;
@@ -486,7 +495,7 @@ mod tests {
         server.mock_room_state_encryption().plain().mount().await;
         let room_id = room_id!("!redacted:example.org");
         let me = client.user_id().unwrap().to_owned();
-        let factory = EventFactory::new().room(room_id).sender(*ALICE);
+        let factory = EventFactory::new().room(room_id).sender(User::Alice);
         let target = event_id!("$target");
         let room = server
             .sync_room(
@@ -546,7 +555,6 @@ mod tests {
                 crate::view::timeline_item(
                     item,
                     client.user_id(),
-                    &std::collections::BTreeSet::new(),
                     &crate::view::Highlights::default(),
                     &crate::view::LocalContent::default(),
                 )

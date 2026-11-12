@@ -2,6 +2,9 @@
 #![recursion_limit = "512"]
 
 mod session_store;
+mod span_layer;
+
+pub use span_layer::set_span_handler;
 
 use std::{
     cell::{Cell, RefCell},
@@ -12,43 +15,19 @@ use std::{
 use js_sys::Function;
 use sable_core::{
     Core,
+    binding::{
+        DEFAULT_LOG_FILTER, EVENT_BATCH_LIMIT, REPORTED_LOG_MARK, encode_event_batch,
+        is_reported_event, rpc_error_json,
+    },
     protocol::{CoreEvent, RpcError},
 };
 use session_store::JsSessionStore;
 use tokio::sync::mpsc::UnboundedReceiver;
 use wasm_bindgen::{JsValue, prelude::*};
 
-/// Most events a single crossing into JS carries.
-const EVENT_BATCH_LIMIT: usize = 256;
-
-fn encode_batch(batch: &[CoreEvent]) -> Option<String> {
-    match serde_json::to_string(batch) {
-        Ok(json) => return Some(json),
-        Err(error) => {
-            tracing::error!(
-                ?error,
-                "a core event batch did not serialize; dropping what fails"
-            );
-        }
-    }
-
-    let kept: Vec<&CoreEvent> = batch
-        .iter()
-        .filter(|event| serde_json::to_string(event).is_ok())
-        .collect();
-
-    if kept.is_empty() {
-        return None;
-    }
-    serde_json::to_string(&kept).ok()
+fn js_err(error: impl Into<RpcError>) -> String {
+    rpc_error_json(&error.into())
 }
-
-fn js_err(error: &RpcError) -> String {
-    serde_json::to_string(error)
-        .unwrap_or_else(|_| r#"{"code":"failed","log_id":"serialization failed"}"#.to_owned())
-}
-
-const DEFAULT_LOG_FILTER: &str = "info,matrix_sdk::http_client=off,matrix_sdk::latest_events::latest_event::builder=off,matrix_sdk_base::room::display_name=off";
 
 static LOG_FILTER: OnceLock<
     tracing_subscriber::reload::Handle<
@@ -63,8 +42,7 @@ fn log_targets(filter: &str) -> tracing_subscriber::filter::Targets {
     })
 }
 
-/// Without this the core's `tracing` output is discarded and a
-/// `Failed { log_id }` names a line that was never written.
+/// Without this the core's `tracing` output is discarded.
 fn init_tracing() {
     use tracing_subscriber::prelude::*;
 
@@ -82,8 +60,14 @@ fn init_tracing() {
     // A second call fails, so a reconnecting port must stay harmless.
     if tracing_subscriber::registry()
         .with(targets)
+        .with(sable_core::binding::ErrorLayer::default())
         .with(console_layer)
         .with(debug_layer)
+        .with(
+            span_layer::JsSpanLayer.with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+                meta.is_span() && meta.target() == "sable_core::tasks"
+            })),
+        )
         .try_init()
         .is_ok()
     {
@@ -101,6 +85,7 @@ thread_local! {
 
 struct JsLogWriter {
     capturing: bool,
+    reported: bool,
     line: String,
 }
 
@@ -124,7 +109,12 @@ impl Drop for JsLogWriter {
         }
         let notify = LOG_NOTIFIER.with_borrow(Clone::clone);
         if let Some(notify) = notify {
-            let _ = notify.call1(&JsValue::NULL, &JsValue::from_str(&self.line));
+            let line = if self.reported {
+                format!("{REPORTED_LOG_MARK}{}", self.line)
+            } else {
+                std::mem::take(&mut self.line)
+            };
+            let _ = notify.call1(&JsValue::NULL, &JsValue::from_str(&line));
         }
         LOG_NOTIFYING.set(false);
     }
@@ -138,14 +128,17 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeJsLogWriter {
     fn make_writer(&'a self) -> Self::Writer {
         JsLogWriter {
             capturing: LOG_CAPTURE.get(),
+            reported: false,
             line: String::new(),
         }
     }
 
-    /// Error lines always reach the page, since `Failed` carries only a `log_id`.
+    /// Error lines always reach the page, which shows them in its debug log.
     fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        let reported = is_reported_event(meta);
         JsLogWriter {
-            capturing: LOG_CAPTURE.get() || meta.level() == &tracing::Level::ERROR,
+            capturing: LOG_CAPTURE.get() || meta.level() == &tracing::Level::ERROR || reported,
+            reported,
             line: String::new(),
         }
     }
@@ -237,7 +230,7 @@ impl SableCore {
         Box::pin(self.core.call(&method, &params))
             .await
             .map(|json| Box::<str>::from(json).into_string())
-            .map_err(|error| js_err(&error))
+            .map_err(js_err)
     }
 
     /// Stops syncing and refuses further calls, before another worker takes the stores.
@@ -248,8 +241,7 @@ impl SableCore {
 
     #[wasm_bindgen(js_name = setActive)]
     pub async fn set_active(&self, active: bool) {
-        self.core.set_app_active(active);
-        self.core.apply_app_activity(active).await;
+        self.core.update_app_active(active).await;
     }
 
     /// Resolves with the raw thumbnail bytes.
@@ -268,7 +260,7 @@ impl SableCore {
         self.core
             .fetch_media(source, width, height, background)
             .await
-            .map_err(|error| js_err(&error))
+            .map_err(js_err)
     }
 
     /// Resolves once every stored copy of the source is gone.
@@ -278,10 +270,7 @@ impl SableCore {
     /// Returns a JSON-encoded command error when the media store cannot be written.
     #[wasm_bindgen(js_name = forgetMedia)]
     pub async fn forget_media(&self, source: String) -> Result<(), String> {
-        self.core
-            .forget_media(source)
-            .await
-            .map_err(|error| js_err(&error))
+        self.core.forget_media(source).await.map_err(js_err)
     }
 
     /// Resolves once the event is queued.
@@ -292,26 +281,22 @@ impl SableCore {
     #[wasm_bindgen(js_name = sendAttachment)]
     pub async fn send_attachment(&self, request: String, bytes: Vec<u8>) -> Result<(), String> {
         let request = serde_json::from_str(&request)
-            .map_err(|error| js_err(&self.core.failed("send_attachment", error)))?;
+            .map_err(|error| js_err(self.core.failed_with("send_attachment", &error)))?;
 
         self.core
             .send_attachment(request, bytes)
             .await
-            .map_err(|error| js_err(&error))
+            .map_err(js_err)
     }
 
     /// # Errors
     ///
     /// Returns a JSON-encoded command error when an attachment is invalid or sending fails.
     #[wasm_bindgen(js_name = sendGallery)]
-    pub async fn send_gallery(&self, request: String, items: String) -> Result<(), String> {
+    pub async fn send_gallery(&self, request: String, bytes: Vec<u8>) -> Result<(), String> {
         let request = serde_json::from_str(&request)
-            .map_err(|error| js_err(&self.core.failed("send_gallery", error)))?;
-        let items = serde_json::from_str(&items).map_err(|_| js_err(&RpcError::InvalidMedia))?;
-        self.core
-            .send_gallery(request, items)
-            .await
-            .map_err(|error| js_err(&error))
+            .map_err(|error| js_err(self.core.failed_with("send_gallery", &error)))?;
+        self.core.send_gallery(request, bytes).await.map_err(js_err)
     }
 
     /// # Errors
@@ -319,10 +304,20 @@ impl SableCore {
     /// Returns a JSON-encoded command error when the upload fails.
     #[wasm_bindgen(js_name = uploadMedia)]
     pub async fn upload_media(&self, mime: String, bytes: Vec<u8>) -> Result<String, String> {
+        self.core.upload_media(mime, bytes).await.map_err(js_err)
+    }
+
+    /// Resolves with the bytes to send back, empty when there is nothing to send.
+    ///
+    /// # Errors
+    ///
+    /// Returns a JSON-encoded command error when the frame cannot be handled.
+    #[wasm_bindgen(js_name = rtcData)]
+    pub async fn rtc_data(&self, session_id: String, frame: Vec<u8>) -> Result<Vec<u8>, String> {
         self.core
-            .upload_media(mime, bytes)
+            .rtc_data(&session_id, &frame)
             .await
-            .map_err(|error| js_err(&error))
+            .map_err(js_err)
     }
 
     /// Called once; each call carries a `CoreEvent[]` as JSON.
@@ -341,7 +336,7 @@ impl SableCore {
         wasm_bindgen_futures::spawn_local(async move {
             let mut batch = Vec::new();
             while events.recv_many(&mut batch, EVENT_BATCH_LIMIT).await > 0 {
-                let encoded = encode_batch(&batch);
+                let encoded = encode_event_batch(&batch);
                 batch.clear();
                 if let Some(json) = encoded
                     && let Err(error) = on_event.call1(&JsValue::NULL, &JsValue::from_str(&json))

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { appName } from '#lib/deployment/brand.js';
   import { copyText } from '#lib/platform/clipboard.js';
   import ArrowClockwiseIcon from 'phosphor-svelte/lib/ArrowClockwiseIcon';
   import CheckIcon from 'phosphor-svelte/lib/CheckIcon';
@@ -10,6 +11,8 @@
   import { runtimeConfig } from '#lib/config/runtime-config.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n, t } from '#lib/i18n.js';
+  import { nativeDevicePusher } from '#lib/platform/native-notifications.js';
+  import { isNativeMobile } from '#lib/platform/os.js';
   import SettingsAnchorLink from '#lib/ui/primitives/SettingsAnchorLink.svelte';
   import { pushOverride, trimmed } from '#lib/notifications/push-config.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
@@ -69,8 +72,15 @@
     ownApps = [
       ...new Set(ids.filter((id): id is string => id !== undefined && id !== null && id !== '')),
     ];
-    const key = await currentPushKey();
+    const key = await devicePushKey();
     if (alive) ownKey = key;
+  }
+
+  async function devicePushKey(): Promise<string | null> {
+    if (!isNativeMobile()) return currentPushKey();
+    const session = core.session;
+    if (!session) return null;
+    return (await nativeDevicePusher(session.user_id, session.device_id))?.pushkey ?? null;
   }
 
   async function reload(): Promise<void> {
@@ -247,7 +257,7 @@
                 {#if pusher.pushkey === ownKey}
                   <StatusBadge variant="primary" label={i18n.t('settings.currentDevice')} />
                 {:else if ownApps.includes(pusher.app_id)}
-                  <StatusBadge variant="neutral" label="Sable" />
+                  <StatusBadge variant="neutral" label={appName()} />
                 {/if}
                 {#if pusher.activated !== null}
                   {@const activationLabel = i18n.t(

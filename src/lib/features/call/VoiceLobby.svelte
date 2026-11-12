@@ -147,7 +147,7 @@
     <Button
       {...props}
       variant="secondary"
-      class="test-mic"
+      size="large"
       aria-disabled={media.microphone ? undefined : 'true'}
       aria-pressed={testing && media.microphone}
       onclick={() => {
@@ -167,7 +167,7 @@
 {/snippet}
 
 {#snippet joinAction()}
-  <Button variant="primary" disabled={joining} loading={joining} onclick={onJoin}>
+  <Button variant="primary" size="large" disabled={joining} loading={joining} onclick={onJoin}>
     <PhoneIcon aria-hidden="true" weight="fill" />
     {joining ? i18n.t('call.joining') : i18n.t('call.joinVoice')}
   </Button>
@@ -356,10 +356,9 @@
     padding: var(--space-300);
   }
 
-  .dock :global(.btn.test-mic) {
-    --button-height: var(--control-height-500);
-
-    border-radius: var(--radius-inner);
-    border-width: var(--border-width);
+  @supports not (color: color-mix(in srgb, black, white)) {
+    .live-dot {
+      box-shadow: 0 0 0 0.1875rem var(--success-main);
+    }
   }
 </style>

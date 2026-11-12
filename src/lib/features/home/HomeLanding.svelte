@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { resolve } from '$app/paths';
   import ChatCircleDotsIcon from 'phosphor-svelte/lib/ChatCircleDotsIcon';
   import CompassIcon from 'phosphor-svelte/lib/CompassIcon';
@@ -6,23 +7,27 @@
   import HeartIcon from 'phosphor-svelte/lib/HeartIcon';
   import PlusCircleIcon from 'phosphor-svelte/lib/PlusCircleIcon';
 
-  import { SABLE_DONATE_URL, SABLE_SOURCE_URL, SABLE_SUPPORT_ROOM } from '#lib/config/links.js';
+  import { donateUrl, sourceUrl, supportRoom } from '#lib/deployment/links.js';
   import { readReturningUser } from '#lib/features/auth/flow/auth-flow.svelte.js';
   import { i18n } from '#lib/i18n.js';
   import { roomPathParamFromId } from '#lib/rooms/room-list.svelte.js';
   import ActionCard from '#lib/ui/ActionCard.svelte';
   import SableBrandMark from '#lib/ui/SableBrandMark.svelte';
   import LinkButton from '#lib/ui/primitives/LinkButton.svelte';
+  import SettingsChangesCard from './SettingsChangesCard.svelte';
 
   interface Props {
     titleKey?: string;
   }
 
   let { titleKey = 'nav.home' }: Props = $props();
-  const hasLoggedInBefore = readReturningUser(localStorage);
-  const supportHref = resolve('/(app)/to/[...permalink]', {
-    permalink: roomPathParamFromId(SABLE_SUPPORT_ROOM),
-  });
+  const hasLoggedInBefore = readReturningUser();
+  let room = $derived(supportRoom());
+  let supportHref = $derived(
+    room ? resolve('/(app)/to/[...permalink]', { permalink: roomPathParamFromId(room) }) : null
+  );
+  let source = $derived(sourceUrl());
+  let donate = $derived(donateUrl());
 
   const startCards = [
     {
@@ -46,9 +51,7 @@
   ];
 </script>
 
-<svelte:head>
-  <title>{i18n.t(titleKey)} - Sable</title>
-</svelte:head>
+<PageTitle title={i18n.t(titleKey)} />
 
 <main class="home-page" aria-labelledby="home-title">
   <section class="hero">
@@ -57,26 +60,31 @@
       {i18n.t(hasLoggedInBefore ? 'auth.welcomeBack' : 'auth.welcome')}
     </h1>
 
-    <div class="hero-actions" aria-label={i18n.t('home.resourcesLabel')}>
-      <LinkButton href={supportHref} variant="primary">
-        <ChatCircleDotsIcon aria-hidden="true" />
-        {i18n.t('home.getSupport')}
-      </LinkButton>
-      <LinkButton href={SABLE_SOURCE_URL} target="_blank" rel="noreferrer noopener" variant="ghost">
-        <GithubLogoIcon aria-hidden="true" />
-        {i18n.t('common.viewSource')}
-      </LinkButton>
-      <LinkButton
-        href={SABLE_DONATE_URL}
-        target="_blank"
-        rel="noreferrer noopener"
-        variant="secondary"
-      >
-        <HeartIcon aria-hidden="true" />
-        {i18n.t('home.supportDevelopment')}
-      </LinkButton>
-    </div>
+    {#if supportHref || source || donate}
+      <div class="hero-actions" aria-label={i18n.t('home.resourcesLabel')}>
+        {#if supportHref}
+          <LinkButton href={supportHref} variant="primary">
+            <ChatCircleDotsIcon aria-hidden="true" />
+            {i18n.t('home.getSupport')}
+          </LinkButton>
+        {/if}
+        {#if source}
+          <LinkButton href={source} target="_blank" rel="noreferrer noopener" variant="ghost">
+            <GithubLogoIcon aria-hidden="true" />
+            {i18n.t('common.viewSource')}
+          </LinkButton>
+        {/if}
+        {#if donate}
+          <LinkButton href={donate} target="_blank" rel="noreferrer noopener" variant="secondary">
+            <HeartIcon aria-hidden="true" />
+            {i18n.t('home.supportDevelopment')}
+          </LinkButton>
+        {/if}
+      </div>
+    {/if}
   </section>
+
+  <SettingsChangesCard />
 
   <section class="start-section" aria-labelledby="start-title">
     <div class="section-heading">
@@ -180,7 +188,7 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .home-page {
       display: block;
     }

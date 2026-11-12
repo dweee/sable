@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { afterOverlayPops } from '#lib/platform/overlay-back.svelte.js';
 
   import type { RoomListItemView } from '#src/generated/protocol';
   import { i18n } from '#lib/i18n.js';
@@ -20,7 +21,9 @@
   const roomList = useRoomList();
 
   function select(room: RoomListItemView): void {
-    void goto(roomSectionPath(roomList.rooms, room.room_id));
+    open = false;
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
+    void afterOverlayPops().then(() => goto(roomSectionPath(roomList.rooms, room.room_id)));
   }
 
   function openShortcutsHelp(): void {

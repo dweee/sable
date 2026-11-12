@@ -18,8 +18,7 @@ function item(overrides: Partial<TimelineItemView> & { id: string }): TimelineIt
       kind: 'message',
       body: overrides.id,
       html: overrides.id,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -36,6 +35,7 @@ function item(overrides: Partial<TimelineItemView> & { id: string }): TimelineIt
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
     ...overrides,
   });
 }
@@ -69,6 +69,29 @@ test('collects a post nobody has replied to yet', () => {
   expect(threads).toHaveLength(1);
   expect(threads[0]?.replyCount).toBe(0);
   expect(threads[0]?.lastBody).toBeNull();
+});
+
+test('an own attachment post is edited through its caption', () => {
+  const post = item({
+    id: 'file',
+    is_own: true,
+    content: {
+      kind: 'file',
+      filename: 'main.rs',
+      caption: 'the code',
+      html: null,
+      source: 'mxc://example.org/code',
+      external_url: null,
+      mime: 'text/plain',
+      size: 128,
+    },
+  });
+
+  const threads = collectForumThreads([post], null);
+
+  expect(threads[0]?.editable).toBe(true);
+  expect(threads[0]?.mediaCaption).toBe(true);
+  expect(threads[0]?.preview).toBe('the code');
 });
 
 test('ignores a thread reply, a plain reply and a state change', () => {
@@ -211,8 +234,7 @@ test('keeps the root details needed for its own forum actions', () => {
       kind: 'message',
       body: 'Original',
       html: '<strong>Original</strong>',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -237,4 +259,36 @@ test('carries the post title onto the thread', () => {
 
   expect(threads.find((thread) => thread.eventId === '$titled')?.title).toBe('Rules');
   expect(threads.find((thread) => thread.eventId === '$plain')?.title).toBeNull();
+});
+
+test('uses hydrated latest replies and thread receipts when the main timeline hides replies', () => {
+  const older = item({
+    id: 'older',
+    timestamp: 10,
+    sender: '@alice:example.org',
+    read_by: ['@alice:example.org'],
+    thread_summary: {
+      num_replies: 2,
+      latest_event_id: '$reply',
+      latest_body: 'New reply',
+      latest_fallback: null,
+    },
+  });
+  const newer = item({ id: 'newer', timestamp: 20 });
+  const reply = item({
+    id: 'reply',
+    timestamp: 30,
+    thread_root: '$older',
+    sender: '@bob:example.org',
+    sender_name: 'Bob',
+  });
+  const threads = collectForumThreads([older, newer], '@alice:example.org', [reply]);
+  expect(threads.map((thread) => thread.eventId)).toEqual(['$older', '$newer']);
+  expect(threads[0]?.lastActivityAt).toBe(30);
+  expect(threads[0]?.lastSenderName).toBe('Bob');
+  expect(threads[0]?.unread).toBe(true);
+  expect(
+    collectForumThreads([older], '@alice:example.org', [reply], new Map([['$older', false]]))[0]
+      ?.unread
+  ).toBe(false);
 });

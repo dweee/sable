@@ -8,12 +8,14 @@
   import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
   import FlagIcon from 'phosphor-svelte/lib/FlagIcon';
   import SignOutIcon from 'phosphor-svelte/lib/SignOutIcon';
+  import TrayIcon from 'phosphor-svelte/lib/TrayIcon';
   import ChatsIcon from 'phosphor-svelte/lib/ChatsIcon';
   import GridFourIcon from 'phosphor-svelte/lib/GridFourIcon';
   import ImagesIcon from 'phosphor-svelte/lib/ImagesIcon';
   import PushPinIcon from 'phosphor-svelte/lib/PushPinIcon';
   import UserCircleIcon from 'phosphor-svelte/lib/UserCircleIcon';
   import UserPlusIcon from 'phosphor-svelte/lib/UserPlusIcon';
+  import XIcon from 'phosphor-svelte/lib/XIcon';
   import type { RoomListItemView } from '#src/generated/protocol';
 
   import { useCoreClient } from '#lib/core/context.js';
@@ -37,8 +39,10 @@
     onMembers: () => void;
     onSettings: () => void;
     onJumpToTime?: () => void;
+    onClose?: () => void;
     onAttachments?: () => void;
     onThreads?: () => void;
+    onNotifications?: () => void;
     onPins?: () => void;
     pinsUnread?: number;
     onWidgets?: () => void;
@@ -56,8 +60,10 @@
     onMembers,
     onSettings,
     onJumpToTime,
+    onClose,
     onAttachments,
     onThreads,
+    onNotifications,
     onPins,
     pinsUnread = 0,
     onWidgets,
@@ -75,6 +81,7 @@
   async function copyLink(): Promise<void> {
     if (!room) return;
     if (!(await copyRoomLink(core, room))) toasts.error(i18n.t('errors.copyFailed'));
+    else toasts.info(i18n.t('timeline.linkCopied'));
   }
 </script>
 
@@ -108,7 +115,7 @@
         {i18n.t('room.menuMarkUnread')}
       </ActionMenuItem>
     {/if}
-    {#if room && room.room_kind !== 'space'}
+    {#if room}
       <RoomNotificationSubmenu roomId={room.room_id} active={opened} />
     {/if}
 
@@ -128,6 +135,12 @@
         <ActionMenuItem onSelect={onThreads}>
           <ChatsIcon />
           {i18n.t('timeline.threadsOpen')}
+        </ActionMenuItem>
+      {/if}
+      {#if onNotifications}
+        <ActionMenuItem onSelect={onNotifications}>
+          <TrayIcon />
+          {i18n.t('room.notificationsOpen')}
         </ActionMenuItem>
       {/if}
       {#if onPins}
@@ -165,6 +178,12 @@
       <ActionMenuItem onSelect={onJumpToTime}>
         <ClockCounterClockwiseIcon />
         {i18n.t('room.menuJumpToTime')}
+      </ActionMenuItem>
+    {/if}
+    {#if onClose}
+      <ActionMenuItem onSelect={onClose}>
+        <XIcon />
+        {i18n.t('room.menuClose')}
       </ActionMenuItem>
     {/if}
 

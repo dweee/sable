@@ -90,10 +90,14 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - name: Check out repository
         uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The settings changes check diffs the release tags.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Download web assets
@@ -131,6 +135,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: node --test 'scripts/**/*.test.mjs'
 
+      - name: Check settings changes
+        if: ${{ !cancelled() }}
+        run: node scripts/generate/settings-changes.mjs --check
+
       - name: Upload coverage report
         if: ${{ !cancelled() }}
         uses: https://code.forgejo.org/forgejo/upload-artifact@cb8afe72b42edc798abfb8fcb556cf660d894245 # v5
@@ -165,12 +173,6 @@ jobs:
         uses: ./.forgejo/actions/setup
         with:
           install-mise-tools: 'false'
-
-      - name: Restore DeepFilterNet assets
-        uses: https://github.com/actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: static/deepfilternet3
-          key: deepfilternet3-${{ hashFiles('scripts/build/fetch-deepfilternet.mjs') }}
 
       - name: Resolve Playwright version
         id: playwright
@@ -220,7 +222,7 @@ jobs:
           fi
 
       - name: Run browser component tests
-        run: pnpm exec vitest run --project browser
+        run: pnpm exec vitest run --project browser --project browser-touch
 
       - name: Run Playwright tests
         if: ${{ github.event_name == 'pull_request' }}

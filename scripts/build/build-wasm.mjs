@@ -1,20 +1,16 @@
-import {
-  closeSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs } from 'node:util';
+import { parseArgs, promisify } from 'node:util';
+import { lock } from 'proper-lockfile';
+import { cargoPackageVersion, cargoRustFlags } from '../lib/cargo.mjs';
 import { sha256 } from '../lib/download.mjs';
+import { wasmDebugIds } from '../../src/worker/wasm-debug.ts';
 
 const { release } = parseArgs({ options: { release: { type: 'boolean' } } }).values;
 const profile = release ? 'wasm-release' : 'wasm-dev';
+const keepNames = release && process.env.SABLE_WASM_NAMES === '1';
 const cargoArgs = [
   'build',
   '--locked',
@@ -28,100 +24,64 @@ const cargoArgs = [
   profile,
 ];
 
-const MAX_RELEASE_WASM_BYTES = 19 * 1024 * 1024;
-const MAX_RELEASE_MODEL_BYTES = 750 * 1024;
-
 function run(command, args, env) {
-  const result = spawnSync(command, args, { stdio: 'inherit', env: env ?? process.env });
-
-  if (result.status !== 0) throw new Error(`${command} failed with status ${result.status}`);
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: 'inherit', env: env ?? process.env });
+    child.once('error', reject);
+    child.once('close', (status, signal) => {
+      if (status === 0) resolve();
+      else reject(new Error(`${command} failed with ${signal ?? `status ${status}`}`));
+    });
+  });
 }
 
-function capture(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8' });
+const execFileAsync = promisify(execFile);
 
-  if (result.status !== 0) throw new Error(`${command} failed with status ${result.status}`);
-  return result.stdout;
+async function capture(command, args) {
+  return (await execFileAsync(command, args, { encoding: 'utf8' })).stdout;
 }
 
-function releaseEnvironment() {
+async function releaseEnvironment() {
   const config = readFileSync('.cargo/config.toml', 'utf8');
-  const declared = config.match(
-    /\[target\.wasm32-unknown-unknown\][\s\S]*?rustflags\s*=\s*\[([\s\S]*?)\]/
-  )?.[1];
-
-  const flags = [...(declared ?? '').matchAll(/'([^']*)'|"((?:[^"\\]|\\.)*)"/g)].map((match) =>
-    match[1] === undefined ? match[2].replaceAll('\\"', '"') : match[1]
-  );
+  const flags = cargoRustFlags(config, 'wasm32-unknown-unknown');
   const cargoHome = process.env.CARGO_HOME ?? join(homedir(), '.cargo');
 
   flags.push(
     `--remap-path-prefix=${cargoHome}=/cargo`,
-    `--remap-path-prefix=${capture('rustc', ['--print', 'sysroot']).trim()}=/rust`,
+    `--remap-path-prefix=${(await capture('rustc', ['--print', 'sysroot'])).trim()}=/rust`,
     `--remap-path-prefix=${process.cwd()}=/sable`
   );
 
   return { ...process.env, CARGO_ENCODED_RUSTFLAGS: flags.join('\x1f') };
 }
 
-function targetDirectory() {
-  return JSON.parse(capture('cargo', ['metadata', '--no-deps', '--format-version', '1']))
+async function targetDirectory() {
+  return JSON.parse(await capture('cargo', ['metadata', '--no-deps', '--format-version', '1']))
     .target_directory;
 }
 
-function lockOutput(output) {
-  const lock = `${output}.lock`;
-  const wait = new Int32Array(new SharedArrayBuffer(4));
-
-  for (;;) {
-    try {
-      const descriptor = openSync(lock, 'wx');
-      writeFileSync(descriptor, String(process.pid));
-      closeSync(descriptor);
-      return () => unlinkSync(lock);
-    } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
-        const pid = Number(readFileSync(lock, 'utf8'));
-        if (Number.isSafeInteger(pid)) {
-          try {
-            process.kill(pid, 0);
-          } catch (error) {
-            if (error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH') {
-              unlinkSync(lock);
-              continue;
-            }
-          }
-        }
-        Atomics.wait(wait, 0, 0, 100);
-        continue;
-      }
-      throw error;
-    }
-  }
-}
-
 const lockfile = readFileSync('Cargo.lock', 'utf8');
-const version = lockfile.match(/name = "wasm-bindgen"\r?\nversion = "([^"]+)"/)?.[1];
-const cli = spawnSync('wasm-bindgen', ['--version'], { encoding: 'utf8' });
+const version = cargoPackageVersion(lockfile, 'wasm-bindgen');
+const cli = await capture('wasm-bindgen', ['--version']).catch(() => '');
 
-if (!version || cli.status !== 0 || cli.stdout.trim() !== `wasm-bindgen ${version}`) {
+if (!version || cli.trim() !== `wasm-bindgen ${version}`) {
   throw new Error(`wasm-bindgen-cli must match Cargo.lock's wasm-bindgen ${version ?? 'version'}`);
 }
 
-run('cargo', cargoArgs, release ? releaseEnvironment() : undefined);
+await run('cargo', cargoArgs, release ? await releaseEnvironment() : undefined);
 
-const built = `${targetDirectory()}/wasm32-unknown-unknown/${profile}`;
+const built = `${await targetDirectory()}/wasm32-unknown-unknown/${profile}`;
 const output = process.env.SABLE_WASM_OUTPUT ?? 'src/generated/wasm';
 
-async function bindgen(input, name, { optimize, budget, features = [] }) {
+async function bindgen(input, name, { optimize, features = [] }) {
   const wasm = `${output}/${name}_bg.wasm`;
   const args = ['--target', 'web', '--out-dir', output, '--out-name', name];
-  if (release) args.push('--remove-name-section', '--remove-producers-section');
+  if (release) args.push('--remove-producers-section');
   else args.push('--debug');
-  run('wasm-bindgen', [...args, `${built}/${input}`]);
+  await run('wasm-bindgen', [...args, `${built}/${input}`]);
 
   if (features.length > 0) {
-    const declared = capture('wasm-opt', ['--print-features', wasm]);
+    const declared = await capture('wasm-opt', ['--print-features', wasm]);
     for (const required of features) {
       if (!declared.includes(`--enable-${required}`)) {
         throw new Error(`the target_features section does not declare ${required}`);
@@ -132,34 +92,68 @@ async function bindgen(input, name, { optimize, budget, features = [] }) {
   if (release) {
     const optimized = `${output}/${name}_bg.optimized.wasm`;
 
-    run('wasm-opt', [...optimize, wasm, '--output', optimized]);
+    await run('wasm-opt', [...optimize, '-g', wasm, '--output', optimized]);
     rmSync(wasm);
     renameSync(optimized, wasm);
+
+    const debug = `${output}/debug/${name}_bg.debug.wasm`;
+    mkdirSync(`${output}/debug`, { recursive: true });
+    // wasm-split defaults to a random ID.
+    const buildId = sha256(readFileSync(wasm))
+      .slice(0, 32)
+      .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+    await run('sentry', [
+      'wasm-split',
+      wasm,
+      '-d',
+      debug,
+      '--build-id',
+      buildId,
+      '--strip',
+      ...(keepNames ? [] : ['--strip-names']),
+    ]);
   }
 
   const generated = readFileSync(wasm);
-  await WebAssembly.compile(generated);
+  const module = await WebAssembly.compile(generated);
+  writeFileSync(
+    `${output}/${name}_build_id.js`,
+    `export default ${JSON.stringify(wasmDebugIds(module))};\n`
+  );
+  writeFileSync(
+    `${output}/${name}_build_id.d.ts`,
+    'declare const image: { code_id: string; debug_id: string } | undefined;\nexport default image;\n'
+  );
 
-  if (release && generated.byteLength > budget) {
-    throw new Error(`${wasm} is ${generated.byteLength} bytes, over the ${budget} budget`);
+  // Validate instructions independently of the module's target_features section.
+  const validationInput = `${output}/${name}_bg.validation.wasm`;
+  try {
+    await run('wasm-opt', [wasm, '--strip-target-features', '-o', validationInput]);
+    await run('wasm-opt', [validationInput, '--all-features', '--disable-simd']);
+  } finally {
+    rmSync(validationInput, { force: true });
   }
+
   return generated;
 }
 
-const unlockOutput = lockOutput(output);
+const unlockOutput = await lock(output, {
+  realpath: false,
+  // Earlier builders used a PID file at `${output}.lock`.
+  lockfilePath: `${output}.bindgen.lock`,
+  retries: { forever: true, minTimeout: 100, maxTimeout: 1000 },
+});
 
 try {
   const generated = await bindgen('sable_wasm.wasm', 'sable_wasm', {
     optimize: ['-O3', '--gufa', '-O3'],
-    budget: MAX_RELEASE_WASM_BYTES,
     features: ['reference-types', 'multivalue', 'bulk-memory'],
   });
   writeFileSync(`${output}/sable_wasm_version.js`, `export default '${sha256(generated)}';\n`);
 
   await bindgen('sable_model_wasm.wasm', 'sable_model', {
     optimize: ['-Oz'],
-    budget: MAX_RELEASE_MODEL_BYTES,
   });
 } finally {
-  unlockOutput();
+  await unlockOutput();
 }

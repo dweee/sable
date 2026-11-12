@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 
 import type { TimelineItemContentView } from '#src/generated/protocol';
 import { replyPreviewBody } from '#lib/features/room/messages/reply-preview.js';
+import { markdownToContent } from '#lib/model/model.js';
 
 const video: TimelineItemContentView = {
   kind: 'video',
@@ -9,6 +10,7 @@ const video: TimelineItemContentView = {
   filename: 'clip.mp4',
   caption: null,
   source: '{}',
+  external_url: null,
   mime: 'video/mp4',
   width: null,
   height: null,
@@ -43,8 +45,7 @@ test.each([
       kind: 'message',
       body,
       html,
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     })
@@ -64,6 +65,7 @@ test('every renderable message kind yields a preview', () => {
       filename: 'voice.ogg',
       caption: null,
       source: '{}',
+      external_url: null,
       mime: null,
       duration_ms: null,
       waveform: null,
@@ -78,6 +80,7 @@ test('every renderable message kind yields a preview', () => {
       caption: null,
       html: null,
       source: '{}',
+      external_url: null,
       mime: null,
       size: null,
     })
@@ -98,7 +101,7 @@ test('every renderable message kind yields a preview', () => {
 });
 
 test('an event with no body still yields a quotable empty preview', () => {
-  expect(replyPreviewBody({ kind: 'redacted', reason: null })).toBe('');
+  expect(replyPreviewBody({ kind: 'redacted', reason: null, redacted_by: null })).toBe('');
   expect(
     replyPreviewBody({
       kind: 'hidden_event',
@@ -115,8 +118,7 @@ test('a spoiler stays hidden in the preview', () => {
       kind: 'message',
       body: 'look ||secret|| here',
       html: 'look <span data-mx-spoiler="">sec<b>ret</b></span> here &amp; there',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     })
@@ -128,6 +130,24 @@ test('a spoiler stays hidden in the preview', () => {
       html: '<span data-mx-spoiler="">secret</span>',
     })
   ).toBe('[Spoiler]');
+});
+
+test('a formatted spoiler uses one placeholder while separate spoilers stay separate', () => {
+  const { body, formatted_body: html } = markdownToContent(
+    '||this is a *huge* spoiler|| and ||another||',
+    []
+  );
+
+  expect(
+    replyPreviewBody({
+      kind: 'message',
+      body,
+      html: html ?? '',
+      msgtype: 'text',
+      edited: false,
+      jumbo: null,
+    })
+  ).toBe('[Spoiler] and [Spoiler]');
 });
 
 test('an uncaptioned gallery is quoted by its file names', () => {

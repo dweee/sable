@@ -5,7 +5,7 @@ import { render, screen, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 
-import type { CoreEvent, RoomListItemView } from '#src/generated/protocol';
+import type { CoreEvent, RoomListItemView, RoomSectionsUpdate } from '#src/generated/protocol';
 
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
@@ -44,6 +44,7 @@ import SidebarNav from './SidebarNavHarness.test.svelte';
 import { RoomList } from '#lib/rooms/room-list.svelte.js';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { withCounts } from '#lib/rooms/summary-fixtures.js';
+import { badgeView, sectionsUpdate, sectionView } from '#lib/test-support/room-sections.js';
 
 beforeEach(() => {
   visit('/rooms');
@@ -60,6 +61,7 @@ function space(roomId = '!space:example.org', name = 'Space'): RoomListItemView 
     canonical_alias: null,
     name,
     topic: null,
+    topic_html: null,
     avatar_url: null,
     is_direct: false,
     direct_targets: [],
@@ -75,6 +77,7 @@ function space(roomId = '!space:example.org', name = 'Space'): RoomListItemView 
     supports_restricted: true,
     supports_knock_restricted: true,
     space_children: [],
+    bridge: null,
     unread: 0,
     notifying: 0,
     highlight: 0,
@@ -94,12 +97,80 @@ async function startRoomList(core: CoreClient): Promise<RoomList> {
   return roomList;
 }
 
+function fixtureCore(rooms: RoomListItemView[]) {
+  const listeners = new Set<(event: CoreEvent) => void>();
+  const client = {
+    subscribeEvents: (listener: (event: CoreEvent) => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    rpc: {
+      timeline: {
+        subscribeRoomList: () => Promise.resolve({ subscription: 1, rooms }),
+        unsubscribe: () => Promise.resolve(),
+      },
+      notifications: {
+        settings: () => Promise.resolve({ room: null, default: 'all' }),
+      },
+    },
+  } as unknown as CoreClient;
+  const emit = (sections: RoomSectionsUpdate | null, diffs: object[] = []) => {
+    for (const listener of listeners)
+      listener({ type: 'room_list_diff', subscription: 1, diffs, sections } as CoreEvent);
+  };
+  return { client, emit };
+}
+
 function railOrder(names: readonly string[]): (string | null)[] {
   return screen
-    .getAllByRole('link')
+    .getAllByRole('treeitem')
     .map((link) => link.getAttribute('aria-label'))
     .filter((name) => name !== null && names.includes(name));
 }
+
+test.each([false, true])(
+  'updates the room banner after sidebar navigation (mobile: %s)',
+  async (mobile) => {
+    const child: RoomListItemView = { ...space('!child:example.org', 'Child'), room_kind: 'text' };
+    const { client } = fixtureCore([space(), child]);
+    await startRoomList(client);
+    core.rpc.room_state.banner.mockImplementation(({ room_id }) =>
+      Promise.resolve(
+        room_id === child.room_id ? 'mxc://example.org/room' : 'mxc://example.org/space'
+      )
+    );
+    onTestFinished(() => {
+      core.rpc.room_state.banner.mockResolvedValue(null);
+    });
+    const params = { spaceId: '!space:example.org', roomId: child.room_id };
+    visit('/space/!space:example.org/!child:example.org', params);
+    render(SidebarNav, { mobile });
+
+    expect(
+      await screen.findByRole('button', { name: 'common.viewBanner:Child' })
+    ).toBeInTheDocument();
+
+    visit('/search');
+    navigated();
+    expect(
+      await screen.findByRole('button', { name: 'common.viewBanner:Space' })
+    ).toBeInTheDocument();
+
+    visit('/space/!space:example.org/!child:example.org', params);
+    navigated();
+    expect(
+      await screen.findByRole('button', { name: 'common.viewBanner:Child' })
+    ).toBeInTheDocument();
+
+    visit('/space/!space:example.org/lobby', { spaceId: '!space:example.org' });
+    navigated();
+    expect(
+      await screen.findByRole('button', { name: 'common.viewBanner:Space' })
+    ).toBeInTheDocument();
+  }
+);
 
 test.each([
   ['/rooms', {}, '/create-room', ['Unspaced']],
@@ -125,7 +196,13 @@ test.each([
     const parent = {
       ...space(),
       space_children: [
-        { room_id: child.room_id, via: [], order: null, origin_server_ts: 1, suggested: false },
+        {
+          room_id: child.room_id,
+          via: ['example.org'],
+          order: null,
+          origin_server_ts: 1,
+          suggested: false,
+        },
       ],
     };
     const rooms = [
@@ -134,16 +211,16 @@ test.each([
       { ...space('!unspaced:example.org', 'Unspaced'), room_kind: 'text' },
       { ...space('!dm:example.org', 'Alice'), room_kind: 'text', is_direct: true },
     ];
-    const client = {
-      subscribeEvents: () => () => {},
-      rpc: {
-        timeline: {
-          subscribeRoomList: () => Promise.resolve({ subscription: 1, rooms }),
-          unsubscribe: () => Promise.resolve(),
-        },
-      },
-    } as unknown as CoreClient;
+    const { client, emit } = fixtureCore(rooms as RoomListItemView[]);
     await startRoomList(client);
+    emit(
+      sectionsUpdate([
+        sectionView('home', { rooms: [child.room_id, '!unspaced:example.org', '!dm:example.org'] }),
+        sectionView('unspaced', { rooms: ['!unspaced:example.org'] }),
+        sectionView('direct', { rooms: ['!dm:example.org'] }),
+        sectionView(parent.room_id, { rooms: [child.room_id] }),
+      ])
+    );
     visit(path, params);
     render(SidebarNav);
     await tick();
@@ -173,29 +250,12 @@ test('adds an incoming unread DM to the navbar and removes it when read', async 
     is_direct: true,
     direct_targets: ['@alice:example.org'],
   };
-  const listeners = new Set<(event: CoreEvent) => void>();
-  const core = {
-    subscribeEvents: (listener: (event: CoreEvent) => void) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    rpc: {
-      timeline: {
-        subscribeRoomList: () => Promise.resolve({ subscription: 1, rooms: [room] }),
-        unsubscribe: () => Promise.resolve(),
-      },
-      notifications: {
-        settings: () => Promise.resolve({ room: null, default: 'all' }),
-      },
-    },
-  } as unknown as CoreClient;
+  const { client: core, emit } = fixtureCore([room]);
   await startRoomList(core);
   render(SidebarNav, { mobile: true });
   await tick();
 
-  expect(screen.queryByRole('link', { name: 'Alice' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('treeitem', { name: 'Alice' })).not.toBeInTheDocument();
 
   const incoming = withCounts({
     ...room,
@@ -209,15 +269,22 @@ test('adds an incoming unread DM to the navbar and removes it when read', async 
       event_id: '$message',
     },
   });
-  for (const listener of listeners)
-    listener({
-      type: 'room_list_diff',
-      subscription: 1,
-      diffs: [{ op: 'set', index: 0, value: incoming }],
-    });
+  emit(
+    sectionsUpdate(
+      [
+        sectionView('direct', {
+          rooms: [room.room_id],
+          unread_rooms: [room.room_id],
+          unread: { unread: 1, notifying: 1, highlight: 0, marked: false },
+        }),
+      ],
+      { badges: [badgeView(room.room_id, { unread: 1, notifying: 1 })] }
+    ),
+    [{ op: 'set', index: 0, value: incoming }]
+  );
   await tick();
 
-  const dm = screen.getByRole('link', { name: 'Alice' });
+  const dm = screen.getByRole('treeitem', { name: 'Alice' });
   expect(dm).toHaveAttribute('href', '/direct/!dm%3Aexample.org');
   expect(within(dm).getByText('1').closest('.unread-badge')).toBeInTheDocument();
   expect(dm).toHaveAccessibleDescription('nav.unreadMessages:1');
@@ -225,58 +292,35 @@ test('adds an incoming unread DM to the navbar and removes it when read', async 
   visit('/direct/!dm%3Aexample.org', { roomId: room.room_id });
   navigated();
   await tick();
-  expect(screen.queryByRole('link', { name: 'Alice' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('treeitem', { name: 'Alice' })).not.toBeInTheDocument();
   expect(
-    screen.getByRole('link', { name: 'common.directMessages' }).querySelector('.unread-badge')
+    screen.getByRole('treeitem', { name: 'common.directMessages' }).querySelector('.unread-badge')
   ).toBeNull();
 
   visit('/rooms');
   navigated();
   await tick();
-  expect(screen.getByRole('link', { name: 'Alice' })).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: 'Alice' })).toBeInTheDocument();
 
-  for (const listener of listeners)
-    listener({
-      type: 'room_list_diff',
-      subscription: 1,
-      diffs: [{ op: 'set', index: 0, value: withCounts({ ...incoming, unread: 0 }) }],
-    });
+  emit(sectionsUpdate([sectionView('direct', { rooms: [room.room_id] })], { badges: [] }), [
+    { op: 'set', index: 0, value: withCounts({ ...incoming, unread: 0 }) },
+  ]);
   await tick();
 
-  expect(screen.queryByRole('link', { name: 'Alice' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('treeitem', { name: 'Alice' })).not.toBeInTheDocument();
 });
 
 test('keeps the rail order when a room-list reset reorders spaces', async () => {
   const alpha = space('!alpha:example.org', 'Alpha');
   const beta = space('!beta:example.org', 'Beta');
-  const listeners = new Set<(event: CoreEvent) => void>();
-  const core = {
-    subscribeEvents: (listener: (event: CoreEvent) => void) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    rpc: {
-      timeline: {
-        subscribeRoomList: () => Promise.resolve({ subscription: 1, rooms: [alpha, beta] }),
-        unsubscribe: () => Promise.resolve(),
-      },
-    },
-  } as unknown as CoreClient;
+  const { client: core, emit } = fixtureCore([alpha, beta]);
   await startRoomList(core);
   render(SidebarNav, { mobile: true });
   await tick();
 
   expect(railOrder(['Alpha', 'Beta'])).toEqual(['Alpha', 'Beta']);
 
-  for (const listener of listeners) {
-    listener({
-      type: 'room_list_diff',
-      subscription: 1,
-      diffs: [{ op: 'reset', values: [beta, alpha] }],
-    });
-  }
+  emit(null, [{ op: 'reset', values: [beta, alpha] }]);
   await tick();
 
   expect(railOrder(['Alpha', 'Beta'])).toEqual(['Alpha', 'Beta']);
@@ -321,21 +365,25 @@ test('a muted direct chat marked unread by hand still reaches the navbar', async
     marked_unread: true,
     notification: { room: 'mute', default: 'all' },
   });
-  const core = {
-    subscribeEvents: () => () => {},
-    rpc: {
-      timeline: {
-        subscribeRoomList: () => Promise.resolve({ subscription: 1, rooms: [room] }),
-        unsubscribe: () => Promise.resolve(),
-      },
-    },
-  } as unknown as CoreClient;
+  const { client: core, emit } = fixtureCore([room]);
   await startRoomList(core);
+  emit(
+    sectionsUpdate(
+      [
+        sectionView('direct', {
+          rooms: [room.room_id],
+          unread_rooms: [room.room_id],
+          unread: { unread: 0, notifying: 0, highlight: 0, marked: true },
+        }),
+      ],
+      { badges: [badgeView(room.room_id, { marked: true })] }
+    )
+  );
 
   render(SidebarNav, { mobile: true });
   await tick();
 
-  expect(screen.getByRole('link', { name: 'Bo' })).toHaveAttribute(
+  expect(screen.getByRole('treeitem', { name: 'Bo' })).toHaveAttribute(
     'href',
     '/direct/!muted%3Aexample.org'
   );
@@ -348,21 +396,22 @@ test('a muted room marked unread by hand still marks its section as unread', asy
     marked_unread: true,
     notification: { room: 'mute', default: 'all' },
   });
-  const core = {
-    subscribeEvents: () => () => {},
-    rpc: {
-      timeline: {
-        subscribeRoomList: () => Promise.resolve({ subscription: 1, rooms: [room] }),
-        unsubscribe: () => Promise.resolve(),
-      },
-    },
-  } as unknown as CoreClient;
+  const { client: core, emit } = fixtureCore([room]);
   await startRoomList(core);
+  emit(
+    sectionsUpdate([
+      sectionView('unspaced', {
+        rooms: [room.room_id],
+        unread_rooms: [room.room_id],
+        unread: { unread: 0, notifying: 0, highlight: 0, marked: true },
+      }),
+    ])
+  );
 
   render(SidebarNav, { mobile: true });
   await tick();
 
-  const rooms = screen.getByRole('link', { name: 'nav.unspaced' });
+  const rooms = screen.getByRole('treeitem', { name: 'nav.unspaced' });
   expect(rooms.querySelector('.unread-badge-dot')).toBeInTheDocument();
 });
 
@@ -378,21 +427,22 @@ test('a section totals its notifying rooms in green', async () => {
     notifying: 4,
     notification: { room: 'all', default: 'all' },
   });
-  const core = {
-    subscribeEvents: () => () => {},
-    rpc: {
-      timeline: {
-        subscribeRoomList: () => Promise.resolve({ subscription: 1, rooms: [room] }),
-        unsubscribe: () => Promise.resolve(),
-      },
-    },
-  } as unknown as CoreClient;
+  const { client: core, emit } = fixtureCore([room]);
   await startRoomList(core);
+  emit(
+    sectionsUpdate([
+      sectionView('unspaced', {
+        rooms: [room.room_id],
+        unread_rooms: [room.room_id],
+        unread: { unread: 4, notifying: 4, highlight: 0, marked: false },
+      }),
+    ])
+  );
 
   render(SidebarNav, { mobile: true });
   await tick();
 
-  const rooms = screen.getByRole('link', { name: 'nav.unspaced' });
+  const rooms = screen.getByRole('treeitem', { name: 'nav.unspaced' });
   expect(within(rooms).getByText('4').closest('.unread-badge')).toHaveClass(
     'unread-badge-highlight'
   );

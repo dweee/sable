@@ -1,6 +1,8 @@
 <script lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import '#lib/features/auth/shared/auth-card.css';
   import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import { onMount, untrack } from 'svelte';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
@@ -62,13 +64,12 @@
   }
 
   function backToSignIn(): void {
-    void goto(loginHref(homeserver, homeservers.default));
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- loginHref() resolves the route itself
+    void goto(loginHref(homeserver, homeservers.default, page.url.searchParams.has('addAccount')));
   }
 </script>
 
-<svelte:head>
-  <title>{i18n.t('auth.resetPasswordTitle')} - Sable</title>
-</svelte:head>
+<PageTitle title={i18n.t('auth.resetPasswordTitle')} />
 
 <AuthPage
   {hasLoggedInBefore}

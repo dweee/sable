@@ -15,19 +15,18 @@
 </script>
 
 <main class="auth-page">
-  <section class="auth-content" aria-labelledby="sable-title">
+  <div class="auth-content">
     <AuthHeader {hasLoggedInBefore} {title} />
     <div class="auth-main">
-      {#if status}
-        <div class="bootstrap" role="status">
+      <div class="bootstrap" role="status" aria-atomic="true">
+        {#if status}
           <Spinner />
           <p>{status}</p>
-        </div>
-      {:else}
-        {@render children()}
-      {/if}
+        {/if}
+      </div>
+      {#if !status}{@render children()}{/if}
     </div>
-  </section>
+  </div>
   <AuthFooter />
 </main>
 
@@ -35,11 +34,19 @@
   .auth-page {
     display: flex;
     flex-direction: column;
-    min-height: 100%;
+    height: 100%;
+
+    /* The iOS edge-to-edge plugin pins the document scroll offset at zero. */
+    overflow-y: auto;
     padding: var(--space-700) var(--space-600);
     padding-block: calc(var(--space-700) + var(--safe-top))
       calc(var(--space-700) + var(--safe-bottom));
-    padding-inline: max(var(--space-600), var(--safe-left)) max(var(--space-600), var(--safe-right));
+    padding-inline: calc(var(--space-600) + var(--safe-left))
+      calc(var(--space-600) + var(--safe-right));
+  }
+
+  .auth-page :global(.mobile-nav) {
+    inset: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
   }
 
   .auth-content {
@@ -68,7 +75,7 @@
     margin: 0;
   }
 
-  @media (width <= 48rem) {
+  @media (--compact-layout) {
     .auth-content {
       grid-template-rows: clamp(9rem, 18dvh, 12rem) auto;
     }

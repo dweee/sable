@@ -1,4 +1,7 @@
+import { on } from 'svelte/events';
+
 import type { CoreClient } from '#lib/core/client.svelte.js';
+import { isRecord } from '#lib/guards.js';
 
 import { readJson, removeLocalValue, writeJson } from '#lib/platform/local-json.js';
 
@@ -21,15 +24,21 @@ export interface SyncedDocument {
   debounceMs?: number;
   enabled?: () => boolean;
   snapshot: () => SyncedSnapshot;
-  adopt: (content: unknown) => boolean;
+  /** `firstSync` is true while no merge base exists yet, so local-only entries should survive the pull. */
+  adopt: (content: unknown, firstSync?: boolean) => boolean;
   merge?: (base: unknown, local: unknown, remote: unknown) => unknown;
-  legacy?: { eventType: string; convert: (content: unknown) => unknown };
 }
 
 interface DocumentState {
   pending: SyncedSnapshot | null;
   base: unknown;
   remote: string | null;
+  /** Fields of the account's copy this build does not write, kept in every upload. */
+  carried: Record<string, unknown> | null;
+  sent: string | null;
+  sending: string | null;
+  pulling: boolean;
+  queued: { document: SyncedDocument; generation: number } | null;
   pulled: boolean;
   locked: boolean;
   timer: ReturnType<typeof setTimeout> | undefined;
@@ -39,8 +48,28 @@ interface DocumentState {
 const DEFAULT_DEBOUNCE_MS = 2000;
 const BASE_KEY_PREFIX = 'sable-sync-base';
 
+function pageHidden(): boolean {
+  return globalThis.document.visibilityState === 'hidden';
+}
+
 function detach(snapshot: SyncedSnapshot): SyncedSnapshot {
   return { ...snapshot, content: $state.snapshot(snapshot.content) };
+}
+
+function unknownFields(remote: unknown, local: unknown): Record<string, unknown> | null {
+  if (!isRecord(remote) || !isRecord(local)) return null;
+
+  const kept = Object.entries(remote).filter(([key]) => !(key in local));
+  return kept.length > 0 ? Object.fromEntries(kept) : null;
+}
+
+function withCarried(
+  snapshot: SyncedSnapshot,
+  carried: Record<string, unknown> | null
+): SyncedSnapshot {
+  if (carried === null || !isRecord(snapshot.content)) return snapshot;
+
+  return { ...snapshot, content: { ...carried, ...snapshot.content } };
 }
 
 export class AccountSync {
@@ -51,6 +80,7 @@ export class AccountSync {
   #core: CoreClient | null = null;
   #generation = 0;
   #accountId: string | undefined;
+  #documents: readonly SyncedDocument[] = [];
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- not a render source
   readonly #states = new Map<string, DocumentState>();
 
@@ -63,6 +93,7 @@ export class AccountSync {
       this.#accountId = accountId;
     }
     this.#core = core;
+    this.#documents = documents;
 
     for (const document of documents) {
       const state = this.#stateFor(document.eventType);
@@ -88,9 +119,13 @@ export class AccountSync {
       if (document) void this.#pull(document, generation);
     });
     for (const document of documents) void this.#pull(document, generation);
+    const stopHidden = on(globalThis.document, 'visibilitychange', () => {
+      if (pageHidden()) this.#flush();
+    });
 
     return () => {
       stopEvents();
+      stopHidden();
       if (generation !== this.#generation) return;
 
       this.#generation += 1;
@@ -103,7 +138,7 @@ export class AccountSync {
 
   push(document: SyncedDocument): void {
     const state = this.#stateFor(document.eventType);
-    state.pending = detach(document.snapshot());
+    state.pending = this.#snapshot(document, state);
     this.#schedule(document, state);
   }
 
@@ -115,6 +150,11 @@ export class AccountSync {
       pending: null,
       base: null,
       remote: null,
+      carried: null,
+      sent: null,
+      sending: null,
+      pulling: false,
+      queued: null,
       pulled: false,
       locked: false,
       timer: undefined,
@@ -128,26 +168,78 @@ export class AccountSync {
     clearTimeout(state.timer);
     if (this.#core === null || document.enabled?.() === false || state.locked) return;
     if (!state.pulled) {
-      void this.#pull(document, this.#generation);
+      if (!state.pulling) void this.#pull(document, this.#generation);
       return;
     }
-    if (state.pending === null || fingerprint(state.pending.content) === state.remote) return;
+    if (state.pending === null) return;
+
+    const local = fingerprint(state.pending.content);
+    if (local === state.remote || local === state.sending) return;
 
     const generation = this.#generation;
-    state.timer = setTimeout(
-      () => void this.#upload(document, generation),
-      document.debounceMs ?? DEFAULT_DEBOUNCE_MS
-    );
+    if (pageHidden()) {
+      void this.#upload(document, generation);
+      return;
+    }
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      void this.#upload(document, generation);
+    }, document.debounceMs ?? DEFAULT_DEBOUNCE_MS);
   }
 
+  #flush(): void {
+    for (const document of this.#documents) {
+      const state = this.#states.get(document.eventType);
+      if (state?.timer !== undefined) this.#schedule(document, state);
+    }
+  }
+
+  #snapshot(document: SyncedDocument, state: DocumentState): SyncedSnapshot {
+    return withCarried(detach(document.snapshot()), state.carried);
+  }
+
+  #adopted(document: SyncedDocument, state: DocumentState, remote: unknown): SyncedSnapshot {
+    const snapshot = detach(document.snapshot());
+    state.carried = unknownFields(remote, snapshot.content);
+    return withCarried(snapshot, state.carried);
+  }
+
+  /** Content already uploaded is not sent again over another writer's version of it. */
+  #settle(state: DocumentState): boolean {
+    if (state.pending === null || fingerprint(state.pending.content) !== state.sent) return false;
+
+    state.remote = state.sent;
+    return true;
+  }
+
+  /** One read at a time per document, so a burst of changes ends in a single re-read. */
   async #pull(document: SyncedDocument, generation: number): Promise<void> {
-    const core = this.#core;
-    if (core === null || generation !== this.#generation || document.enabled?.() === false) return;
+    if (this.#core === null || generation !== this.#generation) return;
+    if (document.enabled?.() === false) return;
 
     const state = this.#stateFor(document.eventType);
+    if (state.pulling) {
+      state.queued = { document, generation };
+      return;
+    }
+
+    state.pulling = true;
+    try {
+      await this.#read(document, generation, state);
+    } finally {
+      state.pulling = false;
+      const queued = state.queued;
+      state.queued = null;
+      if (queued) void this.#pull(queued.document, queued.generation);
+    }
+  }
+
+  async #read(document: SyncedDocument, generation: number, state: DocumentState): Promise<void> {
+    const core = this.#core;
+    if (core === null) return;
+
     let content: unknown;
     let unsealed = false;
-    let migrated = false;
     try {
       if (document.sealed) {
         const sealed = await core.rpc.account.sealedData({ event_type: document.eventType });
@@ -163,14 +255,6 @@ export class AccountSync {
         unsealed = sealed.state === 'plain' && sealed.can_seal && sealed.content !== null;
       } else {
         content = await core.rpc.account.data({ event_type: document.eventType });
-        if (content === null && document.legacy) {
-          const legacy = await core.rpc.account.data({
-            event_type: document.legacy.eventType,
-          });
-          if (generation !== this.#generation) return;
-          content = document.legacy.convert(legacy);
-          migrated = content !== null;
-        }
       }
     } catch (error) {
       if (generation !== this.#generation) return;
@@ -181,13 +265,13 @@ export class AccountSync {
     }
     if (generation !== this.#generation) return;
 
-    if (state.base !== null) state.pending ??= detach(document.snapshot());
+    if (state.base !== null) state.pending ??= this.#snapshot(document, state);
     if (this.#ahead(state)) {
       state.pulled = true;
       const merged =
         content === null ? null : document.merge?.(state.base, state.pending?.content, content);
       if (merged !== null && merged !== undefined && document.adopt(merged)) {
-        state.pending = detach(document.snapshot());
+        state.pending = this.#adopted(document, state, content);
         this.#rebase(document, state, content);
         state.remote = fingerprint(content);
       }
@@ -196,16 +280,18 @@ export class AccountSync {
     }
 
     state.pulled = true;
-    if (!document.adopt(content)) {
-      state.pending ??= detach(document.snapshot());
+    if (!document.adopt(content, state.base === null)) {
+      state.pending ??= this.#snapshot(document, state);
+      this.#settle(state);
       this.#schedule(document, state);
       return;
     }
 
-    const next = detach(document.snapshot());
+    const next = this.#adopted(document, state, content);
     state.pending = next;
     this.#rebase(document, state, next.content);
-    state.remote = unsealed || migrated ? null : fingerprint(content ?? next.content);
+    if (unsealed) state.remote = null;
+    else if (!this.#settle(state)) state.remote = fingerprint(content ?? next.content);
     state.status = next.partial === true ? 'partial' : 'idle';
     this.lastSyncedAt = Date.now();
     this.#refresh();
@@ -239,6 +325,8 @@ export class AccountSync {
     if (core === null || state.pending === null || generation !== this.#generation) return;
 
     const sent = state.pending;
+    const sending = fingerprint(sent.content);
+    state.sending = sending;
     state.status = 'syncing';
     this.#refresh();
     try {
@@ -251,11 +339,14 @@ export class AccountSync {
       this.#refresh();
       console.debug('[sable settings]', document.eventType, 'could not be written', error);
       return;
+    } finally {
+      if (state.sending === sending) state.sending = null;
     }
     if (generation !== this.#generation) return;
 
     this.#rebase(document, state, sent.content);
-    state.remote = fingerprint(sent.content);
+    state.remote = sending;
+    state.sent = sending;
     state.status = sent.partial === true ? 'partial' : 'idle';
     this.lastSyncedAt = Date.now();
     this.#refresh();

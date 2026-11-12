@@ -17,13 +17,13 @@ import {
   ungroupedFavourites,
 } from '#lib/rooms/favourite-grouping.svelte.js';
 import { adoptQueue, parseQueue, scheduledQueue } from '#lib/composer/scheduled-queue.svelte.js';
+import { adoptBridgedSpaces, bridgedSpaces } from '#lib/rooms/bridged-spaces.svelte.js';
 import { adoptQuietRooms, parseQuietRooms, quietRooms } from '#lib/rooms/quiet-rooms.svelte.js';
-import { parseShortcodes, readRecent, writeRecent } from '#lib/emoji/recent-packs.svelte.js';
 import {
-  adoptRecentReactions,
-  parseRecentReactions,
-  recentReactionEntries,
-} from '#lib/emoji/recents.svelte.js';
+  parseShortcodes,
+  readRecentStickers,
+  writeRecentStickers,
+} from '#lib/emoji/recent-packs.svelte.js';
 import type { SpaceSidebar } from '#lib/spaces/sidebar-layout.svelte.js';
 
 import type { SyncedDocument } from './account-sync.svelte.js';
@@ -35,11 +35,9 @@ import {
   prepareSettings,
   SETTINGS_ACCOUNT_DATA_TYPE,
 } from './sync.js';
-import { v1SettingsFallback, v1WorkspaceFallback } from '#lib/migrations/v1/documents.js';
 
 export const WORKSPACE_ACCOUNT_DATA_TYPE = 'moe.sable.next.workspace';
 export const DRAFTS_ACCOUNT_DATA_TYPE = 'moe.sable.next.drafts';
-export const RECENT_EMOJI_ACCOUNT_DATA_TYPE = 'm.recent_emoji';
 export const SCHEDULED_ACCOUNT_DATA_TYPE = 'moe.sable.next.scheduled';
 
 const DOCUMENT_VERSION = 1;
@@ -49,7 +47,7 @@ let excludedThemeIds: readonly string[] = [];
 
 export const settingsDocument: SyncedDocument = {
   eventType: SETTINGS_ACCOUNT_DATA_TYPE,
-  legacy: v1SettingsFallback,
+  sealed: true,
 
   snapshot() {
     const prepared = prepareSettings(preferences, customThemes, isExplicitPreference);
@@ -63,8 +61,14 @@ export const settingsDocument: SyncedDocument = {
 
   merge: mergeSettings,
 
-  adopt(content) {
-    const applied = applySettings(content, preferences, customThemes, excludedThemeIds);
+  adopt(content, firstSync) {
+    const keptThemeIds = firstSync
+      ? [...customThemes.themes, ...customThemes.tweaks].map((entry) => entry.id)
+      : [];
+    const applied = applySettings(content, preferences, customThemes, [
+      ...excludedThemeIds,
+      ...keptThemeIds,
+    ]);
     if (applied === null) return false;
 
     applyPreferences(applied.preferences, applied.keys);
@@ -77,19 +81,19 @@ export const settingsDocument: SyncedDocument = {
 export function workspaceDocument(sidebar: SpaceSidebar): SyncedDocument {
   return {
     eventType: WORKSPACE_ACCOUNT_DATA_TYPE,
-    legacy: v1WorkspaceFallback,
+    sealed: true,
 
     snapshot: () => ({
       content: {
         v: DOCUMENT_VERSION,
-        recentEmotes: readRecent(),
-        recentStickers: readRecent('sticker'),
+        recentStickers: readRecentStickers(),
         favoriteGifs: favoriteGifs(),
         recentGifs: recentGifs(),
         roomIcons: roomIconOverrides(),
         openFolders: [...sidebar.openFolders],
         ungroupedFavourites: ungroupedFavourites(),
         quietRooms: quietRooms(),
+        bridgedSpaces: bridgedSpaces(),
       },
     }),
 
@@ -97,25 +101,29 @@ export function workspaceDocument(sidebar: SpaceSidebar): SyncedDocument {
       const body = versioned(content);
       if (body === null) {
         return (
-          readRecent().length === 0 &&
-          readRecent('sticker').length === 0 &&
+          readRecentStickers().length === 0 &&
           favoriteGifs().length === 0 &&
           recentGifs().length === 0 &&
           Object.keys(roomIconOverrides()).length === 0 &&
           sidebar.openFolders.size === 0 &&
           ungroupedFavourites().length === 0 &&
-          quietRooms().length === 0
+          quietRooms().length === 0 &&
+          bridgedSpaces().length === 0
         );
       }
 
-      writeRecent(parseShortcodes(body.recentEmotes));
-      writeRecent(parseShortcodes(body.recentStickers), 'sticker');
-      adoptFavorites(parseFavorites(body.favoriteGifs));
-      adoptRecentGifs(parseFavorites(body.recentGifs));
-      adoptRoomIconOverrides(parseRoomIconOverrides(body.roomIcons));
-      sidebar.adoptOpenFolders(stringList(body.openFolders));
-      adoptUngroupedFavourites(parseUngroupedFavourites(body.ungroupedFavourites));
-      adoptQuietRooms(parseQuietRooms(body.quietRooms));
+      // a missing field comes from a build that does not write it, so the local value stays
+      const has = (field: string): boolean => field in body;
+      if (has('recentStickers')) writeRecentStickers(parseShortcodes(body.recentStickers));
+      if (has('favoriteGifs')) adoptFavorites(parseFavorites(body.favoriteGifs));
+      if (has('recentGifs')) adoptRecentGifs(parseFavorites(body.recentGifs));
+      if (has('roomIcons')) adoptRoomIconOverrides(parseRoomIconOverrides(body.roomIcons));
+      if (has('openFolders')) sidebar.adoptOpenFolders(stringList(body.openFolders));
+      if (has('ungroupedFavourites')) {
+        adoptUngroupedFavourites(parseUngroupedFavourites(body.ungroupedFavourites));
+      }
+      if (has('quietRooms')) adoptQuietRooms(parseQuietRooms(body.quietRooms));
+      if (has('bridgedSpaces')) adoptBridgedSpaces(stringList(body.bridgedSpaces));
       return true;
     },
   };
@@ -146,6 +154,7 @@ export function draftsDocumentFor(accountId: string): SyncedDocument {
 export function scheduledDocumentFor(accountId: string): SyncedDocument {
   return {
     eventType: SCHEDULED_ACCOUNT_DATA_TYPE,
+    sealed: true,
 
     snapshot: () => ({ content: { v: DOCUMENT_VERSION, scheduled: scheduledQueue(accountId) } }),
 
@@ -158,21 +167,6 @@ export function scheduledDocumentFor(accountId: string): SyncedDocument {
     },
   };
 }
-
-export const recentEmojiDocument: SyncedDocument = {
-  eventType: RECENT_EMOJI_ACCOUNT_DATA_TYPE,
-
-  snapshot: () => ({ content: { recent_emoji: recentReactionEntries() } }),
-
-  adopt(content) {
-    if (content === null || typeof content !== 'object' || Array.isArray(content)) {
-      return recentReactionEntries().length === 0;
-    }
-
-    adoptRecentReactions(parseRecentReactions((content as Record<string, unknown>).recent_emoji));
-    return true;
-  },
-};
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)

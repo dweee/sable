@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Sable v2",
-  "version": "2.0.2",
+  "version": "2.3.8",
   "identifier": "moe.sable.next",
   "build": {
     "frontendDist": "../dist",
@@ -14,12 +14,6 @@
       {
         "title": "Sable",
         "create": false,
-        "hiddenTitle": true,
-        "width": 1280,
-        "height": 720,
-        "resizable": true,
-        "fullscreen": false,
-        "dragDropEnabled": false,
         "backgroundColor": "#24232c"
       }
     ],
@@ -27,15 +21,16 @@
       "csp": {
         "default-src": "'self'",
         "script-src": "'self' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net/npm/@arborium/",
-        "style-src": "'self' 'unsafe-inline' https:",
+        "style-src": "'self' 'unsafe-inline' blob: https:",
         "font-src": "'self' data: https:",
         "img-src": "'self' data: blob: https: sable-tiles: http://sable-tiles.localhost",
         "media-src": "'self' blob:",
         "connect-src": "'self' ipc: http://ipc.localhost https: http: wss: ws: blob: data:",
         "worker-src": "'self' blob:",
         "frame-src": "https: http:",
+        "frame-ancestors": "'none'",
         "object-src": "'none'",
-        "base-uri": "'self'",
+        "base-uri": "'none'",
         "form-action": "'self'"
       },
       "dangerousDisableAssetCspModification": [
@@ -45,12 +40,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "createUpdaterArtifacts": true,
     "publisher": "SableClient",
     "copyright": "Copyright © SableClient contributors",
     "shortDescription": "A Matrix client",
-    "longDescription": "Sable v2, a Matrix client.",
+    "longDescription": "Sable, a Matrix client.",
     "license": "AGPL-3.0-or-later",
     "licenseFile": "../LICENSE",
     "category": "SocialNetworking",
@@ -58,36 +51,15 @@
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/128x128@2x.png"
     ],
-    "windows": {
-      "nsis": {
-        "headerImage": "icons/installer/nsis-header.bmp",
-        "sidebarImage": "icons/installer/nsis-sidebar.bmp",
-        "installerIcon": "icons/icon.ico",
-        "uninstallerIcon": "icons/icon.ico",
-        "startMenuFolder": "Sable",
-        "installerHooks": "windows/hooks.nsh"
-      },
-      "wix": {
-        "bannerPath": "icons/installer/wix-banner.bmp",
-        "dialogImagePath": "icons/installer/wix-dialog.bmp"
-      }
-    },
-    "macOS": {
-      "minimumSystemVersion": "12.0",
-      "dmg": {
-        "background": "icons/installer/dmg-background.png"
-      }
-    },
     "android": {
+      "versionCode": 20010040,
       "debugApplicationIdSuffix": ".debug"
     },
     "iOS": {
       "template": "src-tauri/ios-project.yml",
-      "minimumSystemVersion": "16.0",
+      "minimumSystemVersion": "15.4",
       "frameworks": [
         "AudioToolbox",
         "Photos",
@@ -97,12 +69,6 @@
     }
   },
   "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://git.sable.moe/SableClient/sable-next/releases/download/latest/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIxNEQxMkJEQzU0QTI0MDcKUldRSEpFckZ2UkpOSWVhMW01SFRIb0JFZDhldVZNLzV6R29nb0I5TWdKcTRQOXRXN3JwdXQ0OEkK"
-    },
     "notifications": {
       "actionTypes": [
         {
@@ -137,22 +103,22 @@
             }
           ]
         }
-      ],
-      "windows": {
-        "registerUnpackagedActivator": true
-      }
+      ]
     },
     "deep-link": {
-      "desktop": {
-        "schemes": [
-          "moe.sable.next"
-        ]
-      },
       "mobile": [
         {
           "scheme": [
-            "moe.sable.next"
+            "moe.sable.next",
+            "matrix"
           ],
+          "appLink": false
+        },
+        {
+          "scheme": [
+            "https"
+          ],
+          "host": "matrix.to",
           "appLink": false
         }
       ]

@@ -14,6 +14,7 @@
   import FingerprintIcon from 'phosphor-svelte/lib/FingerprintIcon';
   import FlagIcon from 'phosphor-svelte/lib/FlagIcon';
   import GearIcon from 'phosphor-svelte/lib/GearIcon';
+  import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
   import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
   import ListBulletsIcon from 'phosphor-svelte/lib/ListBulletsIcon';
   import PushPinSlashIcon from 'phosphor-svelte/lib/PushPinSlashIcon';
@@ -33,11 +34,12 @@
   import { copyRoomLink } from '#lib/rooms/permalink.js';
   import { isQuiet, setQuiet } from '#lib/rooms/quiet-rooms.svelte.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { preferences, readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
+  import ActionMenuSub from '#lib/ui/primitives/ActionMenuSub.svelte';
   import ActionMenuSeparator from '#lib/ui/primitives/ActionMenuSeparator.svelte';
   import { untrack } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
@@ -45,8 +47,9 @@
   import IconContext from 'phosphor-svelte/lib/IconContext';
 
   import AddToSpaceDialog from './AddToSpaceDialog.svelte';
+  import { dmSpaces } from '#lib/rooms/dm-spaces.svelte.js';
   import { wouldCreateCycle } from './add-to-space.js';
-  import { markRoomUnread, markRoomsRead, spaceDescendantRooms } from './nav-rooms.js';
+  import { markRoomUnread, markRoomsRead } from './nav-rooms.js';
 
   interface Props {
     room: RoomListItemView;
@@ -62,6 +65,7 @@
     onMoveDown?: () => void;
     onUnpin?: () => void;
     onRemoveFromFolder?: () => void;
+    onChangeIcon?: () => void;
   }
 
   let {
@@ -78,6 +82,7 @@
     onMoveDown,
     onUnpin,
     onRemoveFromFolder,
+    onChangeIcon,
   }: Props = $props();
   const core = useCoreClient();
   const roomList = useRoomList();
@@ -100,7 +105,11 @@
   );
 
   let readable = $derived(
-    room.room_kind === 'space' ? spaceDescendantRooms(roomList.rooms, room.room_id) : [room]
+    room.room_kind === 'space'
+      ? (roomList.section(room.room_id)?.descendants ?? []).flatMap(
+          (roomId) => roomList.byId(roomId) ?? []
+        )
+      : [room]
   );
   let unread = $derived(
     readable.some((entry) => entry.unread > 0 || entry.highlight > 0 || entry.marked_unread)
@@ -145,9 +154,15 @@
       });
   }
 
-  let offeredSpaces = $derived(addableSpaces.filter((space) => manageable.has(space.room_id)));
+  let privateSpaceIds = $derived(room.is_direct ? dmSpaces.spacesOf(room.room_id) : []);
+  let offeredSpaces = $derived(
+    room.is_direct ? addableSpaces : addableSpaces.filter((space) => manageable.has(space.room_id))
+  );
   let removableParent = $derived(
-    parentSpace !== null && manageable.has(parentSpace.room_id) ? parentSpace : null
+    parentSpace !== null &&
+      (privateSpaceIds.includes(parentSpace.room_id) || manageable.has(parentSpace.room_id))
+      ? parentSpace
+      : null
   );
 
   let joinableParents = $state.raw<{ room_id: string; via: string[]; name: string | null }[]>([]);
@@ -222,6 +237,10 @@
   }
 
   function addToSpaces(spaceIds: string[]): void {
+    if (room.is_direct) {
+      void dmSpaces.set(room.room_id, [...privateSpaceIds, ...spaceIds]).catch(report);
+      return;
+    }
     for (const spaceId of spaceIds) {
       void core.rpc.spaces
         .add({ space_id: spaceId, room_id: room.room_id, suggested: null })
@@ -230,11 +249,20 @@
   }
 
   function removeFromSpace(spaceId: string): void {
+    if (privateSpaceIds.includes(spaceId)) {
+      void dmSpaces
+        .set(
+          room.room_id,
+          privateSpaceIds.filter((id) => id !== spaceId)
+        )
+        .catch(report);
+      return;
+    }
     void core.rpc.spaces.remove({ space_id: spaceId, room_id: room.room_id }).catch(report);
   }
 
   function markRead(): void {
-    markRoomsRead(readable, core.rpc.timeline, readReceiptIsPrivate());
+    markRoomsRead(readable, core.rpc.timeline);
   }
 
   function markUnread(): void {
@@ -243,11 +271,13 @@
 
   async function copyLink(): Promise<void> {
     if (!(await copyRoomLink(core, room))) toasts.error(i18n.t('errors.copyFailed'));
+    else toasts.info(i18n.t('timeline.linkCopied'));
   }
 
   async function copyId(): Promise<void> {
     try {
       await copyText(room.room_id);
+      toasts.info(i18n.t('common.copied'));
     } catch (error) {
       console.debug('[sable room] copy id failed', error);
       toasts.error(i18n.t('errors.copyFailed'));
@@ -346,6 +376,7 @@
     {#if room.room_kind === 'space'}
       <ActionMenuItem
         onSelect={() => {
+          // eslint-disable-next-line svelte/no-navigation-without-resolve -- spaceTimelinePath() resolves the route itself
           void goto(spaceTimelinePath(room, roomList.rooms));
         }}
       >
@@ -396,10 +427,14 @@
         {i18n.t('nav.folderRemoveSpace')}
       </ActionMenuItem>
     {/if}
-
-    {#if room.room_kind !== 'space'}
-      <RoomNotificationSubmenu roomId={room.room_id} active={opened} />
+    {#if onChangeIcon}
+      <ActionMenuItem onSelect={onChangeIcon}>
+        <ImageIcon />
+        {i18n.t('nav.changeIcon')}
+      </ActionMenuItem>
     {/if}
+
+    <RoomNotificationSubmenu roomId={room.room_id} active={opened} />
 
     {#if offeredSpaces.length > 0}
       <ActionMenuItem
@@ -412,16 +447,22 @@
       </ActionMenuItem>
     {/if}
 
-    {#each joinableParents as parent (parent.room_id)}
-      <ActionMenuItem
-        onSelect={() => {
-          joinParent(parent);
-        }}
-      >
+    <ActionMenuSub label={i18n.t('room.menuJoinSpace')} disabled={joinableParents.length === 0}>
+      {#snippet trigger()}
         <SignInIcon />
-        {i18n.t('room.menuJoinParentSpace', { space: parent.name ?? parent.room_id })}
-      </ActionMenuItem>
-    {/each}
+        {i18n.t('room.menuJoinSpace')}
+      {/snippet}
+      {#each joinableParents as parent (parent.room_id)}
+        <ActionMenuItem
+          onSelect={() => {
+            joinParent(parent);
+          }}
+        >
+          <SignInIcon />
+          {i18n.t('room.menuJoinParentSpace', { space: parent.name ?? parent.room_id })}
+        </ActionMenuItem>
+      {/each}
+    </ActionMenuSub>
 
     {#if room.room_kind !== 'space' && removableParent}
       <ActionMenuItem

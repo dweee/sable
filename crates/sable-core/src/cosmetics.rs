@@ -7,12 +7,15 @@ use matrix_sdk::ruma::events::{AnySyncStateEvent, StateEventType};
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
 use matrix_sdk_base::deserialized_responses::RawAnySyncOrStrippedState;
+use sable_model::text::visible_name;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::Core;
 use crate::profiles::{profile_hex_color, pronoun_sets};
-use crate::protocol::{CoreEvent, PronounView, RoomCosmeticsView, RpcError, SenderCosmeticsView};
+use crate::protocol::{
+    CoreEvent, PronounView, RoomCosmeticsView, RpcCode, RpcError, SenderCosmeticsView,
+};
 
 pub(crate) const MEMBER_EVENT: &str = "m.room.member";
 pub(crate) const MEMBER_COLOR_FIELD: &str = "eu.she-a.color";
@@ -45,7 +48,7 @@ fn member_text(content: &Value, field: &str) -> Option<String> {
 
 fn shown_identity(content: &Value) -> (Option<String>, Option<String>) {
     (
-        member_text(content, "displayname"),
+        member_text(content, "displayname").and_then(visible_name),
         member_text(content, "avatar_url"),
     )
 }
@@ -74,8 +77,7 @@ impl Layer {
                 entry.on_light =
                     profile_hex_color(colors.and_then(|colors| colors.get("on_light")));
                 entry.on_dark = profile_hex_color(colors.and_then(|colors| colors.get("on_dark")));
-                entry.display_name = member_text(content, "displayname");
-                entry.avatar_url = member_text(content, "avatar_url");
+                (entry.display_name, entry.avatar_url) = shown_identity(content);
             }
             COLOR_EVENT => entry.color = profile_hex_color(content.get("color")),
             PRONOUNS_EVENT => entry.pronouns = pronoun_sets(content.get("pronouns")),
@@ -142,7 +144,7 @@ pub(crate) fn resolve(room: &Layer, space: Option<&Layer>) -> Vec<SenderCosmetic
                 theme(own)
                     .as_ref()
                     .or(own.color.as_ref())
-                    .or(theme(inherited).as_ref())
+                    .or_else(|| theme(inherited).as_ref())
                     .or(inherited.color.as_ref())
                     .cloned()
             };
@@ -254,33 +256,12 @@ impl CosmeticsCache {
     }
 }
 
-pub(crate) async fn space_parents(room: &matrix_sdk::Room) -> Vec<(OwnedRoomId, Vec<String>)> {
-    let events = room
-        .get_state_events(StateEventType::SpaceParent)
-        .await
-        .unwrap_or_default();
-    let claims = events
-        .iter()
-        .filter_map(|event| {
-            let raw = match event {
-                RawAnySyncOrStrippedState::Sync(raw) => raw.json(),
-                RawAnySyncOrStrippedState::Stripped(raw) => raw.json(),
-            };
-            serde_json::from_str::<crate::space_parents::ParentClaim>(raw.get()).ok()
-        })
-        .collect::<Vec<_>>();
-    crate::space_parents::validate(&room.client(), room.room_id(), &claims, true)
-        .await
-        .into_iter()
-        .filter_map(|parent| parent.room_id().map(|id| (id, parent.content.via)))
-        .collect()
-}
-
 pub(crate) async fn unjoined_space_parents(
+    core: &Core,
     client: &matrix_sdk::Client,
     room: &matrix_sdk::Room,
 ) -> Vec<crate::protocol::SpaceParentView> {
-    space_parents(room)
+    crate::space_parents::parents(core, room)
         .await
         .into_iter()
         .filter(|(parent, _)| {
@@ -293,17 +274,18 @@ pub(crate) async fn unjoined_space_parents(
 }
 
 pub(crate) async fn first_space_parent(
+    core: &Core,
     client: &matrix_sdk::Client,
     room: &matrix_sdk::Room,
 ) -> Option<OwnedRoomId> {
-    if let Some(space) = crate::view::listing_spaces(client, room.room_id())
+    if let Some(space) = crate::view::listing_spaces(Some(core), client, room.room_id())
         .await
         .into_iter()
         .next()
     {
         return Some(space);
     }
-    space_parents(room)
+    crate::space_parents::parents(core, room)
         .await
         .into_iter()
         .next()
@@ -334,7 +316,7 @@ impl Core {
         space_id: Option<OwnedRoomId>,
     ) -> Result<RoomCosmeticsView, RpcError> {
         let client = self.client().await?;
-        let room = client.get_room(room_id).ok_or(RpcError::UnknownRoom)?;
+        let room = client.get_room(room_id).ok_or(RpcCode::UnknownRoom)?;
         Ok(self.cosmetics_for(&client, &room, space_id).await)
     }
 
@@ -347,7 +329,7 @@ impl Core {
         let space_id = match space_id {
             Some(space_id) if space_id != room.room_id() => Some(space_id),
             Some(_) => None,
-            None => first_space_parent(client, room).await,
+            None => first_space_parent(self, client, room).await,
         };
         let space = space_id
             .as_ref()
@@ -391,24 +373,21 @@ impl Core {
             }
             Err(error) => {
                 tracing::warn!(room = %room.room_id(), %error, "room cosmetics read from the store after the state fetch failed");
-                stored_layer(room).await.unwrap_or_default()
+                self.with_open_stores(async || stored_layer(room).await)
+                    .await
+                    .unwrap_or_default()
             }
         }
     }
 
     fn cosmetics_fetch_lock(&self, room_id: &RoomId) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .cosmetics_fetches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut locks = self.cosmetics_fetches.lock();
         locks.retain(|_, lock| Arc::strong_count(lock) > 1);
         locks.entry(room_id.to_owned()).or_default().clone()
     }
 
-    fn cosmetics_cache(&self) -> std::sync::MutexGuard<'_, CosmeticsCache> {
-        self.cosmetics
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn cosmetics_cache(&self) -> parking_lot::MutexGuard<'_, CosmeticsCache> {
+        self.cosmetics.lock()
     }
 
     pub(crate) fn note_cosmetic_state(
@@ -608,6 +587,17 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn hidden_space_names_are_not_inherited() {
+        let room = layer(&[(MEMBER_EVENT, ALICE, json!({ "displayname": "Alice" }))]);
+        let space = layer(&[(
+            MEMBER_EVENT,
+            ALICE,
+            json!({ "displayname": "\u{200b}\u{2800}" }),
+        )]);
+        assert_eq!(resolve(&room, Some(&space)), Vec::new());
     }
 
     #[test]
@@ -887,11 +877,13 @@ mod tests {
             .await;
         let room = client.get_room(room_id).unwrap();
 
-        let offered: Vec<(String, Vec<String>)> = super::unjoined_space_parents(&client, &room)
-            .await
-            .into_iter()
-            .map(|parent| (parent.room_id.to_string(), parent.via))
-            .collect();
+        let (core, _events) = Core::new("cosmetics", Box::new(MemorySessionStore::default()));
+        let offered: Vec<(String, Vec<String>)> =
+            super::unjoined_space_parents(&core, &client, &room)
+                .await
+                .into_iter()
+                .map(|parent| (parent.room_id.to_string(), parent.via))
+                .collect();
         assert_eq!(
             offered,
             [

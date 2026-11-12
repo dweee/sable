@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { autolinks } from './autolinks';
 import { activeMarks, formatCommands, formattingInputRules } from './formatting';
 import { markdownFormatCommands } from './markdown-format';
-import { composerSchema } from './schema';
+import { composerSchema, parseMatrixHtml } from './schema';
 import { serializeComposer } from './serialize';
 
 let view: EditorView | undefined;
@@ -85,6 +85,29 @@ test('a spoiler typed between double bars becomes the spoiler mark', () => {
 
   expect(view?.state.doc.textContent).toBe('the butler did it');
   expect(marksOn('butler')).toEqual(['spoiler']);
+});
+
+test.each([
+  ['code', 'spoiler'],
+  ['spoiler', 'code'],
+] as const)('applying %s then %s keeps inline code hidden', (first, second) => {
+  const editor = open();
+  type('secret');
+  editor.dispatch(editor.state.tr.setSelection(new AllSelection(editor.state.doc)));
+  formatCommands[first](editor.state, editor.dispatch);
+  formatCommands[second](editor.state, editor.dispatch);
+
+  expect(marksOn('secret')).toEqual(['spoiler', 'code']);
+  expect(serializeComposer(editor.state.doc).body).not.toContain('secret');
+});
+
+test('typing inline code inside a spoiler keeps the whole spoiler hidden', () => {
+  const editor = open();
+  type('||before `secret` after||');
+
+  expect(marksOn('secret')).toEqual(['spoiler', 'code']);
+  expect(serializeComposer(editor.state.doc).body).not.toContain('secret');
+  expect(serializeComposer(editor.state.doc).body).not.toContain('after');
 });
 
 test('double bars around spaces stay literal', () => {
@@ -245,6 +268,45 @@ test('the blockquote command lifts out of a quote instead of nesting another', (
 
   run('blockquote');
   expect(editor.state.doc.toString()).toBe('doc(paragraph("quoted"))');
+});
+
+test('quoting selected lines leaves surrounding lines outside', () => {
+  const editor = open();
+  const doc = parseMatrixHtml('<p>one<br>two<br>three<br>four</p>');
+  editor.updateState(EditorState.create({ doc, selection: TextSelection.create(doc, 15, 6) }));
+
+  run('blockquote');
+
+  expect(editor.state.doc.toString()).toBe(
+    'doc(paragraph("one"), blockquote(paragraph("two", hard_break, "three")), paragraph("four"))'
+  );
+  run('blockquote');
+  expect(editor.state.doc.toString()).toBe(
+    'doc(paragraph("one"), paragraph("two", hard_break, "three"), paragraph("four"))'
+  );
+});
+
+test('a caret on an empty line quotes only that line', () => {
+  const editor = open();
+  const doc = parseMatrixHtml('<p>one<br><br>three</p>');
+  editor.updateState(EditorState.create({ doc, selection: TextSelection.create(doc, 5) }));
+
+  run('blockquote');
+
+  expect(editor.state.doc.toString()).toBe(
+    'doc(paragraph("one"), blockquote(paragraph), paragraph("three"))'
+  );
+  expect(editor.state.selection.empty).toBe(true);
+});
+
+test('select-all toggles a quote with its trailing empty paragraph', () => {
+  const editor = open();
+  const doc = parseMatrixHtml('<blockquote><p>quoted</p></blockquote><p></p>');
+  editor.updateState(EditorState.create({ doc, selection: new AllSelection(doc) }));
+
+  run('blockquote');
+
+  expect(editor.state.doc.toString()).toBe('doc(paragraph("quoted"), paragraph)');
 });
 
 test('the bullet_list command lifts out of a list from any item, not only the first', () => {
@@ -443,13 +505,13 @@ describe('typed Markdown', () => {
     ['__bold__', '<strong>bold</strong>'],
     ['**a*b**', '<strong>a*b</strong>'],
     ['**a *b* c**', '<strong>a <em>b</em> c</strong>'],
-    ['**a `b` c**', '<strong>a </strong><code>b</code><strong> c</strong>'],
+    ['**a `b` c**', '<strong>a <code>b</code> c</strong>'],
     ['`a` **b**', '<code>a</code> <strong>b</strong>'],
     ['**💜a*b**', '<strong>💜a*b</strong>'],
     ['[label](https://example.org)', '<a href="https://example.org">label</a>'],
     [
       '[**label**](https://example.org)',
-      '<strong><a href="https://example.org">label</a></strong>',
+      '<a href="https://example.org"><strong>label</strong></a>',
     ],
     ['`code` next', '<code>code</code> next'],
     ['``code ` tick`` next', '<code>code ` tick</code> next'],
@@ -480,12 +542,12 @@ describe('typed Markdown', () => {
     expect(serializeComposer(editor.state.doc).formatted).toBeNull();
   });
 
-  test('inline code preserves stored formatting', () => {
+  test('inline code keeps stored formatting', () => {
     const editor = open();
     editor.dispatch(editor.state.tr.addStoredMark(composerSchema.marks.strong.create()));
     type('`code` next');
     expect(serializeComposer(editor.state.doc).formatted).toBe(
-      '<code>code</code><strong> next</strong>'
+      '<strong><code>code</code> next</strong>'
     );
   });
 
@@ -504,7 +566,7 @@ describe('typed Markdown', () => {
     type('**');
     expect(editor.state.doc.firstChild?.lastChild?.type.name).toBe('mention');
     expect(editor.state.doc.firstChild?.lastChild?.attrs.userId).toBe('@one:example.org');
-    expect(serializeComposer(editor.state.doc).mentions.userIds).toEqual(['@one:example.org']);
+    expect(serializeComposer(editor.state.doc).mentions.user_ids).toEqual(['@one:example.org']);
   });
 });
 

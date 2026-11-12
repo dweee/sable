@@ -1,4 +1,7 @@
+use sable_model::text::visible_name;
+
 use crate::api::account::ReportUserParams;
+use crate::api::messages::EditParams;
 use crate::api::rooms::ReportParams;
 use std::collections::{HashMap, HashSet};
 
@@ -10,9 +13,14 @@ use matrix_sdk::ruma::api::Direction;
 use matrix_sdk::ruma::api::client::reporting::report_user;
 use matrix_sdk::ruma::api::client::room::get_room_event;
 use matrix_sdk::ruma::api::client::room::{report_content, report_room};
+use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::events::relation::RelationType;
+use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent;
-use matrix_sdk::ruma::events::{AnyMessageLikeEventContent, AnySyncTimelineEvent, Mentions};
+use matrix_sdk::ruma::events::sticker::StickerEventContent;
+use matrix_sdk::ruma::events::{
+    AnyMessageLikeEventContent, AnySyncTimelineEvent, Mentions, StateEventType,
+};
 use matrix_sdk::ruma::room::JoinRule;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{
@@ -25,20 +33,17 @@ use crate::Core;
 use crate::ResultExt;
 use crate::link_previews::BUNDLED_LINK_PREVIEWS;
 use crate::link_previews::LEGACY_BUNDLED_LINK_PREVIEWS;
-use crate::matrix_html::{
-    display_html, has_profile_fallback_html, strip_profile_fallback_body,
-    strip_profile_fallback_html,
-};
+use crate::matrix_html::{display_html, strip_profile_fallback_body, strip_profile_fallback_html};
 use crate::outgoing::message_content;
 use crate::personas::PER_MESSAGE_PROFILE;
 use crate::protocol::{
-    EditVersionView, MessageKind, PerMessageProfileView, RpcError, TimelineItemView,
+    EditVersionView, MessageKind, PerMessageProfileView, RpcCode, RpcError, TimelineItemView,
 };
 use crate::view::{
     FAMEDLY_FORWARDED, FORWARDED, SABLE_FORWARDED, SPOILER_PROPERTY, SPOILER_REASON_PROPERTY,
     per_message_profile, standalone_item,
 };
-use serde_with::{DefaultOnError, serde_as};
+use serde_with::{DefaultOnError, VecSkipError, serde_as};
 
 pub(crate) fn outgoing_mentions(user_ids: Vec<OwnedUserId>, room: bool) -> Mentions {
     let mut mentions = Mentions::with_user_ids(user_ids);
@@ -66,14 +71,19 @@ pub(crate) fn edit_content(
     }
 }
 
-fn spoiler_keys(event: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+fn spoiler_keys(content: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     [SPOILER_PROPERTY, SPOILER_REASON_PROPERTY]
         .into_iter()
-        .filter_map(|key| {
-            let value = event.get("content")?.get(key)?;
-            Some((key.to_owned(), value.clone()))
-        })
+        .filter_map(|key| Some((key.to_owned(), content.get(key)?.clone())))
         .collect()
+}
+
+#[serde_as]
+#[derive(serde::Deserialize)]
+pub(crate) struct LenientPins {
+    #[serde_as(as = "VecSkipError<_>")]
+    #[serde(default)]
+    pub(crate) pinned: Vec<OwnedEventId>,
 }
 
 fn unique_pins(events: Vec<OwnedEventId>) -> Vec<OwnedEventId> {
@@ -96,6 +106,20 @@ fn latest_message(event: &serde_json::Value) -> Option<&serde_json::Value> {
     } else {
         Some(content)
     }
+}
+
+fn preview_keys(event: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    let Some(content) = latest_message(event) else {
+        return serde_json::Map::new();
+    };
+    [BUNDLED_LINK_PREVIEWS, LEGACY_BUNDLED_LINK_PREVIEWS]
+        .into_iter()
+        .filter_map(|key| {
+            content
+                .get(key)
+                .map(|value| (key.to_owned(), value.clone()))
+        })
+        .collect()
 }
 
 pub(crate) fn previews_removed_edit(
@@ -167,23 +191,66 @@ fn pretty_json(raw: &str) -> String {
         .unwrap_or_else(|| raw.to_owned())
 }
 
+async fn retain_reply_mention(
+    room: &matrix_sdk::Room,
+    original: &serde_json::Value,
+    latest: &serde_json::Value,
+    edited: &mut EditedContent,
+) {
+    let Some(reply_id) = original
+        .pointer("/m.relates_to/m.in_reply_to/event_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| OwnedEventId::try_from(id).ok())
+    else {
+        return;
+    };
+    let Some(previous) = latest
+        .get("m.mentions")
+        .and_then(|value| serde_json::from_value::<Mentions>(value.clone()).ok())
+        .filter(|mentions| !mentions.user_ids.is_empty())
+    else {
+        return;
+    };
+    // An unavailable reply target must not prevent editing the message.
+    let Ok(reply) = room.load_or_fetch_event(&reply_id, None).await else {
+        return;
+    };
+    let Some(sender) = reply
+        .raw()
+        .get_field::<OwnedUserId>("sender")
+        .ok()
+        .flatten()
+        .filter(|sender| previous.user_ids.contains(sender))
+    else {
+        return;
+    };
+    let mentions = match edited {
+        EditedContent::RoomMessage(message) => &mut message.mentions,
+        EditedContent::MediaCaption { mentions, .. } => mentions,
+        EditedContent::PollStart { .. } => return,
+    };
+    mentions
+        .get_or_insert_with(Mentions::new)
+        .user_ids
+        .insert(sender);
+}
+
 impl Core {
-    #[expect(clippy::too_many_arguments, reason = "mirrors the protocol fields")]
-    pub(crate) async fn edit_message(
-        &self,
-        room_id: &OwnedRoomId,
-        event_id: Option<OwnedEventId>,
-        transaction_id: Option<String>,
-        body: String,
-        formatted: Option<String>,
-        kind: MessageKind,
-        media_caption: bool,
-        thread_root: Option<OwnedEventId>,
-        mentions: Vec<OwnedUserId>,
-        mentions_room: bool,
-        persona: Option<PerMessageProfileView>,
-        forum_title: Option<String>,
-    ) -> Result<(), RpcError> {
+    pub(crate) async fn edit_message(&self, params: EditParams) -> Result<(), RpcError> {
+        let EditParams {
+            room_id,
+            event_id,
+            transaction_id,
+            body,
+            formatted,
+            kind,
+            media_caption,
+            thread_root,
+            mentions,
+            mentions_room,
+            persona,
+            forum_title,
+        } = params;
         let edited = edit_content(
             body,
             formatted,
@@ -193,55 +260,122 @@ impl Core {
             mentions_room,
         );
 
-        let item_id = match (event_id, transaction_id) {
-            (Some(event_id), None) => TimelineEventItemId::EventId(event_id),
+        let room = self.room(&room_id).await?;
+        match (event_id, transaction_id) {
+            (Some(event_id), None) => {
+                self.edit_sent_message(
+                    &room,
+                    &event_id,
+                    edited,
+                    media_caption,
+                    persona.as_ref(),
+                    forum_title,
+                )
+                .await
+            }
             (None, Some(transaction_id)) => {
-                TimelineEventItemId::TransactionId(transaction_id.into())
+                self.edit_queued_message(
+                    &room,
+                    transaction_id.into(),
+                    edited,
+                    persona.as_ref(),
+                    thread_root.as_ref(),
+                )
+                .await
             }
-            _ => return Err(RpcError::Unsupported),
+            _ => Err(RpcCode::Unsupported.into()),
+        }
+    }
+
+    async fn edit_queued_message(
+        &self,
+        room: &matrix_sdk::Room,
+        transaction_id: matrix_sdk::ruma::OwnedTransactionId,
+        mut edited: EditedContent,
+        persona: Option<&PerMessageProfileView>,
+        thread_root: Option<&OwnedEventId>,
+    ) -> Result<(), RpcError> {
+        let (echoes, _updates) = room
+            .send_queue()
+            .subscribe()
+            .await
+            .or_failed(self, "edit_message")?;
+        if let Some(echo) = echoes
+            .into_iter()
+            .find(|echo| echo.transaction_id == transaction_id)
+            && let matrix_sdk::send_queue::LocalEchoContent::Event {
+                serialized_event, ..
+            } = echo.content
+        {
+            let previous = serialized_event
+                .raw()
+                .0
+                .deserialize_as_unchecked::<serde_json::Value>()
+                .or_failed(self, "edit_message")?;
+            retain_reply_mention(room, &previous, &previous, &mut edited).await;
+        }
+        let queued = if let EditedContent::RoomMessage(message) = &edited {
+            self.edit_local_message(room, &transaction_id, message.clone(), persona)
+                .await?
+        } else {
+            false
         };
-        if let TimelineEventItemId::TransactionId(transaction_id) = &item_id {
-            let queued = match (&persona, &edited) {
-                (Some(persona), EditedContent::RoomMessage(message)) => {
-                    let room = self.room(room_id).await?;
-                    self.edit_local_with_persona(&room, transaction_id, message.clone(), persona)
-                        .await?
-                }
-                _ => false,
-            };
-            if !queued {
-                self.timeline_for(room_id, thread_root.as_ref())
-                    .await?
-                    .edit(&item_id, edited)
-                    .await
-                    .or_failed(self, "edit_message")?;
-            }
-        } else if let TimelineEventItemId::EventId(event_id) = item_id {
-            let room = self.room(room_id).await?;
-            let content = room
-                .make_edit_event(&event_id, edited)
+        if !queued {
+            self.timeline_for(&room.room_id().to_owned(), thread_root)
+                .await?
+                .edit(&TimelineEventItemId::TransactionId(transaction_id), edited)
                 .await
                 .or_failed(self, "edit_message")?;
-            let retained = if media_caption {
-                room.load_or_fetch_event(&event_id, None)
-                    .await
-                    .ok()
-                    .and_then(|event| {
-                        event
-                            .raw()
-                            .deserialize_as_unchecked::<serde_json::Value>()
-                            .ok()
-                    })
-                    .map(|event| spoiler_keys(&event))
-                    .unwrap_or_default()
-            } else {
-                serde_json::Map::new()
-            };
-            self.edit_with_persona(&room, &content, persona.as_ref(), forum_title, retained)
-                .await?;
         }
-
         Ok(())
+    }
+
+    async fn edit_sent_message(
+        &self,
+        room: &matrix_sdk::Room,
+        event_id: &OwnedEventId,
+        mut edited: EditedContent,
+        media_caption: bool,
+        persona: Option<&PerMessageProfileView>,
+        forum_title: Option<String>,
+    ) -> Result<(), RpcError> {
+        let (event, replacements) = room
+            .load_or_fetch_event_with_relations(
+                event_id,
+                Some(vec![RelationType::Replacement]),
+                None,
+            )
+            .await
+            .or_failed(self, "edit_message")?;
+        let original = raw_content(&event).ok_or(RpcCode::Unsupported)?;
+        if [FORWARDED, FAMEDLY_FORWARDED, SABLE_FORWARDED]
+            .iter()
+            .any(|key| original.get(key).is_some())
+        {
+            return Err(RpcCode::Unsupported.into());
+        }
+        let latest = latest_valid_replacement(&event, &replacements)
+            .unwrap_or(&event)
+            .raw()
+            .deserialize_as_unchecked::<serde_json::Value>()
+            .or_failed(self, "edit_message")?;
+        retain_reply_mention(
+            room,
+            &original,
+            latest_message(&latest).ok_or(RpcCode::Unsupported)?,
+            &mut edited,
+        )
+        .await;
+        let content = room
+            .make_edit_event(event_id, edited)
+            .await
+            .or_failed(self, "edit_message")?;
+        let mut retained = preview_keys(&latest);
+        if media_caption {
+            retained.extend(spoiler_keys(&original));
+        }
+        self.edit_with_persona(room, &content, persona, forum_title, retained)
+            .await
     }
 
     pub(crate) async fn remove_link_previews(
@@ -290,16 +424,16 @@ impl Core {
             .await?
             .item_by_event_id(event_id)
             .await
-            .ok_or(RpcError::Unsupported)?;
+            .ok_or(RpcCode::Unsupported)?;
         if !item.is_own() {
-            return Err(RpcError::Denied);
+            return Err(RpcCode::Denied.into());
         }
         let event = item
             .latest_json()
             .or_else(|| item.original_json())
             .and_then(|raw| raw.deserialize_as_unchecked::<serde_json::Value>().ok())
-            .ok_or(RpcError::Unsupported)?;
-        let edit = build(&event).ok_or(RpcError::Unsupported)?;
+            .ok_or(RpcCode::Unsupported)?;
+        let edit = build(&event).ok_or(RpcCode::Unsupported)?;
         let raw = Raw::<AnyMessageLikeEventContent>::from_json_string(edit.to_string())
             .or_failed(self, context)?;
         self.room(room_id)
@@ -473,28 +607,48 @@ impl Core {
         if let Some(events) = room.pinned_event_ids() {
             return Ok(unique_pins(events));
         }
-        if let Some(events) = self
-            .probed_pinned_rooms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(room_id)
-        {
+        if let Some(events) = self.probed_pinned_rooms.lock().get(room_id) {
             return Ok(events.clone());
         }
-        let events = unique_pins(
-            room.load_pinned_events()
-                .await
-                .or_failed(self, "pinned_events")?
-                .unwrap_or_default(),
-        );
+        let events = self.load_pinned(&room, "pinned_events").await?;
         self.remember_pinned(room_id, &events);
         Ok(events)
+    }
+
+    async fn load_pinned(
+        &self,
+        room: &matrix_sdk::Room,
+        context: &str,
+    ) -> Result<Vec<OwnedEventId>, RpcError> {
+        let response = match room
+            .client()
+            .send(get_state_event_for_key::v3::Request::new(
+                room.room_id().to_owned(),
+                StateEventType::RoomPinnedEvents,
+                String::new(),
+            ))
+            .await
+        {
+            Ok(response) => response,
+            Err(error)
+                if error.as_client_api_error().is_some_and(|api_error| {
+                    api_error.status_code == http::StatusCode::NOT_FOUND
+                }) =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(self.rpc_error(context, &error)),
+        };
+        let lenient = response
+            .into_content()
+            .deserialize_as_unchecked::<LenientPins>()
+            .or_failed(self, context)?;
+        Ok(unique_pins(lenient.pinned))
     }
 
     fn remember_pinned(&self, room_id: &OwnedRoomId, events: &[OwnedEventId]) {
         self.probed_pinned_rooms
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(room_id.clone(), events.to_vec());
     }
 
@@ -508,12 +662,7 @@ impl Core {
         let room = self.room(room_id).await?;
         // The SDK's pin_event/unpin_event start from the locally cached list,
         // which can lag the server and would drop pins it has not seen.
-        let mut events = unique_pins(
-            room.load_pinned_events()
-                .await
-                .or_failed(self, "set_pinned")?
-                .unwrap_or_default(),
-        );
+        let mut events = self.load_pinned(&room, "set_pinned").await?;
         let changed = if pinned {
             let missing = !events.contains(&event_id);
             if missing {
@@ -528,15 +677,10 @@ impl Core {
         if changed {
             room.send_state_event(RoomPinnedEventsEventContent::new(events))
                 .await
-                .map_err(|error| self.room_error("set_pinned", error))?;
+                .or_failed(self, "set_pinned")?;
         }
 
-        let events = unique_pins(
-            room.load_pinned_events()
-                .await
-                .or_failed(self, "set_pinned")?
-                .unwrap_or_default(),
-        );
+        let events = self.load_pinned(&room, "set_pinned").await?;
         self.remember_pinned(room_id, &events);
         Ok(events)
     }
@@ -567,7 +711,7 @@ impl Core {
             .await?
             .send(report_room::v3::Request::new(room_id, reason))
             .await
-            .map_err(|error| self.homeserver_http_error("report_room", error))?;
+            .or_failed(self, "report_room")?;
         Ok(())
     }
 
@@ -579,7 +723,7 @@ impl Core {
             .await?
             .send(report_user::v3::Request::new(user_id, reason))
             .await
-            .map_err(|error| self.homeserver_http_error("report_user", error))?;
+            .or_failed(self, "report_user")?;
         Ok(())
     }
 
@@ -588,7 +732,7 @@ impl Core {
         room_id: &OwnedRoomId,
         event_id: &OwnedEventId,
         include_original: bool,
-    ) -> Result<(String, bool, Option<String>), RpcError> {
+    ) -> Result<(String, bool, Option<String>, Option<String>), RpcError> {
         let event = self
             .room(room_id)
             .await?
@@ -616,7 +760,16 @@ impl Core {
         } else {
             None
         };
-        Ok((pretty_json(event.raw().json().get()), encrypted, original))
+        let encryption = match event.encryption_info() {
+            Some(info) if include_original => self.encryption_details(room_id, info).await,
+            _ => None,
+        };
+        Ok((
+            pretty_json(event.raw().json().get()),
+            encrypted,
+            original,
+            encryption,
+        ))
     }
 
     pub(crate) async fn forward_message(
@@ -624,6 +777,8 @@ impl Core {
         room_id: &OwnedRoomId,
         event_id: &OwnedEventId,
         to_room_id: &OwnedRoomId,
+        persona: Option<&PerMessageProfileView>,
+        include_metadata: bool,
     ) -> Result<(), RpcError> {
         let source = self.room(room_id).await?;
         let (event, replacements) = source
@@ -641,40 +796,43 @@ impl Core {
             .or_failed(self, "forward_message")?;
 
         let AnySyncTimelineEvent::MessageLike(message) = raw else {
-            return Err(RpcError::Unsupported);
+            return Err(RpcCode::Unsupported.into());
         };
-        if !matches!(
-            message.original_content(),
-            Some(AnyMessageLikeEventContent::RoomMessage(_))
-        ) {
-            return Err(RpcError::Unsupported);
-        }
+        let event_type = match message.original_content() {
+            Some(AnyMessageLikeEventContent::RoomMessage(_)) => "m.room.message",
+            Some(AnyMessageLikeEventContent::Sticker(_)) => "m.sticker",
+            _ => return Err(RpcCode::Unsupported.into()),
+        };
 
-        let original = raw_content(&event).ok_or(RpcError::Unsupported)?;
+        let original = raw_content(&event).ok_or(RpcCode::Unsupported)?;
         let is_forward = [FORWARDED, FAMEDLY_FORWARDED, SABLE_FORWARDED]
             .iter()
             .any(|key| original.get(key).is_some());
-        let edited = (!is_forward)
+        let edited = (!is_forward && event_type == "m.room.message")
             .then(|| latest_valid_replacement(&event, &replacements))
             .flatten()
             .and_then(|edit| {
-                let edit =
-                    serde_json::from_str::<serde_json::Value>(edit.raw().json().get()).ok()?;
+                let edit = edit
+                    .raw()
+                    .deserialize_as_unchecked::<serde_json::Value>()
+                    .ok()?;
                 latest_message(&edit)?.as_object().cloned()
             });
         let source_content = match (edited, original) {
             (Some(edited), _) => edited,
             (None, serde_json::Value::Object(original)) => original,
-            (None, _) => return Err(RpcError::Unsupported),
+            (None, _) => return Err(RpcCode::Unsupported.into()),
         };
 
         let public = matches!(source.join_rule(), Some(JoinRule::Public));
         let mut origin = serde_json::Map::new();
-        origin.insert(
-            "origin_server_ts".to_owned(),
-            u64::from(message.origin_server_ts().0).into(),
-        );
-        if public {
+        if include_metadata {
+            origin.insert(
+                "origin_server_ts".to_owned(),
+                u64::from(message.origin_server_ts().0).into(),
+            );
+        }
+        if include_metadata && public {
             origin.insert("event_id".to_owned(), event_id.to_string().into());
             origin.insert("room_id".to_owned(), room_id.to_string().into());
             origin.insert("sender".to_owned(), message.sender().to_string().into());
@@ -687,18 +845,31 @@ impl Core {
             .await
             .ok()
             .flatten()
-            .and_then(|member| member.display_name().map(ToOwned::to_owned));
+            .and_then(|member| {
+                member
+                    .display_name()
+                    .and_then(visible_name)
+                    .map(ToOwned::to_owned)
+            });
         let route = source.route().await.unwrap_or_default();
-        let content = serde_json::Value::Object(forward_content(
+        let mut content = serde_json::Value::Object(forward_content_for_event(
             source_content,
             origin,
+            event_type,
             &route,
             sender_name.as_deref(),
         ));
 
+        if let Some(profile) = persona {
+            crate::personas::stamp_profile(
+                &mut content,
+                &crate::personas::without_fallback(profile),
+            );
+        }
+
         self.room(to_room_id)
             .await?
-            .send_raw("m.room.message", content)
+            .send_raw(event_type, content)
             .await
             .or_failed(self, "forward_message")?;
 
@@ -733,23 +904,19 @@ impl Core {
     }
 
     pub(crate) async fn watch_pinned(&self, room_id: &OwnedRoomId) {
-        if self
-            .pinned_caches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(room_id)
-        {
+        if self.pinned_caches.lock().contains_key(room_id) {
             return;
         }
         let Ok(room) = self.room(room_id).await else {
             return;
         };
-        match room.client().event_cache().pinned_events(room_id).await {
+        let client = room.client();
+        let Some(event_cache) = client.event_cache() else {
+            return;
+        };
+        match event_cache.pinned_events(room_id).await {
             Ok(entry) => {
-                self.pinned_caches
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(room_id.clone(), entry);
+                self.pinned_caches.lock().insert(room_id.clone(), entry);
             }
             Err(error) => tracing::debug!(%room_id, "pinned events cache unavailable: {error}"),
         }
@@ -762,7 +929,6 @@ impl Core {
         let cache = self
             .pinned_caches
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(room_id)
             .map(|(cache, _)| cache.clone());
         let Some(cache) = cache else {
@@ -816,7 +982,7 @@ impl Core {
                         .ok()?,
                 };
                 let latest = latest_valid_replacement(&event, &replacements).cloned();
-                standalone_item(room, event, latest, push).await
+                standalone_item(self, room, event, latest, push).await
             }))
             .await;
             items.extend(loaded.into_iter().flatten());
@@ -869,7 +1035,7 @@ fn replaced_event(event: &TimelineEvent) -> Option<OwnedEventId> {
     relation.get("event_id")?.as_str()?.parse().ok()
 }
 
-fn valid_replacements<'a>(
+pub(crate) fn valid_replacements<'a>(
     event: &'a TimelineEvent,
     replacements: &'a [TimelineEvent],
 ) -> impl Iterator<Item = &'a TimelineEvent> {
@@ -898,33 +1064,32 @@ pub(crate) fn latest_valid_replacement<'a>(
 }
 
 fn edit_version(event: &TimelineEvent, replacement: bool) -> Option<EditVersionView> {
-    let raw = serde_json::from_str::<serde_json::Value>(event.raw().json().get()).ok()?;
-    let content = raw.get("content")?;
+    if event.kind.is_utd() {
+        return None;
+    }
+    let raw = raw_content(event)?;
     let content = if replacement {
-        content.get("m.new_content")?
+        raw.get("m.new_content")?
     } else {
-        content
+        &raw
     };
     let formatted = content
         .get("format")
         .and_then(serde_json::Value::as_str)
         .filter(|format| *format == "org.matrix.custom.html")
         .and_then(|_| content.get("formatted_body")?.as_str());
-    let profile = per_message_profile(Some(content));
-    let name = profile
+    let profile = per_message_profile(Some(content)).filter(|profile| profile.has_fallback);
+    let fallback = profile
         .as_ref()
         .and_then(|profile| profile.display_name.as_deref());
-    let known = formatted.is_some_and(has_profile_fallback_html)
-        || profile.as_ref().is_some_and(|profile| profile.has_fallback);
     let body = strip_profile_fallback_body(
         content
             .get("body")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default(),
-        name,
-        known,
+        fallback,
     );
-    let formatted = formatted.map(|formatted| strip_profile_fallback_html(formatted, name, known));
+    let formatted = formatted.map(|formatted| strip_profile_fallback_html(formatted, fallback));
 
     Some(EditVersionView {
         event_id: event.event_id()?.to_string(),
@@ -962,13 +1127,14 @@ pub(crate) fn raw_content(event: &TimelineEvent) -> Option<serde_json::Value> {
         .flatten()
 }
 
-fn is_message_content(content: &serde_json::Value) -> bool {
-    content
-        .get("msgtype")
-        .is_some_and(serde_json::Value::is_string)
-        && content
-            .get("body")
-            .is_some_and(serde_json::Value::is_string)
+fn is_valid_forward_content(content: &serde_json::Value, event_type: &str) -> bool {
+    match event_type {
+        "m.room.message" => {
+            serde_json::from_value::<RoomMessageEventContent>(content.clone()).is_ok()
+        }
+        "m.sticker" => serde_json::from_value::<StickerEventContent>(content.clone()).is_ok(),
+        _ => false,
+    }
 }
 
 fn prior_forward(
@@ -1007,14 +1173,28 @@ fn strip_reply_fallback(content: &mut serde_json::Map<String, serde_json::Value>
     }
 }
 
+#[cfg(test)]
 fn forward_content(
-    mut source: serde_json::Map<String, serde_json::Value>,
+    source: serde_json::Map<String, serde_json::Value>,
     origin: serde_json::Map<String, serde_json::Value>,
     route: &[OwnedServerName],
     sender_name: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
+    forward_content_for_event(source, origin, "m.room.message", route, sender_name)
+}
+
+fn forward_content_for_event(
+    mut source: serde_json::Map<String, serde_json::Value>,
+    origin: serde_json::Map<String, serde_json::Value>,
+    event_type: &str,
+    route: &[OwnedServerName],
+    sender_name: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut forwarded = prior_forward(&source).unwrap_or(origin);
-    if !forwarded.get("content").is_some_and(is_message_content) {
+    if !forwarded
+        .get("content")
+        .is_some_and(|content| is_valid_forward_content(content, event_type))
+    {
         for key in [FORWARDED, FAMEDLY_FORWARDED, SABLE_FORWARDED] {
             source.remove(key);
         }
@@ -1022,7 +1202,7 @@ fn forward_content(
         forwarded.insert("content".to_owned(), serde_json::Value::Object(source));
     }
 
-    let mut content = forwarded
+    let mut fallback = forwarded
         .get("content")
         .and_then(serde_json::Value::as_object)
         .cloned()
@@ -1031,24 +1211,25 @@ fn forward_content(
         "m.relates_to",
         "m.mentions",
         "m.new_content",
+        PER_MESSAGE_PROFILE,
+        "m.per_message_profile",
         FORWARDED,
         FAMEDLY_FORWARDED,
         SABLE_FORWARDED,
-        PER_MESSAGE_PROFILE,
     ] {
-        content.remove(key);
+        fallback.remove(key);
     }
-    content.insert(
+    add_forward_fallback(&mut fallback, &forwarded, route, sender_name);
+    fallback.insert(
         "m.mentions".to_owned(),
         serde_json::Value::Object(serde_json::Map::new()),
     );
-    add_forward_fallback(&mut content, &forwarded, route, sender_name);
-    content.insert(
+    fallback.insert(
         SABLE_FORWARDED.to_owned(),
         serde_json::Value::Object(sable_forward(&forwarded)),
     );
-    content.insert(FORWARDED.to_owned(), serde_json::Value::Object(forwarded));
-    content
+    fallback.insert(FORWARDED.to_owned(), serde_json::Value::Object(forwarded));
+    fallback
 }
 
 fn sable_forward(
@@ -1206,7 +1387,32 @@ fn add_forward_fallback(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn an_undecryptable_version_is_left_out_of_the_edit_history() {
+        use matrix_sdk::deserialized_responses::{
+            TimelineEvent, UnableToDecryptInfo, UnableToDecryptReason,
+        };
+
+        let raw = serde_json::from_value(serde_json::json!({
+            "type": "m.room.encrypted",
+            "event_id": "$utd",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1,
+            "content": { "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "x" },
+        }))
+        .unwrap();
+        let utd = TimelineEvent::from_utd(
+            raw,
+            UnableToDecryptInfo {
+                session_id: None,
+                reason: UnableToDecryptReason::Unknown,
+            },
+        );
+        assert!(super::edit_version(&utd, false).is_none());
+    }
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     use matrix_sdk::{
         ruma::{event_id, room_id, user_id},
@@ -1222,20 +1428,20 @@ mod tests {
 
     #[test]
     fn a_caption_edit_keeps_the_spoiler_and_its_reason() {
-        let event = json!({"content": {
+        let content = json!({
             "body": "photo.png",
             "page.codeberg.everypizza.msc4193.spoiler": true,
             "page.codeberg.everypizza.msc4193.spoiler.reason": "plot",
-        }});
+        });
 
-        let kept = super::spoiler_keys(&event);
+        let kept = super::spoiler_keys(&content);
 
         assert_eq!(kept.len(), 2);
         assert_eq!(
             kept["page.codeberg.everypizza.msc4193.spoiler.reason"],
             "plot"
         );
-        assert!(super::spoiler_keys(&json!({"content": {"body": "x"}})).is_empty());
+        assert!(super::spoiler_keys(&json!({"body": "x"})).is_empty());
     }
 
     use crate::{Core, session::Session, store::MemorySessionStore};
@@ -1303,6 +1509,73 @@ mod tests {
                 "original_event_private": false,
             })
         );
+    }
+
+    #[test]
+    fn forwarding_keeps_the_original_profile_inside_the_forwarded_content() {
+        for key in ["com.beeper.per_message_profile", "m.per_message_profile"] {
+            for (event_type, mut source) in [
+                (
+                    "m.room.message",
+                    json!({ "msgtype": "m.text", "body": "hello" }),
+                ),
+                (
+                    "m.sticker",
+                    json!({ "body": "seal", "url": "mxc://example.org/seal", "info": {} }),
+                ),
+            ] {
+                source[key] =
+                    json!({ "displayname": "Alice", "avatar_url": "mxc://example.org/alice" });
+                let content = Value::Object(super::forward_content_for_event(
+                    object(source.clone()),
+                    object(json!({})),
+                    event_type,
+                    &[],
+                    None,
+                ));
+
+                assert!(crate::view::per_message_profile(Some(&content)).is_none());
+                assert_eq!(content["org.matrix.msc4553.forwarded"]["content"], source);
+
+                let forwarded_again = Value::Object(super::forward_content_for_event(
+                    object(content.clone()),
+                    object(json!({ "sender": "@bob:example.org" })),
+                    event_type,
+                    &[],
+                    None,
+                ));
+                assert!(crate::view::per_message_profile(Some(&forwarded_again)).is_none());
+                assert_eq!(
+                    forwarded_again["org.matrix.msc4553.forwarded"],
+                    content["org.matrix.msc4553.forwarded"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forwarding_a_sticker_keeps_its_event_content_without_a_text_fallback() {
+        let sticker = json!({
+            "body": "seal",
+            "url": "mxc://example.org/seal",
+            "info": {}
+        });
+        let content = Value::Object(super::forward_content_for_event(
+            object(sticker.clone()),
+            object(json!({ "origin_server_ts": 7 })),
+            "m.sticker",
+            &[],
+            None,
+        ));
+
+        assert_eq!(content["body"], "seal");
+        assert!(content.get("format").is_none());
+        assert_eq!(content["m.mentions"], json!({}));
+        assert_eq!(content["org.matrix.msc4553.forwarded"]["content"], sticker);
+        assert!(super::is_valid_forward_content(
+            &content["org.matrix.msc4553.forwarded"]["content"],
+            "m.sticker"
+        ));
     }
 
     #[test]
@@ -1425,7 +1698,12 @@ mod tests {
         let forwarded = json!({
             "sender": "@alice:x",
             "origin_server_ts": 1,
-            "content": { "msgtype": "m.text", "body": "original" }
+            "content": {
+                "msgtype": "m.text",
+                "body": "original",
+                "m.relates_to": { "m.in_reply_to": { "event_id": "$parent" } },
+                "m.mentions": { "user_ids": ["@carol:x"] }
+            }
         });
         let source = object(json!({
             "msgtype": "m.text",
@@ -1439,6 +1717,8 @@ mod tests {
 
         assert_eq!(content["org.matrix.msc4553.forwarded"], forwarded);
         assert_eq!(content["body"], "Forwarded from @alice:x\noriginal");
+        assert_eq!(content["m.mentions"], json!({}));
+        assert!(content.get("m.relates_to").is_none());
     }
 
     #[test]
@@ -1488,6 +1768,11 @@ mod tests {
             color_on_light: None,
             color_on_dark: None,
             has_fallback: true,
+            biography: None,
+            banner_url: None,
+            is_animal: None,
+            has_animal: None,
+            animal_need: None,
         };
         let edit = super::reprofiled_edit(event_id!("$event"), &gallery, Some(&persona)).unwrap();
 
@@ -1583,6 +1868,227 @@ mod tests {
         core
     }
 
+    async fn sent_message(server: &MatrixMockServer) -> Value {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let requests = server.server().received_requests().await.unwrap();
+                if let Some(request) = requests
+                    .iter()
+                    .find(|request| request.url.path().contains("/send/m.room.message/"))
+                {
+                    break request.body_json().unwrap();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn editing_replies_preserves_mentions_without_repinging() {
+        for media_caption in [false, true] {
+            for threaded in [false, true] {
+                for (ping, already_edited) in [(false, false), (true, false), (true, true)] {
+                    let server = MatrixMockServer::new().await;
+                    let client = server.client_builder().build().await;
+                    let sender = client.user_id().unwrap().to_owned();
+                    let room = room_id!("!reply-edits:example.org");
+                    let bob = user_id!("@bob:example.org");
+                    let carol = user_id!("@carol:example.org");
+                    server.sync_joined_room(&client, room).await;
+                    server.mock_room_state_encryption().plain().mount().await;
+                    let mut content = if media_caption {
+                        json!({"msgtype": "m.image", "body": "before", "filename": "photo.png", "url": "mxc://example.org/photo"})
+                    } else {
+                        json!({"msgtype": "m.text", "body": "before"})
+                    };
+                    content["m.relates_to"] = if threaded {
+                        json!({"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$target"}})
+                    } else {
+                        json!({"m.in_reply_to": {"event_id": "$target"}})
+                    };
+                    content["m.mentions"] =
+                        json!({"user_ids": if ping { vec![bob, carol] } else { vec![carol] }});
+                    let mut latest = content.clone();
+                    latest["m.mentions"] = json!({"user_ids": [carol]});
+                    let target = json!({"msgtype": "m.text", "body": "target"});
+                    for (id, event_sender, event_content) in [
+                        ("$original", sender.as_str(), content),
+                        ("$target", bob.as_str(), target),
+                    ] {
+                        Mock::given(method("GET"))
+                            .and(path(format!("/_matrix/client/v3/rooms/{room}/event/{id}")))
+                            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                                "type": "m.room.message", "event_id": id, "sender": event_sender,
+                                "origin_server_ts": 1, "room_id": room, "content": event_content,
+                            })))
+                            .mount(server.server())
+                            .await;
+                    }
+                    let replacements = if already_edited {
+                        vec![json!({
+                            "type": "m.room.message", "event_id": "$previous-edit", "sender": sender,
+                            "origin_server_ts": 2, "room_id": room,
+                            "content": {
+                                "msgtype": "m.text", "body": "* before", "m.mentions": {},
+                                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                                "m.new_content": latest,
+                            },
+                        })]
+                    } else {
+                        Vec::new()
+                    };
+                    Mock::given(method("GET"))
+                        .and(path(format!(
+                            "/_matrix/client/v1/rooms/{room}/relations/$original/m.replace"
+                        )))
+                        .respond_with(
+                            ResponseTemplate::new(200)
+                                .set_body_json(json!({"chunk": replacements})),
+                        )
+                        .mount(server.server())
+                        .await;
+                    server
+                        .mock_room_send()
+                        .ok(event_id!("$edited"))
+                        .expect(1)
+                        .mount()
+                        .await;
+                    let core = core(&server, client).await;
+                    core.run(crate::api::messages::EditParams {
+                        room_id: room.to_owned(),
+                        event_id: Some(event_id!("$original").to_owned()),
+                        transaction_id: None,
+                        body: "after".to_owned(),
+                        formatted: None,
+                        kind: crate::protocol::MessageKind::Text,
+                        media_caption,
+                        thread_root: threaded.then(|| event_id!("$root").to_owned()),
+                        mentions: Vec::new(),
+                        mentions_room: false,
+                        persona: None,
+                        forum_title: None,
+                    })
+                    .await
+                    .unwrap();
+                    let sent = sent_message(&server).await;
+                    assert_eq!(sent["m.new_content"]["body"], "after");
+                    assert_eq!(
+                        sent["m.new_content"]["m.mentions"],
+                        if ping && !already_edited {
+                            json!({"user_ids": [bob]})
+                        } else {
+                            json!({})
+                        }
+                    );
+                    assert_eq!(sent["m.mentions"], json!({}));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn text_edits_preserve_removed_previews_from_the_latest_version() {
+        for field in [
+            super::BUNDLED_LINK_PREVIEWS,
+            super::LEGACY_BUNDLED_LINK_PREVIEWS,
+        ] {
+            for removed_after_send in [false, true] {
+                let server = MatrixMockServer::new().await;
+                let client = server.client_builder().build().await;
+                let sender = client.user_id().unwrap().to_owned();
+                let room = room_id!("!previews:example.org");
+                server.sync_joined_room(&client, room).await;
+                server.mock_room_state_encryption().plain().mount().await;
+                let mut original = json!({
+                    "type": "m.room.message", "event_id": "$original",
+                    "sender": sender, "origin_server_ts": 1, "room_id": room,
+                    "content": {"msgtype": "m.text", "body": "https://example.org"},
+                });
+                original["content"][field] = if removed_after_send {
+                    json!([{"matched_url": "https://example.org"}])
+                } else {
+                    json!([])
+                };
+                let replacements = if removed_after_send {
+                    vec![json!({
+                        "type": "m.room.message", "event_id": "$removed",
+                        "sender": sender, "origin_server_ts": 2, "room_id": room,
+                        "content": {
+                            "msgtype": "m.text", "body": "* https://example.org",
+                            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                            "m.new_content": {
+                                "msgtype": "m.text", "body": "https://example.org", (field): [],
+                            },
+                        },
+                    })]
+                } else {
+                    Vec::new()
+                };
+                Mock::given(method("GET"))
+                    .and(path(format!(
+                        "/_matrix/client/v3/rooms/{room}/event/$original"
+                    )))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(original))
+                    .mount(server.server())
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path(format!(
+                        "/_matrix/client/v1/rooms/{room}/relations/$original/m.replace"
+                    )))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(json!({"chunk": replacements})),
+                    )
+                    .mount(server.server())
+                    .await;
+                let sent = Arc::new(Mutex::new(Value::Null));
+                let write = sent.clone();
+                Mock::given(method("PUT"))
+                    .and(wiremock::matchers::path_regex(format!(
+                        "/_matrix/client/v3/rooms/{room}/send/m.room.message/.*"
+                    )))
+                    .respond_with(move |request: &wiremock::Request| {
+                        *write.lock() = serde_json::from_slice(&request.body).unwrap();
+                        ResponseTemplate::new(200).set_body_json(json!({"event_id": "$edited"}))
+                    })
+                    .expect(1)
+                    .mount(server.server())
+                    .await;
+                let core = core(&server, client).await;
+                core.run(crate::api::messages::EditParams {
+                    room_id: room.to_owned(),
+                    event_id: Some(event_id!("$original").to_owned()),
+                    transaction_id: None,
+                    body: "https://example.org extra text".to_owned(),
+                    formatted: None,
+                    kind: crate::protocol::MessageKind::Text,
+                    media_caption: false,
+                    thread_root: None,
+                    mentions: Vec::new(),
+                    mentions_room: false,
+                    persona: None,
+                    forum_title: None,
+                })
+                .await
+                .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while sent.lock().is_null() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let sent = sent.lock();
+                assert_eq!(sent["m.new_content"][field], json!([]));
+                assert_eq!(
+                    sent["m.new_content"]["body"],
+                    "https://example.org extra text"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn pin_and_unpin_load_existing_server_state() {
         let server = MatrixMockServer::new().await;
@@ -1595,7 +2101,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(endpoint.clone()))
             .respond_with(move |_: &wiremock::Request| {
-                ResponseTemplate::new(200).set_body_json(read_pins.lock().unwrap().clone())
+                ResponseTemplate::new(200).set_body_json(read_pins.lock().clone())
             })
             .mount(server.server())
             .await;
@@ -1603,8 +2109,7 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path(endpoint))
             .respond_with(move |request: &wiremock::Request| {
-                *write_pins.lock().unwrap() =
-                    serde_json::from_slice::<Value>(&request.body).unwrap();
+                *write_pins.lock() = serde_json::from_slice::<Value>(&request.body).unwrap();
                 ResponseTemplate::new(200).set_body_json(json!({"event_id": "$pins"}))
             })
             .expect(2)
@@ -1621,7 +2126,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, vec![event_id!("$old")]);
-        assert_eq!(*pins.lock().unwrap(), json!({"pinned": ["$old"]}));
+        assert_eq!(*pins.lock(), json!({"pinned": ["$old"]}));
     }
 
     #[tokio::test]
@@ -1655,7 +2160,7 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path(endpoint))
             .respond_with(move |request: &wiremock::Request| {
-                *write.lock().unwrap() = serde_json::from_slice::<Value>(&request.body).unwrap();
+                *write.lock() = serde_json::from_slice::<Value>(&request.body).unwrap();
                 ResponseTemplate::new(200).set_body_json(json!({"event_id": "$pins"}))
             })
             .expect(1)
@@ -1665,9 +2170,54 @@ mod tests {
         core.set_pinned(&room_id.to_owned(), event_id!("$d").to_owned(), true)
             .await
             .unwrap();
+        assert_eq!(*sent.lock(), json!({"pinned": ["$a", "$b", "$c", "$d"]}));
+    }
+
+    #[tokio::test]
+    async fn typing_in_a_room_that_is_not_joined_is_a_no_op() {
+        use crate::api::Handler;
+
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let room_id = room_id!("!invited:example.org");
+        server
+            .mock_sync()
+            .ok_and_run(&client, |builder| {
+                builder.add_invited_room(matrix_sdk_test::InvitedRoomBuilder::new(room_id));
+            })
+            .await;
+        let core = core(&server, client).await;
+        let params = crate::api::messages::SetTypingParams {
+            room_id: room_id.to_owned(),
+            typing: false,
+        };
+        params.run(&core).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_malformed_pin_does_not_hide_the_valid_ones() {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let room_id = room_id!("!bad-pin:example.org");
+        server
+            .sync_room(&client, matrix_sdk_test::JoinedRoomBuilder::new(room_id))
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{room_id}/state/m.room.pinned_events/"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"pinned": ["$a", "!not-an-event:example.org", "$a", "$b"]}),
+                ),
+            )
+            .mount(server.server())
+            .await;
+        let core = core(&server, client).await;
+        let pins = core.pinned_events(&room_id.to_owned()).await.unwrap();
         assert_eq!(
-            *sent.lock().unwrap(),
-            json!({"pinned": ["$a", "$b", "$c", "$d"]})
+            pins,
+            [event_id!("$a").to_owned(), event_id!("$b").to_owned()]
         );
     }
 
@@ -1724,6 +2274,129 @@ mod tests {
             &source.to_owned(),
             &event_id!("$original").to_owned(),
             &target.to_owned(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn forwarding_uses_the_forwarders_selected_profile() {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let source = room_id!("!source:example.org");
+        let target = room_id!("!target:example.org");
+        server.sync_joined_room(&client, source).await;
+        server.sync_joined_room(&client, target).await;
+        server.mock_room_state_encryption().plain().mount().await;
+        let original_content = json!({
+            "msgtype": "m.text", "body": "original",
+            "com.beeper.per_message_profile": { "displayname": "Alice" },
+            "m.per_message_profile": { "displayname": "Alice" }
+        });
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{source}/event/$original"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "m.room.message", "event_id": "$original", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "room_id": source, "content": original_content
+            })))
+            .mount(server.server())
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v1/rooms/{source}/relations/$original/m.replace"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": []})))
+            .mount(server.server())
+            .await;
+        Mock::given(method("PUT"))
+            .and(wiremock::matchers::path_regex(format!(
+                "/_matrix/client/v3/rooms/{target}/send/m.room.message/.*"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$forward"})))
+            .expect(1)
+            .mount(server.server())
+            .await;
+        let core = core(&server, client).await;
+        let persona =
+            serde_json::from_value(json!({ "display_name": "Bob", "has_fallback": true })).unwrap();
+        core.forward_message(
+            &source.to_owned(),
+            &event_id!("$original").to_owned(),
+            &target.to_owned(),
+            Some(&persona),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let content = sent_message(&server).await;
+        assert_eq!(
+            content["com.beeper.per_message_profile"],
+            json!({ "displayname": "Bob" })
+        );
+        assert!(content.get("m.per_message_profile").is_none());
+        assert_eq!(
+            content["org.matrix.msc4553.forwarded"]["content"],
+            original_content
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarding_without_metadata_keeps_only_required_content() {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let source = room_id!("!source:example.org");
+        let target = room_id!("!target:example.org");
+        server.sync_joined_room(&client, source).await;
+        server.sync_joined_room(&client, target).await;
+        server.mock_room_state_encryption().plain().mount().await;
+        let original = json!({"type": "m.room.message", "event_id": "$original", "sender": "@alice:example.org", "origin_server_ts": 1,
+            "room_id": source, "content": {"msgtype": "m.text", "body": "original"}});
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{source}/event/$original"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(original))
+            .mount(server.server())
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v1/rooms/{source}/relations/$original/m.replace"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": []})))
+            .mount(server.server())
+            .await;
+        Mock::given(method("PUT"))
+            .and(wiremock::matchers::path_regex(format!(
+                "/_matrix/client/v3/rooms/{target}/send/m.room.message/.*"
+            )))
+            .and(|request: &wiremock::Request| {
+                let body: serde_json::Value = request.body_json().unwrap();
+                body["org.matrix.msc4553.forwarded"]
+                    == json!({
+                        "content": {"msgtype": "m.text", "body": "original"}
+                    })
+                    && body["moe.sable.message.forward"]
+                        == json!({
+                            "v": 1, "is_forwarded": true, "original_event_private": true
+                        })
+                    && body["body"] == "Forwarded message\noriginal"
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$forward"})))
+            .expect(1)
+            .mount(server.server())
+            .await;
+        let core = core(&server, client).await;
+        core.forward_message(
+            &source.to_owned(),
+            &event_id!("$original").to_owned(),
+            &target.to_owned(),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -1778,6 +2451,8 @@ mod tests {
             &source.to_owned(),
             &event_id!("$forward").to_owned(),
             &target.to_owned(),
+            None,
+            false,
         )
         .await
         .unwrap();
@@ -1974,6 +2649,144 @@ mod tests {
         assert!(edited);
     }
 
+    async fn preview_core(server: &MatrixMockServer) -> Arc<Core> {
+        let client = server.client_builder().build().await;
+        let room = room_id!("!bookmarks:example.org");
+        server.sync_joined_room(&client, room).await;
+        server.mock_room_state_encryption().plain().mount().await;
+        let event = json!({
+            "type": "m.room.message", "event_id": "$saved", "sender": "@alice:example.org",
+            "origin_server_ts": 1, "room_id": room,
+            "content": {"msgtype": "m.text", "body": "Saved message"}
+        });
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{room}/event/$saved"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(event.clone()))
+            .mount(server.server())
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/_matrix/client/v1/rooms/{room}/threads")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": [event]})))
+            .mount(server.server())
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v1/rooms/{room}/relations/$saved/m.replace"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": []})))
+            .mount(server.server())
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{room}/state/m.room.member/@alice:example.org"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "membership": "join", "displayname": "Room Alice",
+                "avatar_url": "mxc://example.org/alice"
+            })))
+            .expect(1)
+            .mount(server.server())
+            .await;
+        core(server, client).await
+    }
+
+    #[tokio::test]
+    async fn event_items_and_thread_roots_share_missing_sender_state() {
+        use crate::api::timeline::ListThreadsParams;
+
+        let server = MatrixMockServer::new().await;
+        let core = preview_core(&server).await;
+        let room = room_id!("!bookmarks:example.org");
+        let items = core
+            .event_items(&room.to_owned(), &[event_id!("$saved").to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].sender_name.as_deref(), Some("Room Alice"));
+        assert_eq!(
+            items[0].sender_avatar.as_deref(),
+            Some("mxc://example.org/alice")
+        );
+
+        let threads = core
+            .run(ListThreadsParams {
+                room_id: room.to_owned(),
+                from: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(threads.roots.len(), 1);
+        assert_eq!(threads.roots[0].sender_name.as_deref(), Some("Room Alice"));
+        assert_eq!(
+            threads.roots[0].sender_avatar.as_deref(),
+            Some("mxc://example.org/alice")
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_lists_keep_server_counts_when_local_history_is_empty() {
+        use crate::api::timeline::ListThreadsParams;
+        let server = MatrixMockServer::new().await;
+        let core = preview_core(&server).await;
+        let room = room_id!("!bookmarks:example.org");
+        let client = core.client().await.unwrap();
+        let _cache = client
+            .event_cache()
+            .unwrap()
+            .thread(room, event_id!("$saved"))
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!("/_matrix/client/v1/rooms/{room}/threads")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "chunk": [{
+                "type": "m.room.message", "event_id": "$saved", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "room_id": room,
+                "content": {"msgtype": "m.text", "body": "Saved message"},
+                "unsigned": {"m.relations": {"m.thread": {"count": 2, "current_user_participated": false, "latest_event": {
+                    "event_id": "$latest", "type": "m.room.message", "sender": "@alice:example.org",
+                    "origin_server_ts": 2, "content": {"msgtype": "m.text", "body": "Latest reply"}
+                }}}}
+            }] })))
+            .with_priority(1)
+            .mount(server.server())
+            .await;
+        let result = core
+            .run(ListThreadsParams {
+                room_id: room.to_owned(),
+                from: None,
+            })
+            .await
+            .unwrap();
+        let summary = result.roots[0].thread_summary.as_ref().unwrap();
+        assert_eq!(summary.num_replies, 2);
+        assert_eq!(summary.latest_body.as_deref(), Some("Latest reply"));
+    }
+
+    #[tokio::test]
+    async fn event_items_fetch_missing_sender_state_in_a_left_room() {
+        use matrix_sdk_test::LeftRoomBuilder;
+
+        let server = MatrixMockServer::new().await;
+        let core = preview_core(&server).await;
+        let room = room_id!("!bookmarks:example.org");
+        server
+            .sync_room(&core.client().await.unwrap(), LeftRoomBuilder::new(room))
+            .await;
+
+        let items = core
+            .event_items(&room.to_owned(), &[event_id!("$saved").to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].sender_name.as_deref(), Some("Room Alice"));
+        assert_eq!(
+            items[0].sender_avatar.as_deref(),
+            Some("mxc://example.org/alice")
+        );
+    }
+
     #[tokio::test]
     async fn forwarding_media_from_a_private_room_keeps_the_attachment() {
         let server = MatrixMockServer::new().await;
@@ -2026,9 +2839,63 @@ mod tests {
             &source.to_owned(),
             &event_id!("$video").to_owned(),
             &target.to_owned(),
+            None,
+            true,
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sending_previews_validates_the_whitelist_and_honors_optout() {
+        for opt_out in [false, true] {
+            let server = MatrixMockServer::new().await;
+            let client = server.client_builder().build().await;
+            client.send_queue().set_enabled(false).await;
+            let room_id = room_id!("!pending:example.org");
+            let room = server.sync_joined_room(&client, room_id).await;
+            let core = core(&server, client).await;
+            let preview = |url: &str| {
+                crate::link_previews::url_preview(
+                    url.to_owned(),
+                    &json!({
+                        "og:title": "Example"
+                    }),
+                )
+                .unwrap()
+            };
+            let params = serde_json::from_value::<crate::api::messages::SendParams>(json!({
+                "room_id": room_id,
+                "body": "https://example.org/allowed javascript:alert(1)",
+                "link_previews": [
+                    preview("https://example.org/allowed"),
+                    preview("https://example.org/allowed"),
+                    preview("https://example.org/absent"),
+                    preview("javascript:alert(1)"),
+                ],
+                "no_link_previews": opt_out,
+            }))
+            .unwrap();
+            core.run(params).await.unwrap();
+            let (echoes, _updates) = room.send_queue().subscribe().await.unwrap();
+            let matrix_sdk::send_queue::LocalEchoContent::Event {
+                serialized_event, ..
+            } = &echoes[0].content
+            else {
+                panic!("expected a queued message")
+            };
+            let content: Value = serialized_event.raw().0.deserialize_as_unchecked().unwrap();
+            for (field, matched_url) in [
+                (super::BUNDLED_LINK_PREVIEWS, "matrix:matched_url"),
+                (super::LEGACY_BUNDLED_LINK_PREVIEWS, "matched_url"),
+            ] {
+                let previews = content[field].as_array().unwrap();
+                assert_eq!(previews.len(), usize::from(!opt_out));
+                if !opt_out {
+                    assert_eq!(previews[0][matched_url], "https://example.org/allowed");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2042,13 +2909,41 @@ mod tests {
         let room_id = room_id!("!pending:example.org");
         server.sync_joined_room(&client, room_id).await;
         server.mock_room_state_encryption().plain().mount().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{room_id}/event/$reply"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "m.room.message", "event_id": "$reply", "sender": "@bob:example.org",
+                "origin_server_ts": 1, "room_id": room_id,
+                "content": {"msgtype": "m.text", "body": "target"},
+            })))
+            .mount(server.server())
+            .await;
         let core = core(&server, client).await;
         let timeline = core.timeline(&room_id.to_owned()).await.unwrap();
         let mut content = RoomMessageEventContent::text_plain("before");
+        content.mentions = Some(super::outgoing_mentions(
+            vec![user_id!("@bob:example.org").to_owned()],
+            false,
+        ));
         content.relates_to = Some(Relation::Reply(Reply::with_event_id(
             event_id!("$reply").to_owned(),
         )));
-        timeline.send(content.into()).await.unwrap();
+        timeline
+            .send_with_extra_content(
+                content.into(),
+                Some(
+                    [
+                        (super::BUNDLED_LINK_PREVIEWS.to_owned(), json!([])),
+                        (super::LEGACY_BUNDLED_LINK_PREVIEWS.to_owned(), json!([])),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            )
+            .await
+            .unwrap();
         let transaction_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Some(id) = timeline
@@ -2080,41 +2975,37 @@ mod tests {
         })
         .await
         .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let items = timeline.items().await;
-                if let Some(event) = items
-                    .iter()
-                    .filter_map(|item| item.as_event())
-                    .find(|event| {
-                        event
-                            .content()
-                            .as_message()
-                            .is_some_and(|message| message.body() == "after")
-                    })
-                {
-                    assert_eq!(
-                        event.content().in_reply_to().unwrap().event_id,
-                        event_id!("$reply")
-                    );
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        let room = core.room(&room_id.to_owned()).await.unwrap();
+        let (echoes, _updates) = room.send_queue().subscribe().await.unwrap();
+        let matrix_sdk::send_queue::LocalEchoContent::Event {
+            serialized_event, ..
+        } = &echoes[0].content
+        else {
+            panic!("expected a queued message")
+        };
+        let content: Value = serialized_event.raw().0.deserialize_as_unchecked().unwrap();
+        assert_eq!(content["body"], "after");
+        assert_eq!(
+            content["m.relates_to"]["m.in_reply_to"]["event_id"],
+            "$reply"
+        );
+        assert_eq!(
+            content["m.mentions"]["user_ids"],
+            json!(["@bob:example.org"])
+        );
+        assert_eq!(content[super::BUNDLED_LINK_PREVIEWS], json!([]));
+        assert_eq!(content[super::LEGACY_BUNDLED_LINK_PREVIEWS], json!([]));
     }
 
     #[tokio::test]
     async fn reading_a_thread_sends_only_a_receipt_scoped_to_its_root() {
         use crate::api::timeline::MarkReadParams;
-        use matrix_sdk_test::{ALICE, JoinedRoomBuilder, event_factory::EventFactory};
+        use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let room_id = room_id!("!thread:example.org");
         let root = event_id!("$root");
-        let factory = EventFactory::new().room(room_id).sender(*ALICE);
+        let factory = EventFactory::new().room(room_id).sender(User::Alice);
         server.mock_room_state_encryption().plain().mount().await;
         server
             .sync_room(
@@ -2162,10 +3053,11 @@ mod tests {
                 kind: crate::SubscriptionKind::FocusedTimeline(room_id.to_owned()),
             },
         );
+        core.private_receipts
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         core.run(MarkReadParams {
             room_id: room_id.to_owned(),
             event_id: Some(event_id!("$reply").to_owned()),
-            private_receipt: false,
             thread_root: Some(root.to_owned()),
             subscription: Some(subscription),
             fully_read: false,
@@ -2176,11 +3068,11 @@ mod tests {
 
     async fn receipt_body(read: &str, viewed: Option<&str>) -> serde_json::Value {
         use crate::api::timeline::MarkReadParams;
-        use matrix_sdk_test::{ALICE, JoinedRoomBuilder, event_factory::EventFactory};
+        use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let room_id = room_id!("!thread:example.org");
-        let factory = EventFactory::new().room(room_id).sender(*ALICE);
+        let factory = EventFactory::new().room(room_id).sender(User::Alice);
         server.mock_room_state_encryption().plain().mount().await;
         server
             .sync_room(
@@ -2210,10 +3102,11 @@ mod tests {
             .mount(server.server())
             .await;
         let core = core(&server, client).await;
+        core.private_receipts
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         core.run(MarkReadParams {
             room_id: room_id.to_owned(),
             event_id: Some(read.try_into().unwrap()),
-            private_receipt: false,
             thread_root: viewed.map(|root| root.try_into().unwrap()),
             subscription: None,
             fully_read: false,
@@ -2264,12 +3157,12 @@ mod tests {
     async fn a_thread_timeline_is_already_at_its_end_going_forward() {
         use crate::api::timeline::{PaginateOk, PaginateParams};
         use crate::protocol::PaginationDirection;
-        use matrix_sdk_test::{ALICE, JoinedRoomBuilder, event_factory::EventFactory};
+        use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let room_id = room_id!("!thread:example.org");
         let root = event_id!("$root");
-        let factory = EventFactory::new().room(room_id).sender(*ALICE);
+        let factory = EventFactory::new().room(room_id).sender(User::Alice);
         server.mock_room_state_encryption().plain().mount().await;
         server
             .sync_room(

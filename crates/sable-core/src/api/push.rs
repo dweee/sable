@@ -1,10 +1,11 @@
+use crate::errors::CoreResultExt as _;
 use std::sync::Arc;
 
 use serde::Deserialize;
 
 use super::Handler;
 use crate::protocol::{DiagnosticPushView, RegisteredPusherView, RpcError, WebPushKeys};
-use crate::{Core, ResultExt, notifications, push_check, webpush};
+use crate::{Core, notifications, push_check, webpush};
 
 domain! {
     set_pusher,
@@ -13,7 +14,6 @@ domain! {
     set_web_pusher,
     web_pushers,
     ping_gateway,
-    discover_gateway,
     send_diagnostic,
     ack_web_pusher,
 }
@@ -59,7 +59,7 @@ impl Handler for SetPusherParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         notifications::set_pusher(&core.client().await?, self.pusher)
             .await
-            .or_failed(core, "set_pusher")
+            .or_report(core, "set_pusher")
     }
 }
 
@@ -76,7 +76,7 @@ impl Handler for RemovePusherParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         notifications::remove_pusher(&core.client().await?, self.pushkey, self.app_id)
             .await
-            .or_failed(core, "remove_pusher")
+            .or_report(core, "remove_pusher")
     }
 }
 
@@ -92,7 +92,7 @@ impl Handler for WebPusherSupportParams {
     async fn run(self, core: &Arc<Core>) -> Result<Option<String>, RpcError> {
         webpush::support(&core.client().await?)
             .await
-            .or_failed(core, "webpusher_support")
+            .or_report(core, "webpusher_support")
     }
 }
 
@@ -108,7 +108,7 @@ impl Handler for SetWebPusherParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         webpush::set_pusher(&core.client().await?, self.pusher)
             .await
-            .or_failed(core, "set_webpusher")
+            .or_report(core, "set_webpusher")
     }
 }
 
@@ -122,7 +122,7 @@ impl Handler for WebPushersParams {
     async fn run(self, core: &Arc<Core>) -> Result<Vec<RegisteredPusherView>, RpcError> {
         webpush::pushers(&core.client().await?)
             .await
-            .or_failed(core, "webpushers")
+            .or_report(core, "webpushers")
     }
 }
 
@@ -142,20 +142,6 @@ impl Handler for PingGatewayParams {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct DiscoverGatewayParams {
-    pub endpoint: String,
-}
-
-impl Handler for DiscoverGatewayParams {
-    type Ok = Option<String>;
-
-    async fn run(self, _core: &Arc<Core>) -> Result<Option<String>, RpcError> {
-        Ok(push_check::discover_gateway(&self.endpoint).await)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct SendDiagnosticParams {
     pub pushkey: String,
     pub app_id: String,
@@ -167,7 +153,7 @@ impl Handler for SendDiagnosticParams {
     async fn run(self, core: &Arc<Core>) -> Result<DiagnosticPushView, RpcError> {
         push_check::send_diagnostic_push(&core.client().await?, &self.pushkey, &self.app_id)
             .await
-            .or_failed(core, "send_diagnostic_push")
+            .or_report(core, "send_diagnostic_push")
     }
 }
 
@@ -184,6 +170,6 @@ impl Handler for AckWebPusherParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         webpush::ack(&core.client().await?, self.app_id, self.ack_token)
             .await
-            .or_failed(core, "ack_webpusher")
+            .or_report(core, "ack_webpusher")
     }
 }

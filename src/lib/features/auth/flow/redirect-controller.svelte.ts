@@ -3,13 +3,22 @@ import {
   callbackChannelName,
   createRedirectUri,
   redirectLoginType,
-  tauriRedirectUri,
+  nativeRedirectUri,
 } from '#lib/auth/redirect.js';
-import type { LoginFlowsView, RegistrationResultView } from '#src/generated/protocol';
+import type { AuthIntent, LoginFlowsView, RegistrationResultView } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { t } from '#lib/i18n.js';
 import { deliversDeepLinks } from '#lib/platform/deep-links.js';
-import { openExternalAuthUrl } from '#lib/platform/external-auth.js';
+import {
+  closeAuthLoopback,
+  openExternalAuthUrl,
+  openExternalAuthWindow,
+  isDesktopAuthClient,
+  openSystemAuthUrl,
+  startAuthLoopback,
+  startInAppAuthSession,
+  type ExternalAuthWindow,
+} from '#lib/platform/external-auth.js';
 import { SvelteSet, SvelteURL } from 'svelte/reactivity';
 import {
   authenticationError,
@@ -18,7 +27,7 @@ import {
 } from '#lib/features/auth/registration/registration-errors.js';
 
 type RedirectType = 'oidc' | 'sso';
-type RedirectIntent = 'login' | 'register';
+type RedirectIntent = AuthIntent;
 type FallbackResult = Extract<RegistrationResultView, { state: 'fallback' }>;
 
 interface RedirectControllerOptions {
@@ -33,13 +42,13 @@ interface RedirectControllerOptions {
   onNavigateRegistrationRecovery: () => Promise<void>;
 }
 
-export function reserveRedirectPopup(intent: RedirectIntent, homeserver: string): Window | null {
-  const popup = window.open(
-    'about:blank',
-    `sable-${intent}-${crypto.randomUUID()}`,
-    'popup,width=520,height=720'
-  );
-  if (!popup) return null;
+function reserveRedirectPopup(
+  intent: RedirectIntent,
+  homeserver: string
+): ExternalAuthWindow | null {
+  const browser = openExternalAuthWindow(`sable-${intent}-${crypto.randomUUID()}`);
+  const popup = browser?.window;
+  if (!popup) return browser;
 
   const message = t('auth.redirectingTo', { name: homeserver });
   popup.document.title = message;
@@ -49,11 +58,7 @@ export function reserveRedirectPopup(intent: RedirectIntent, homeserver: string)
   paragraph.style.cssText =
     'margin:0;min-height:100vh;display:grid;place-items:center;padding:2rem;text-align:center;font:1rem/1.5 system-ui,sans-serif';
   popup.document.body.append(paragraph);
-  return popup;
-}
-
-export function closeRedirectPopup(popup: Window | null): void {
-  popup?.close();
+  return browser;
 }
 
 export class RedirectController {
@@ -64,8 +69,11 @@ export class RedirectController {
   loginError = $state<string | null>(null);
   registrationError = $state<string | null>(null);
   isCallbackWindow = $state(false);
+  systemBrowserUrl = $state<string | null>(null);
+  isOpeningSystemBrowser = $state(false);
 
-  private popup: Window | null = null;
+  private popup: ExternalAuthWindow | null = null;
+  private fallbackPopup: Window | null = null;
   private removeFallbackListener: (() => void) | null = null;
   private readonly authChannels = new SvelteSet<BroadcastChannel>();
 
@@ -76,15 +84,30 @@ export class RedirectController {
     id?: string,
     intent: RedirectIntent = 'register'
   ): Promise<void> {
-    if (this.isLaunching) return;
+    if (this.isLaunching || this.isOpeningSystemBrowser) return;
+    this.systemBrowserUrl = null;
     this.loginError = null;
     this.registrationError = null;
     this.pendingIntent = intent;
     this.isLaunching = true;
-    const reservedPopup = deliversDeepLinks()
-      ? null
-      : reserveRedirectPopup(intent, this.options.getHomeserver().trim());
-    if (!deliversDeepLinks() && !reservedPopup) {
+    if (isDesktopAuthClient()) {
+      try {
+        await this.launchInSystemBrowser(type, id, intent);
+      } catch (value) {
+        this.systemBrowserUrl = null;
+        void closeAuthLoopback();
+        logAuthenticationFailure(`${type}_${intent}_start`, value);
+        this.setError(intent, value);
+      } finally {
+        this.isLaunching = false;
+      }
+      return;
+    }
+    const closingPrevious = this.popup?.close();
+    for (const channel of this.authChannels) channel.close();
+    this.authChannels.clear();
+    const reservedPopup = reserveRedirectPopup(intent, this.options.getHomeserver().trim());
+    if (!reservedPopup) {
       this.setError(intent, t('auth.allowPopups'));
       this.isLaunching = false;
       return;
@@ -93,32 +116,23 @@ export class RedirectController {
     this.popup = reservedPopup;
     let navigationStarted = false;
     try {
+      if (closingPrevious) await closingPrevious;
       const flows = await this.options.validateHomeserver();
       if (!flows) {
         this.setError(intent, this.options.getValidationError() ?? t('errors.homeserverNotFound'));
         return;
       }
       const callbackUri = this.redirectUri(type);
-      const authorizationUrl =
-        type === 'oidc'
-          ? await this.options.core.startOidcLogin(
-              this.options.getHomeserver().trim(),
-              callbackUri,
-              intent,
-              intent === 'login' ? this.options.getReauthAccountId?.() : undefined
-            )
-          : await this.options.core.startSsoLogin(
-              this.options.getHomeserver().trim(),
-              callbackUri,
-              id,
-              intent,
-              intent === 'login' ? this.options.getReauthAccountId?.() : undefined
-            );
+      const authorizationUrl = await this.startLogin(type, id, intent, callbackUri);
       if (deliversDeepLinks()) {
-        await openExternalAuthUrl(authorizationUrl);
+        const callbackUrl = await startInAppAuthSession(authorizationUrl, callbackUri);
+        if (callbackUrl === null) {
+          navigationStarted = true;
+          await reservedPopup.navigate(authorizationUrl, callbackUri);
+        } else await this.complete(callbackUrl);
       } else {
-        if (!this.popup) return;
-        const popup = this.popup;
+        const popup = reservedPopup.window;
+        if (!popup) return;
         const channel = new BroadcastChannel(
           callbackChannelName(type === 'oidc' ? authorizationUrl : callbackUri, popup.name)
         );
@@ -130,24 +144,57 @@ export class RedirectController {
           this.authChannels.delete(channel);
         };
         navigationStarted = true;
-        popup.location.replace(authorizationUrl);
+        await reservedPopup.navigate(authorizationUrl, callbackUri);
       }
     } catch (value) {
+      navigationStarted = false;
       logAuthenticationFailure(`${type}_${intent}_start`, value);
       this.setError(intent, value);
     } finally {
-      if (this.popup && !navigationStarted) {
-        this.popup.close();
+      if (!navigationStarted) {
+        void reservedPopup.close();
         this.popup = null;
       }
       this.isLaunching = false;
     }
   }
 
+  private async launchInSystemBrowser(
+    type: RedirectType,
+    id: string | undefined,
+    intent: RedirectIntent
+  ): Promise<void> {
+    const flows = await this.options.validateHomeserver();
+    if (!flows) {
+      this.setError(intent, this.options.getValidationError() ?? t('errors.homeserverNotFound'));
+      return;
+    }
+    const callbackUri = createRedirectUri(type, await startAuthLoopback(), crypto.randomUUID());
+    const authorizationUrl = await this.startLogin(type, id, intent, callbackUri);
+    this.systemBrowserUrl = authorizationUrl;
+    await openSystemAuthUrl(authorizationUrl);
+  }
+
+  private startLogin(
+    type: RedirectType,
+    id: string | undefined,
+    intent: RedirectIntent,
+    callbackUri: string
+  ): Promise<string> {
+    const homeserver = this.options.getHomeserver().trim();
+    const reauthAccountId = intent === 'login' ? this.options.getReauthAccountId?.() : undefined;
+    return type === 'oidc'
+      ? this.options.core.startOidcLogin(homeserver, callbackUri, intent, reauthAccountId)
+      : this.options.core.startSsoLogin(homeserver, callbackUri, id, intent, reauthAccountId);
+  }
+
   async complete(callbackUrl: string): Promise<void> {
     if (this.isCompleting) return;
     const type = redirectLoginType(callbackUrl);
     if (!type) return;
+    this.systemBrowserUrl = null;
+    void this.popup?.close();
+    this.popup = null;
     this.isCompleting = true;
     this.pendingOnboardingTransition = this.pendingIntent === 'register';
     this.loginError = null;
@@ -182,7 +229,7 @@ export class RedirectController {
       this.registrationError = registrationError(value);
       return;
     }
-    this.popup = deliversDeepLinks()
+    this.fallbackPopup = deliversDeepLinks()
       ? null
       : window.open(
           fallback.fallback_url,
@@ -195,22 +242,36 @@ export class RedirectController {
       });
       return;
     }
-    if (!this.popup) {
+    if (!this.fallbackPopup) {
       this.registrationError = t('auth.allowPopups');
       return;
     }
 
-    const popup = this.popup;
+    const popup = this.fallbackPopup;
     const listener = (event: MessageEvent<unknown>) => {
       if (event.origin !== expectedOrigin || event.source !== popup || event.data !== 'authDone')
         return;
       this.removeFallbackListener?.();
       this.removeFallbackListener = null;
       popup.close();
-      this.popup = null;
+      this.fallbackPopup = null;
       onComplete();
     };
     this.removeFallbackListener = on(window, 'message', listener);
+  }
+
+  async openInBrowser(): Promise<void> {
+    const url = this.systemBrowserUrl;
+    if (!url || this.isOpeningSystemBrowser || this.isCompleting) return;
+    this.isOpeningSystemBrowser = true;
+    try {
+      await openSystemAuthUrl(url);
+    } catch (value) {
+      logAuthenticationFailure('system_browser_open', value);
+      this.setError(this.pendingIntent, value);
+    } finally {
+      this.isOpeningSystemBrowser = false;
+    }
   }
 
   markCallbackWindow(): void {
@@ -218,10 +279,14 @@ export class RedirectController {
   }
 
   cleanup(): void {
+    if (isDesktopAuthClient()) void closeAuthLoopback();
+    this.systemBrowserUrl = null;
     for (const channel of this.authChannels) channel.close();
     this.authChannels.clear();
-    this.popup?.close();
+    void this.popup?.close();
     this.popup = null;
+    this.fallbackPopup?.close();
+    this.fallbackPopup = null;
     this.removeFallbackListener?.();
     this.removeFallbackListener = null;
   }
@@ -232,7 +297,7 @@ export class RedirectController {
 
   private redirectUri(type: RedirectType): string {
     const baseUrl = deliversDeepLinks()
-      ? tauriRedirectUri(type)
+      ? nativeRedirectUri(type)
       : new SvelteURL(window.location.pathname, window.location.origin).toString();
     return createRedirectUri(type, baseUrl, crypto.randomUUID());
   }

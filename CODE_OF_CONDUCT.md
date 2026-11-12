@@ -25,10 +25,11 @@ The following are not allowed:
 - **Do not make threats, encourage violence or self-harm, or doxx anyone.** Doxxing includes
   sharing or threatening to share someone's private information.
 - **Do not post explicit sexual content.** This includes graphic NSFW media, pornography,
-  and explicit sexual comments or jokes.
+  and explicit sexual comments or jokes. 
 - **Do not abuse the shared spaces.** This includes impersonation, scams, malicious links or
   files, spam, flooding, ban evasion, or retaliation against someone for making
   a report or setting a boundary.
+- **Do not brigade other communities** This includes posting links to negative discussion about any matrix project, even if you are not attempting to brigade people will use it as an excuse to brigade.
 
 Context and patterns matter. Being blunt, disagreeing about politics or project
 direction, or criticizing a maintainer is not automatically a violation. These
@@ -37,8 +38,9 @@ apply.
 
 ## Where this applies
 
-These rules apply to Sable's official GitHub repositories and Matrix space and
-rooms.
+These rules apply to Sable's official GitHub repositories, Matrix space and rooms as well as profiles within those spaces.
+Public profiles as well as per space/room profiles will be moderated as both are visible and we can not reliably work with potential
+state mismatches. 
 
 We do not police people's unrelated private lives. We may act on credible
 threats, doxxing, or targeted harassment outside these spaces when it is

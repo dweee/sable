@@ -59,8 +59,7 @@ const root = withRowFields({
     kind: 'message',
     body: 'Topic body',
     html: '<strong>Topic</strong> body',
-    emote: false,
-    notice: false,
+    msgtype: 'text',
     edited: false,
     jumbo: null,
   },
@@ -77,6 +76,7 @@ const root = withRowFields({
   mention: 'none',
   forwarded: null,
   forum_title: null,
+  shield: null,
 });
 
 const thread: ForumThread = {

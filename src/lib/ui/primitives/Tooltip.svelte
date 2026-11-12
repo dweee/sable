@@ -3,19 +3,21 @@
   import type { ClassValue } from 'svelte/elements';
   import type { Snippet } from 'svelte';
 
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
+
+  import { tooltipHost, type TooltipPayload } from './TooltipHost.svelte';
   import TooltipProvider, { tooltipProvided } from './TooltipProvider.svelte';
   import './tooltip.css';
 
   export type TooltipVariant = 'icon' | 'inline';
-  type TooltipSide = 'top' | 'right' | 'bottom' | 'left';
   type TriggerSnippet = Snippet<[{ props: Record<string, unknown> }]>;
 
   interface Props {
-    label: string;
+    label?: string;
     multiline?: boolean;
     variant?: TooltipVariant;
-    side?: TooltipSide;
-    align?: 'start' | 'center' | 'end';
+    side?: TooltipPayload['side'];
+    align?: TooltipPayload['align'];
     class?: ClassValue;
     customAnchor?: HTMLElement | null;
     open?: boolean;
@@ -26,7 +28,7 @@
   }
 
   let {
-    label,
+    label = '',
     multiline = false,
     variant = 'icon',
     side = 'top',
@@ -41,6 +43,7 @@
   }: Props = $props();
 
   const provided = tooltipProvided();
+  const host = tooltipHost();
 </script>
 
 {#snippet defaultTrigger({ props }: { props: Record<string, unknown> })}
@@ -48,7 +51,7 @@
     {...props}
     class={['tooltip-trigger', `tooltip-trigger-${variant}`, className]}
     type="button"
-    aria-label={variant === 'icon' ? label : undefined}
+    aria-label={variant === 'icon' ? label || undefined : undefined}
   >
     {@render children?.()}
   </button>
@@ -65,6 +68,7 @@
         {side}
         {align}
         sideOffset={8}
+        collisionPadding={collisionPadding()}
         {customAnchor}
       >
         {#if content}{@render content()}{:else}{label}{/if}
@@ -73,7 +77,18 @@
   </BitsTooltip.Root>
 {/snippet}
 
-{#if provided}
+{#if host && open === undefined && customAnchor === undefined}
+  <!-- A tethered trigger's `disabled` disables the element itself, not only its tooltip. -->
+  {#if disabled}
+    {@render (trigger ?? defaultTrigger)({ props: {} })}
+  {:else}
+    <BitsTooltip.Trigger
+      tether={host}
+      payload={{ label, multiline, side, align, content }}
+      child={trigger ?? defaultTrigger}
+    />
+  {/if}
+{:else if provided}
   {@render tooltip()}
 {:else}
   <TooltipProvider>{@render tooltip()}</TooltipProvider>

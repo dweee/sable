@@ -1,0 +1,17 @@
+extends: file:./electron-builder.yml
+appId: moe.sable.next
+productName: Sable v2
+extraMetadata:
+  desktopName: moe.sable.next.desktop
+  autoUpdate: false
+protocols:
+  - name: Sable v2
+    schemes:
+      - moe.sable.next
+      - matrix
+linux:
+  executableName: sable-next
+deb:
+  packageName: sable-next
+rpm:
+  packageName: sable-next

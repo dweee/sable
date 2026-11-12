@@ -9,27 +9,53 @@ test.use({
   contextOptions: { reducedMotion: 'no-preference' },
 });
 
-function pageOffsets(page: Page): Promise<number[]> {
+function pageOffsets(page: Page, throughRelease = false): Promise<number[]> {
   return page.evaluate(
-    () =>
+    (throughRelease) =>
       new Promise<number[]>((resolve) => {
         const offsets: number[] = [];
         const initial = document.querySelector('.settings-content');
+        const initialOffset = initial
+          ? new DOMMatrix(getComputedStyle(initial).transform).m41
+          : undefined;
         let started: number | undefined;
+        let released: number | undefined;
+        if (throughRelease) {
+          document.addEventListener(
+            'touchend',
+            () => {
+              released = performance.now();
+            },
+            { once: true, capture: true }
+          );
+        }
         const deadline = performance.now() + 5000;
         const sample = () => {
           const section = document.querySelector('.settings-content');
-          if (initial || section) started ??= performance.now();
+          const offset = section ? new DOMMatrix(getComputedStyle(section).transform).m41 : NaN;
+          if (
+            section &&
+            (throughRelease || initialOffset === undefined || offset !== initialOffset)
+          ) {
+            started ??= performance.now();
+          }
           if (started !== undefined) {
-            offsets.push(section ? new DOMMatrix(getComputedStyle(section).transform).m41 : NaN);
+            offsets.push(offset);
           }
           const now = performance.now();
-          if (now < deadline && (started === undefined || now - started < 600)) {
+          if (
+            now < deadline &&
+            (started === undefined ||
+              (throughRelease
+                ? released === undefined || now - released < 600
+                : now - started < 600))
+          ) {
             requestAnimationFrame(sample);
           } else resolve(offsets);
         };
         requestAnimationFrame(sample);
-      })
+      }),
+    throughRelease
   );
 }
 
@@ -65,6 +91,7 @@ test('mobile: a settings section slides in over the list and the back arrow slid
   await installRoomCore('ready');
   await page.goto('/settings');
   await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
+  await expect(page.locator('.settings-content')).toHaveCount(0);
   await settled(page);
   const width = page.viewportSize()?.width ?? 0;
 
@@ -92,7 +119,7 @@ test('mobile: a released swipe slides the section off instead of dropping it', a
   await settled(page);
   const width = page.viewportSize()?.width ?? 0;
 
-  const sampling = pageOffsets(page);
+  const sampling = pageOffsets(page, true);
   await swipeRight(page, 40, 300);
   const offsets = await sampling;
   expect(offsets.some((offset) => offset > 300 && offset < width - 1)).toBe(true);
