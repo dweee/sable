@@ -49,11 +49,37 @@ export function gitEnvironment(source, mirror, inheritedCount = '0') {
   };
 }
 
+// Xcode drops Git config variables, and Tauri constructs metadata before
+// restoring CARGO_* options. Project source replacement survives both boundaries
+// and keeps Cargo.lock's canonical source identity and exact revision intact.
+export function persistCargoConfig(configPath, source, mirror) {
+  const existing = readFileSync(configPath, 'utf8');
+  assert(
+    !/^\s*\[source(?:\.|\])/m.test(existing),
+    'Refusing to replace existing Cargo source configuration',
+  );
+  assert.match(source.revision, /^[0-9a-f]{40}$/);
+  appendFileSync(configPath, `
+# Job-local exact SDK mirror for Xcode child processes.
+[source.sable-locked-sdk]
+git = ${JSON.stringify(source.url)}
+rev = "${source.revision}"
+replace-with = "sable-job-sdk"
+
+[source.sable-job-sdk]
+git = ${JSON.stringify(pathToFileURL(resolve(mirror)).href)}
+rev = "${source.revision}"
+`);
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   assert(process.env.GITHUB_ENV, 'This setup helper requires a job-local GITHUB_ENV');
   const source = lockedSdk(readFileSync('Cargo.lock', 'utf8'));
   const mirror = prepareMirror(source, process.env.RUNNER_TEMP ?? tmpdir());
   const environment = gitEnvironment(source, mirror, process.env.GIT_CONFIG_COUNT ?? '0');
+  if (process.argv.includes('--persist-cargo-config')) {
+    persistCargoConfig('.cargo/config.toml', source, mirror);
+  }
   for (const [key, value] of Object.entries(environment)) {
     assert(!/[\r\n]/.test(value), 'Git environment values must be single-line');
     appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);

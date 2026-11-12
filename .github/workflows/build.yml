@@ -231,7 +231,10 @@ jobs:
         with:
           rust: 'true'
           rust-cache-key: ios-xcode-26.3
+          persist-cargo-sdk-config: 'true'
           install-mise-tools: 'false'
+      - name: Verify Cargo resolution across the sanitized Xcode boundary
+        run: node --test scripts/ci/prepare-cargo-sdk.test.mjs
       - name: Provision iOS project
         run: |
           # Tauri's mobile tooling also consults the system xcode-select path.
