@@ -19,6 +19,8 @@ concurrency:
 env:
   CARGO_INCREMENTAL: '0'
   CARGO_TERM_COLOR: always
+  # The pinned SDK revision is reachable through Git CLI; libgit2 fetch fails.
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   # Keep the v2 identity. Never invoke prepare-v1-release.mjs in this fork.
   SABLE_BUILD_FLAVOR: fork
   SABLE_DISABLE_UPDATER: '1'
