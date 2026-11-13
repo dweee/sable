@@ -1,11 +1,21 @@
 {
-  "version": "2.3.6-nightly.261106110551.g56c49a09c966",
-  "tag": "nightly-2.3.6-nightly.261106110551.g56c49a09c966",
+  "version": "2.3.8",
+  "tag": "v2.3.8-flakey.20261113.d06e560",
+  "sourceRevision": "d06e560bf732efaaa973e8e9832e94c4e446f4cc",
+  "identifier": "moe.sable.next",
+  "releaseUrl": "https://github.com/dweee/sable/releases/tag/v2.3.8-flakey.20261113.d06e560",
+  "checksumsUrl": "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/SHA256SUMS",
   "sources": {
-    "linux-amd64.deb": {
-      "hash": "sha512-FX0qqj6m6HNB1xkx0OUAyJCw8GQxAsHAghYOb8sPeZHRFjPGObagOoc358W3HWTaUY6KDJjotWz09vys9xBuIA==",
+    "linux-x86_64.deb": {
+      "hash": "sha256-L3U4I0esSgbQmwVQPA0zj0jjXjOPujjy/qCArEIMAO8=",
       "urls": [
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.3.6-nightly.261106110551.g56c49a09c966/sable-2.3.6-nightly.261106110551.g56c49a09c966-amd64.deb"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-2.3.8-amd64.deb"
+      ]
+    },
+    "linux-aarch64.deb": {
+      "hash": "sha256-hOwA6xZGU+UxrPMYraadVYaeGlShXby2C7icFtp42so=",
+      "urls": [
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-2.3.8-arm64.deb"
       ]
     }
   }
