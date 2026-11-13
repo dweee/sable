@@ -14,6 +14,10 @@ inputs:
     description: rust-cache's shared-key.
     required: false
     default: 'wasm'
+  persist-cargo-sdk-config:
+    description: Persist job-local Cargo Git settings through Xcode build phases.
+    required: false
+    default: 'false'
   install-mise-tools:
     description: Whether to install tools declared in .mise/config.toml.
     required: false
@@ -64,6 +68,16 @@ runs:
       with:
         toolchain: 1.99.1
         targets: wasm32-unknown-unknown
+
+    - name: Prepare locked SDK Git source
+      if: ${{ inputs.rust == 'true' || (inputs.build == 'true' && steps.wasm.outputs.cache-hit != 'true') }}
+      shell: bash
+      env:
+        PERSIST_CARGO_SDK_CONFIG: ${{ inputs.persist-cargo-sdk-config }}
+      run: |
+        args=()
+        if [[ "$PERSIST_CARGO_SDK_CONFIG" == true ]]; then args+=(--persist-cargo-config); fi
+        node scripts/ci/prepare-cargo-sdk.mjs "${args[@]}"
 
     - name: Cache Rust artifacts
       if: ${{ inputs.rust == 'true' || (inputs.build == 'true' && steps.wasm.outputs.cache-hit != 'true') }}
