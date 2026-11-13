@@ -276,41 +276,36 @@ nix build git+https://git.monke.fail/d/sable.git#sable-web
 
 `packages` and `checks` cover `x86_64-linux`, `aarch64-linux`,
 `x86_64-darwin`, and `aarch64-darwin`. `sable` is the native desktop package;
-macOS uses the universal application. Intel macOS uses a separate 26.05
-nixpkgs pin because current unstable no longer supports that platform. `sable-web` is the static website and
+macOS selects a native Intel or Apple Silicon archive. Intel macOS uses a
+separate 26.05 nixpkgs pin because current unstable no longer supports that platform. `sable-web` is the static website and
 accepts a `conf` override merged into its existing `config.json`.
 `sable-windows` is an MSI download, `sable-android` is a universal APK,
 `sable-android-aab` is the Android App Bundle, and `sable-ios` is an IPA.
 These downloads can be realized on every Nix host; mobile and Windows artifacts
 are not executable Nix applications.
 
-The initial Nix packages repackage the complete, immutable upstream nightly
-recorded with hashes in `nix/sources.json` and archived in this fork
-at the `bootstrap-v2-20261015` releases in Forgejo and GitHub. GitHub's CDN
-is the primary download, with the Forgejo archive and upstream as fallbacks. This deliberately retains the
-separate `moe.sable.next.nightly` identity: upstream **stable** v2 packages
-reuse legacy's `moe.sable.client` identity for an in-place migration. Do not
-replace this pin with a stable build while preserving a legacy installation.
-The fork's source CI keeps `moe.sable.next`, never runs
-`prepare-v1-release.mjs`, and publishes a new release only after every source
-platform build succeeds. Nix package CI builds the pinned packages independently
-on all four Nix systems. Pinning source-built fork artifacts is a separate
-update to `nix/sources.json`, after verifying their identity and checksums.
+The active manifests `nix/sources.json` and `nix/sources-electron.json` pin
+source-built fork prerelease `v2.3.8-flakey.20261113.d06e560` at source commit
+`d06e560bf732efaaa973e8e9832e94c4e446f4cc`. Their SHA256 hashes are verified
+against the published assets and `SHA256SUMS`. Linux uses Electron `.deb`
+packages on both x86_64 and aarch64; macOS uses separate x86_64 and aarch64
+Electron `.zip` archives. There is no universal macOS asset in this release.
+Web, Windows and unsigned mobile downloads use the same exact source release.
+Android APKs/AAB and iOS IPA are unsigned source artifacts: re-sign before
+installing. The download derivations do not install or activate them.
 
-Upstream dropped the Tauri desktop shell for Electron (Linux desktop is
-Electron-only from v2.1.0). On `x86_64-linux`, `sable` repackages the
-upstream Electron **nightly** `.deb` pinned in `nix/sources-electron.json`.
-The pinned sha512 is the one published in that nightly's `nightly-linux.yml`;
-nightlies often ship without `SHA256SUMS` or without a tarball listed there.
-The `.deb`'s `package-type` marker is removed so the app never tries to
-update itself with `pkexec dpkg`. Electron nightlies keep the
-`moe.sable.next.nightly` identity and data directory, so the identity rule above
-still holds. `aarch64-linux` stays on the Tauri/CEF build (`nix/linux-tauri.nix`)
-because no arm64 Electron nightly with a verifiable checksum and the call key
-fixes has been pinned yet.
-macOS, web, and the mobile and Windows downloads keep the `nix/sources.json` pin.
-The Electron package is fetched from upstream only and is not archived in this
-fork yet.
+The fork retains `moe.sable.next`, separate from legacy `moe.sable.client`.
+Desktop launchers disable the in-app updater, and the Linux package-type marker
+is removed so updates remain managed by Nix. These packages do not rename or
+migrate a legacy installation or its user data. The earlier bootstrap Tauri
+nightly and upstream Electron nightly manifests remain verbatim under
+`nix/archive/`, including their original URLs and hashes. `linux-tauri.nix`
+retains the bootstrap recipe for reference; it is not an active package route.
+
+The fork never runs `prepare-v1-release.mjs` and publishes only after every
+source platform build succeeds. Source release artifacts are produced by native
+CI; the Nix recipes repackage those verified binaries and are not sandboxed
+source builds. Nix package CI checks the pinned packages on all four systems.
 
 Flake modules:
 
@@ -354,7 +349,7 @@ Android's SDK license must be accepted; the Android shell explicitly accepts
 it through Nix's `android_sdk.accept_license` setting. Native builds download
 Cargo/pnpm dependencies and platform frameworks; these development commands
 are not claimed to be sandboxed source derivations. The Nix desktop packages
-are explicitly marked as upstream binary code.
+are explicitly marked as binary code.
 
 For Android in the shell, use `pnpm tauri android build` with the checked-in
 project and SDK; the upstream `pnpm android:build` convenience script manages
@@ -373,10 +368,9 @@ the development shells. `.github/workflows/build.yml` compiles the current
 source for web/WASM, native Electron desktop on Linux x86_64/aarch64 and macOS
 Intel/Apple Silicon, Windows x86_64 (MSI/NSIS), Android (arm64/armv7 FOSS APKs and universal APK/AAB), and
 iOS arm64. Every build produces artifacts. macOS source delivery now retains one archive per
-native architecture rather than claiming a universal Tauri bundle. This does not
-change the existing universal binary pin; selecting newly built artifacts for Nix
-requires a separate verified manifest/recipe update. Create `v*` release tags in Forgejo;
-the push mirror carries them to GitHub, where the complete set is published
+native architecture rather than claiming a universal Tauri bundle. The active Nix
+recipes and manifests select the matching native archive. Create `v*` release
+tags in Forgejo; the push mirror carries them to GitHub, where the complete set is published
 with SHA256SUMS after all platform builds succeed. Main pushes build artifacts
 without creating releases. The release job verifies that the tag exists at
 the built commit in canonical Forgejo, so a later mirror cannot prune a

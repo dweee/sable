@@ -43,7 +43,7 @@
   inherit (release) version;
 
   # Use an immutable, complete nightly: stable upgrades the legacy app in place.
-  release = builtins.fromJSON (builtins.readFile ./sources.json);
+  release = builtins.fromJSON (builtins.readFile ./archive/sources-bootstrap-v2-20261015.json);
   arch =
     if stdenv.hostPlatform.isAarch64
     then "aarch64"

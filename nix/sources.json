@@ -1,72 +1,57 @@
 {
-  "version": "2.0.3-nightly.261015175835.07839ca83887",
-  "tag": "nightly-2.0.3-nightly.261015175835.07839ca83887",
+  "version": "2.3.8",
+  "tag": "v2.3.8-flakey.20261113.d06e560",
+  "sourceRevision": "d06e560bf732efaaa973e8e9832e94c4e446f4cc",
+  "identifier": "moe.sable.next",
+  "releaseUrl": "https://github.com/dweee/sable/releases/tag/v2.3.8-flakey.20261113.d06e560",
+  "checksumsUrl": "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/SHA256SUMS",
+  "unsignedArtifacts": [
+    "android-universal.apk",
+    "android-universal.aab",
+    "ios-arm64.ipa"
+  ],
   "sources": {
-    "linux-x86_64.tar.gz": {
-      "hash": "sha256-SR8o98fU/6QGq8n1LPcEyI9RbIxW9fQFOxNbA5PdCPY=",
+    "macos-x86_64.zip": {
+      "hash": "sha256-dxwTZPdloIzwWbB8I0wffi1v6sRubV83HSNWXE6LttI=",
       "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-linux-x86_64.tar.gz",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-linux-x86_64.tar.gz",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-2.0.3-nightly.261015175835.07839ca83887-linux-x86_64.tar.gz"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-2.3.8-x64.zip"
       ]
     },
-    "linux-aarch64.tar.gz": {
-      "hash": "sha256-gTH0OpYUKEarGA/Pj/4O324jA0INnHMUozxN0dzbsQ4=",
+    "macos-aarch64.zip": {
+      "hash": "sha256-/XOYnzTHCLsqycUofHAAU+BOMG21wOKF4sEBzPogjLE=",
       "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-linux-aarch64.tar.gz",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-linux-aarch64.tar.gz",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-2.0.3-nightly.261015175835.07839ca83887-linux-aarch64.tar.gz"
-      ]
-    },
-    "macos-universal.app.tar.gz": {
-      "hash": "sha256-kaJUk36XU6wD96umfKQEdlPuWFoij2iYQ931vvKMVIo=",
-      "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-macos-universal.app.tar.gz",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-macos-universal.app.tar.gz",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-2.0.3-nightly.261015175835.07839ca83887-macos-universal.app.tar.gz"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-2.3.8-arm64.zip"
       ]
     },
     "web.tar.gz": {
-      "hash": "sha256-RS2Nz+CeacVDFNoJtXai0NXpEgPtO8bH4pUKSwCnjio=",
+      "hash": "sha256-LxeVWpqOeeFIGCUhRiP9edEGH6otUszUnon8U9tGgX8=",
       "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-web.tar.gz",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-web.tar.gz",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-2.0.3-nightly.261015175835.07839ca83887-web.tar.gz"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-web.tar.gz"
       ]
     },
     "windows-x86_64.msi": {
-      "hash": "sha256-KXf170iRDgr/th7q6r1d92LrQA/6H+xzeofsq9myzSM=",
+      "hash": "sha256-xaV6oltI8CI62EPCfjBfEP9/iSqEdGlCYqE5wSvSMA8=",
       "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-windows-x86_64.msi",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-windows-x86_64.msi",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-windows-x86_64.msi"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-2.3.8-x64.msi"
       ]
     },
     "android-universal.apk": {
-      "hash": "sha256-i/46QgqMmMaEVEUuCDjOZz6py0dmXboegOJZiZOnnFU=",
+      "hash": "sha256-lbfDXSjNqZngIgiRM/CBZM7q9TLy9nitLjkTpUzkum4=",
       "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-android-universal.apk",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-android-universal.apk",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-2.0.3-nightly.261015175835.07839ca83887-android-universal.apk"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-android-universal-unsigned.apk"
       ]
     },
     "android-universal.aab": {
-      "hash": "sha256-0TYGdNKQQBqe8sK7L+Riat1hRjSDkK5cB7bJPY+rPlI=",
+      "hash": "sha256-P5Pwo3m0psy3SHDY035RaCK6qFFjn4C38usmZ/ez4hU=",
       "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-android-universal.aab",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-android-universal.aab",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-2.0.3-nightly.261015175835.07839ca83887-android-universal.aab"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-android-universal-unsigned.aab"
       ]
     },
     "ios-arm64.ipa": {
-      "hash": "sha256-KjoVVEOsLcV1xE214AdtHJw7Q7QtU2KfM/hHScnD9EU=",
+      "hash": "sha256-ikok6AiMWxhcMfbHCKfBpTzZpVi+kGDvjK/OhM8G4iY=",
       "urls": [
-        "https://github.com/dweee/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-ios-arm64.ipa",
-        "https://git.monke.fail/d/sable/releases/download/bootstrap-v2-20261015/2.0.3-nightly.261015175835.07839ca83887-ios-arm64.ipa",
-        "https://git.sable.moe/SableClient/sable-next/releases/download/nightly-2.0.3-nightly.261015175835.07839ca83887/sable-2.0.3-nightly.261015175835.07839ca83887-ios-arm64.ipa"
+        "https://github.com/dweee/sable/releases/download/v2.3.8-flakey.20261113.d06e560/sable-ios-arm64-unsigned.ipa"
       ]
     }
-  },
-  "upstreamTag": "nightly-2.0.3-nightly.261015175835.07839ca83887",
-  "archiveTag": "bootstrap-v2-20261015"
+  }
 }
