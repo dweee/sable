@@ -234,7 +234,9 @@ jobs:
           persist-cargo-sdk-config: 'true'
           install-mise-tools: 'false'
       - name: Verify Cargo resolution across the sanitized Xcode boundary
-        run: node --test scripts/ci/prepare-cargo-sdk.test.mjs
+        run: |
+          node --test scripts/ci/prepare-cargo-sdk.test.mjs
+          python3 scripts/ci/test-verify-ios-ipa.py
       - name: Provision iOS project
         run: |
           # Tauri's mobile tooling also consults the system xcode-select path.
@@ -245,18 +247,15 @@ jobs:
           system_sdk=$(env -u DEVELOPER_DIR xcrun --sdk iphoneos --show-sdk-version)
           test "${system_sdk%%.*}" -ge 26
           command -v pod >/dev/null || brew install cocoapods
-          pnpm tauri ios init --ci
+          pnpm tauri ios init --ci --config '{"identifier":"moe.sable.next"}'
           pnpm ios:frameworks
           rustup target add aarch64-apple-ios
       - name: Build unsigned IPA
         run: |
-          pnpm tauri ios build --config src-tauri/tauri.ci.conf.json --no-sign --ci
+          pnpm tauri ios build --config src-tauri/tauri.ci.conf.json --config '{"identifier":"moe.sable.next"}' --no-sign --ci
           ipa=$(find src-tauri/gen/apple/build -name '*.ipa' -type f -print -quit)
           test -n "$ipa"
-          unzip -q "$ipa" -d "$RUNNER_TEMP/fork-ios-identity"
-          plist=$(find "$RUNNER_TEMP/fork-ios-identity/Payload" -maxdepth 3 -name Info.plist -type f -print -quit)
-          test -n "$plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = moe.sable.next
+          python3 scripts/ci/verify-ios-ipa.py "$ipa" moe.sable.next
           mkdir -p artifacts
           cp "$ipa" artifacts/sable-ios-arm64-unsigned.ipa
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
