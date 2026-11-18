@@ -112,6 +112,7 @@ jobs:
       - test
     outputs:
       proof: ${{ steps.release.outputs.proof }}
+      retention: ${{ steps.release.outputs.retention }}
     if:
       ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule'
       && github.ref == 'main')) }}
@@ -156,8 +157,10 @@ jobs:
           nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
           accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
           --outputs niks3-bootstrap-outputs.txt
-      - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
+      - name: Build complete inventory, checkpoint closures, verify signed cache metadata, pin release
         id: release
+        env:
+          SOURCE_TOKEN: ${{ github.token }}
         run:
           nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
           python3 ci/release-channel.py build --system x86_64-linux
@@ -248,6 +251,7 @@ jobs:
       - test
     outputs:
       proof: ${{ steps.release.outputs.proof }}
+      retention: ${{ steps.release.outputs.retention }}
     if:
       ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule'
       && github.ref == 'main')) }}
@@ -281,8 +285,10 @@ jobs:
           nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
           accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
           --outputs niks3-bootstrap-outputs.txt
-      - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
+      - name: Build complete inventory, checkpoint closures, verify signed cache metadata, pin release
         id: release
+        env:
+          SOURCE_TOKEN: ${{ github.token }}
         run:
           nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
           python3 ci/release-channel.py build --system aarch64-linux
@@ -357,6 +363,7 @@ jobs:
       - test
     outputs:
       proof: ${{ steps.release.outputs.proof }}
+      retention: ${{ steps.release.outputs.retention }}
     if:
       ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule'
       && github.ref == 'main')) }}
@@ -392,8 +399,10 @@ jobs:
           nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
           accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
           --outputs niks3-bootstrap-outputs.txt
-      - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
+      - name: Build complete inventory, checkpoint closures, verify signed cache metadata, pin release
         id: release
+        env:
+          SOURCE_TOKEN: ${{ github.token }}
         run: |-
           "$NATIVE_BUILD_ADMISSION_COMMAND"
           nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py build --system aarch64-darwin
@@ -484,6 +493,7 @@ jobs:
       - test
     outputs:
       proof: ${{ steps.release.outputs.proof }}
+      retention: ${{ steps.release.outputs.retention }}
     if:
       ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || (github.event_name == 'schedule'
       && github.ref == 'main')) }}
@@ -519,8 +529,10 @@ jobs:
           nix shell --option max-jobs 0 --option builders "" --option allow-import-from-derivation false --option
           accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/push-niks3.py
           --outputs niks3-bootstrap-outputs.txt
-      - name: Build complete inventory, checkpoint closures, verify remote NAR bytes
+      - name: Build complete inventory, checkpoint closures, verify signed cache metadata, pin release
         id: release
+        env:
+          SOURCE_TOKEN: ${{ github.token }}
         run: |-
           "$NATIVE_BUILD_ADMISSION_COMMAND"
           nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c python3 ci/release-channel.py build --system x86_64-darwin
@@ -651,6 +663,7 @@ jobs:
       - name: Atomically publish immutable release tag and channel
         env:
           CHANNEL_TOKEN: ${{ secrets.CHANNEL_TOKEN || github.token }}
+          RELEASE_RETENTION: '{"x86_64-linux": "${{ needs.build_x86_64_linux.outputs.retention }}", "aarch64-linux": "${{ needs.build_aarch64_linux.outputs.retention }}", "aarch64-darwin": "${{ needs.build_aarch64_darwin.outputs.retention }}", "x86_64-darwin": "${{ needs.build_x86_64_darwin.outputs.retention }}"}'
           RELEASE_PROOFS:
             '{"x86_64-linux": "${{ needs.build_x86_64_linux.outputs.proof }}", "aarch64-linux": "${{
             needs.build_aarch64_linux.outputs.proof }}", "aarch64-darwin": "${{ needs.build_aarch64_darwin.outputs.proof
@@ -659,4 +672,4 @@ jobs:
           CHANNEL: ${{ inputs.channel || 'tested' }}
         run:
           nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-          python3 ci/release-channel.py promote --channel "$CHANNEL" --revision "$REVISION" --proofs "$RELEASE_PROOFS"
+          python3 ci/release-channel.py promote --channel "$CHANNEL" --revision "$REVISION" --proofs "$RELEASE_PROOFS" --retention "$RELEASE_RETENTION"
