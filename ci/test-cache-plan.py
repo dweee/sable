@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Credential-free behavior checks for the Attic output planner."""
+"""Credential-free behavior checks for the cache output planner."""
 import importlib.util
 import json
 import os
@@ -18,8 +18,7 @@ def load(name, filename):
     return module
 
 
-plan = load('attic_plan', 'attic-plan.py')
-push = load('push_attic', 'push-attic.py')
+plan = load('cache_plan', 'cache-plan.py')
 
 REVISION = 'a' * 40
 SABLE = '/nix/store/' + 'b' * 32 + '-sable-2.0.3'
@@ -50,7 +49,7 @@ class Nix:
         raise AssertionError(args)
 
 
-class AtticPlanTests(unittest.TestCase):
+class CachePlanTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -70,22 +69,6 @@ class AtticPlanTests(unittest.TestCase):
         self.assertEqual(json.loads((self.directory / 'manifest.json').read_text()), manifest)
         self.assertEqual((self.directory / 'outputs.txt').read_text().splitlines(), sorted([SABLE, WEB]))
 
-    def test_output_list_is_accepted_by_the_publisher(self):
-        self.run_plan(Nix())
-        seen = []
-        binary = self.directory / 'attic'
-        binary.write_text('#!/bin/sh\nexit 0\n')
-        binary.chmod(0o700)
-        env = {'ATTIC_ENDPOINT': 'https://attic.monke.fail', 'ATTIC_CACHE': 'flakey',
-               'ATTIC_TOKEN': 'dry-run-placeholder', 'ATTIC_BIN': str(binary), 'RUNNER_TEMP': str(self.directory)}
-
-        def record(args, **kwargs):
-            seen.append(kwargs['input'].splitlines())
-            return type('Done', (), {'returncode': 0, 'stdout': ''})()
-        with patch.dict(os.environ, env, clear=True), patch.object(push.subprocess, 'run', side_effect=record):
-            push.publish(self.directory / 'outputs.txt')
-        self.assertEqual(seen, [sorted([SABLE, WEB])] * 2)
-
     def test_dirty_tree_wrong_commit_and_wrong_runner_are_rejected(self):
         for nix in [Nix(dirty=' M flake.lock'), Nix(head='f' * 40), Nix(system='aarch64-linux')]:
             with self.subTest(nix=vars(nix)), self.assertRaises(plan.PlanError):
@@ -104,13 +87,6 @@ class AtticPlanTests(unittest.TestCase):
         for packages in ['', 'sable sable', 'sable;id', 'default', '../sable']:
             with self.subTest(packages=packages), self.assertRaises(plan.PlanError):
                 self.run_plan(Nix(), packages=packages)
-
-    def test_dry_run_stub_prints_only_paths_and_arguments(self):
-        import subprocess
-        result = subprocess.run([str(HERE / 'attic-dry-run.sh'), 'push', '--stdin', 'ci:flakey'],
-                                input=SABLE + '\n', text=True, capture_output=True, check=True)
-        self.assertEqual(result.stdout.splitlines(),
-                         ['dry run: attic push --stdin ci:flakey', '  would push: ' + SABLE])
 
 
 if __name__ == '__main__':

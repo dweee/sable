@@ -1,7 +1,7 @@
-name: Attic cache
-# Publishes the Sable outputs the fleet installs to the private flakey cache.
-# There is no pull_request trigger: the push credential only ever reaches a
-# default-branch push or a manual dispatch. See ci/ATTIC.md.
+name: Niks3 cache
+# Publishes the Sable outputs the fleet installs to the private Niks3 cache.
+# There is no pull_request trigger: the OIDC write grant only ever reaches a
+# default-branch push or a manual dispatch. See ci/CACHE.md.
 'on':
   push:
     branches: [main]
@@ -18,7 +18,7 @@ name: Attic cache
 permissions:
   contents: read
 concurrency:
-  group: attic-${{ github.ref }}
+  group: cache-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   check:
@@ -31,8 +31,8 @@ jobs:
           persist-credentials: false
       - name: Run the credential-free publisher tests
         run: |
-          python3 ci/test-push-attic.py
-          python3 ci/test-attic-plan.py
+          python3 ci/test-push-niks3.py
+          python3 ci/test-cache-plan.py
   publish:
     permissions:
       contents: read
@@ -53,9 +53,7 @@ jobs:
           - { system: aarch64-darwin, runner: macos-15 }
     env:
       # Upload only after the owner enables it, and never from a dry-run dispatch.
-      PUBLISH: ${{ vars.ATTIC_PUSH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)) }}
-      ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT || 'https://attic.monke.fail' }}
-      ATTIC_CACHE: ${{ vars.ATTIC_CACHE || 'flakey' }}
+      PUBLISH: ${{ vars.NIKS3_PUSH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)) }}
       PACKAGES: ${{ inputs.packages || 'sable sable-web' }}
       SYSTEM: ${{ matrix.system }}
     steps:
@@ -68,37 +66,15 @@ jobs:
           extra_nix_config: |
             accept-flake-config = false
       - name: Build the fleet outputs from the committed flake.lock
-        run: python3 ci/attic-plan.py --system "$SYSTEM" --packages "$PACKAGES" --directory "$RUNNER_TEMP/attic"
+        run: python3 ci/cache-plan.py --system "$SYSTEM" --packages "$PACKAGES" --directory "$RUNNER_TEMP/cache"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: attic-manifest-${{ matrix.system }}
-          path: ${{ runner.temp }}/attic/manifest.json
+          name: cache-manifest-${{ matrix.system }}
+          path: ${{ runner.temp }}/cache/manifest.json
           retention-days: 30
           if-no-files-found: error
-      - name: Dry run the publisher
-        if: ${{ env.PUBLISH != 'true' }}
-        env:
-          ATTIC_BIN: ${{ github.workspace }}/ci/attic-dry-run.sh
-          ATTIC_TOKEN: dry-run-placeholder
-        run: python3 ci/push-attic.py --outputs "$RUNNER_TEMP/attic/outputs.txt"
-      - name: Install the Attic client pinned by flake.lock
-        id: attic
-        if: ${{ env.PUBLISH == 'true' }}
-        run: |
-          set -euo pipefail
-          client=$(nix build --inputs-from . 'nixpkgs#attic-client' --no-update-lock-file --no-write-lock-file --out-link "${RUNNER_TEMP:-/tmp}/attic-client" --print-out-paths)
-          test -x "$client/bin/attic"
-          echo "binary=$client/bin/attic" >> "$GITHUB_OUTPUT"
       - name: Install pinned Niks3 publisher
         run: bash ci/install-niks3.sh
-      - name: Publish to Attic
-        if: ${{ env.PUBLISH == 'true' }}
-        env:
-          ATTIC_BIN: ${{ steps.attic.outputs.binary }}
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-        run: |
-          test -n "$ATTIC_TOKEN" || { echo '::error::The ATTIC_TOKEN secret is not set'; exit 1; }
-          python3 ci/push-attic.py --outputs "$RUNNER_TEMP/attic/outputs.txt"
       - name: Publish to Niks3 with GitHub OIDC and verify S3 integrity
         if: ${{ env.PUBLISH == 'true' }}
-        run: python3 ci/push-niks3.py --outputs "$RUNNER_TEMP/attic/outputs.txt"
+        run: python3 ci/push-niks3.py --outputs "$RUNNER_TEMP/cache/outputs.txt"
