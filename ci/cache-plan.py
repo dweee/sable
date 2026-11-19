@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build the Sable outputs the fleet installs and describe them for Attic.
+"""Build the Sable outputs the fleet installs and describe them for the cache.
 
-Writes outputs.txt (the manifest for ci/push-attic.py) and manifest.json (the
+Writes outputs.txt (the manifest for ci/push-niks3.py) and manifest.json (the
 revision, flake.lock digest, pinned nixpkgs and exact store paths) into the
 chosen directory. It never reads or needs a credential.
 """
@@ -154,7 +154,7 @@ def main():
     try:
         manifest = plan(args.system, args.packages, args.directory)
     except (PlanError, OSError, KeyError, ValueError) as error:
-        print('Attic plan failed: ' + str(error), file=sys.stderr)
+        print('Cache plan failed: ' + str(error), file=sys.stderr)
         return 1
     print('Built ' + str(len(manifest['paths'])) + ' output path(s) for ' + args.system)
     return 0

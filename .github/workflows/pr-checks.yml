@@ -12,5 +12,4 @@ jobs:
           persist-credentials: false
       - name: Credential-free publisher regression tests
         run: |
-          python3 ci/test-push-attic.py
           python3 ci/test-push-niks3.py
