@@ -1,5 +1,8 @@
 {
+  "base": "main",
   "upstream": "https://git.sable.moe/SableClient/Sable-next.git",
   "branch": "main",
-  "required_status": "PR automation checks / test (pull_request)"
+  "required_workflows": [
+    "pr-checks.yml"
+  ]
 }
