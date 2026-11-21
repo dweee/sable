@@ -1,0 +1,32 @@
+name: Sync upstream
+'on':
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  sync:
+    if: ${{ github.server_url == 'https://git.monke.fail' && vars.FORK_CI_ENABLED == 'true' && github.repository == 'd/sable' && (github.ref == 'main' || github.ref == 'refs/heads/main') }}
+    runs-on: nix-light
+    container:
+      image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+    env:
+      TOKEN: ${{ secrets.UPDATE_TOKEN || github.token }}
+      API_URL: ${{ github.api_url }}
+      AUTO: ${{ vars.FORK_CI_AUTO_MERGE }}
+    steps:
+      - name: Prepare candidate or merge checked pull request
+        run: |
+          set -eu
+          test -n "$TOKEN"
+          git init -q .
+          git remote add origin https://git.monke.fail/d/sable.git
+          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          git config http.https://git.monke.fail/.extraheader "Authorization: Basic $basic"
+          trap 'git config --unset-all http.https://git.monke.fail/.extraheader' EXIT
+          git fetch --no-tags origin main
+          git checkout -q --detach FETCH_HEAD
+          # Use tools and policy from the trusted base throughout this invocation.
+          nix --extra-experimental-features 'nix-command flakes' shell github:NixOS/nixpkgs/1d060086d60cb76a40cf37109f979d88a5bd6396#python3 -c python3 -B ci/sync-upstream.py
