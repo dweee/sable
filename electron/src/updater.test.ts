@@ -1,7 +1,3 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -11,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     getAppPath: (): string => 'electron',
   },
   autoUpdate: undefined as boolean | undefined,
+  packageType: undefined as string | undefined,
   downloadUpdate: vi.fn(),
   quitAndInstall: vi.fn(),
   setFeedURL: vi.fn(),
@@ -19,7 +16,13 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('node:fs', () => ({
-  readFileSync: () => JSON.stringify({ autoUpdate: mocks.autoUpdate }),
+  readFileSync: (path: string) => {
+    if (path.endsWith('package-type')) {
+      if (mocks.packageType === undefined) throw new Error('No package-type marker');
+      return mocks.packageType;
+    }
+    return JSON.stringify({ autoUpdate: mocks.autoUpdate });
+  },
 }));
 
 vi.mock('electron', () => ({ app: mocks.app, ipcMain: { handle: mocks.handle } }));
@@ -44,6 +47,7 @@ beforeEach(() => {
   vi.stubEnv('APPIMAGE', '');
   vi.stubEnv('SABLE_DISABLE_UPDATER', undefined);
   mocks.autoUpdate = undefined;
+  mocks.packageType = undefined;
   mocks.app.isPackaged = true;
   mocks.app.getVersion = () => '2.0.0';
   mocks.app.getAppPath = () => 'electron';
@@ -150,20 +154,24 @@ test('self-updating builds leave the latest version to the updater', async () =>
   expect(fetch).not.toHaveBeenCalled();
 });
 
-test('an rpm or deb install reports the latest release instead of installing it', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(() => Promise.resolve(new Response('version: 2.4.0\nfiles: []\n')))
-  );
-  registerUpdater(() => true);
-  const check = mocks.handle.mock.calls.find(([channel]) => channel === 'sable-update-check');
-  const latest = mocks.handle.mock.calls.find(
-    ([channel]) => channel === 'sable-update-latest-version'
-  );
-  expect(await check?.[1]({ senderFrame: {} })).toBeNull();
-  expect(mocks.checkForUpdates).not.toHaveBeenCalled();
-  expect(await latest?.[1]({ senderFrame: {} })).toBe('2.4.0');
-});
+test.each(['rpm', 'deb'])(
+  'a %s install reports the latest release without installing it',
+  async (type) => {
+    mocks.packageType = type;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(new Response('version: 2.4.0\nfiles: []\n')))
+    );
+    registerUpdater(() => true);
+    const check = mocks.handle.mock.calls.find(([channel]) => channel === 'sable-update-check');
+    const latest = mocks.handle.mock.calls.find(
+      ([channel]) => channel === 'sable-update-latest-version'
+    );
+    expect(await check?.[1]({ senderFrame: {} })).toBeNull();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    expect(await latest?.[1]({ senderFrame: {} })).toBe('2.4.0');
+  }
+);
 
 test.each([
   { name: 'the launch environment', env: '1', metadata: undefined },
@@ -202,9 +210,7 @@ test.each([
 test.each(['gentoo', 'nix'])(
   'a %s install leaves update notices to its repository',
   async (type) => {
-    const resources = mkdtempSync(join(tmpdir(), 'sable-updater-'));
-    writeFileSync(join(resources, 'package-type'), `${type}\n`);
-    mocks.app.getAppPath = () => join(resources, 'app.asar');
+    mocks.packageType = type;
     const fetch = vi.fn(() => Promise.resolve(new Response('version: 2.4.0\nfiles: []\n')));
     vi.stubGlobal('fetch', fetch);
     registerUpdater(() => true);
