@@ -1,6 +1,5 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { afterOverlayPops } from '#lib/platform/overlay-back.svelte.js';
 
   import type { RoomListItemView } from '#src/generated/protocol';
   import { i18n } from '#lib/i18n.js';

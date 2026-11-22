@@ -344,7 +344,6 @@
     height: 100%;
   }
 
-  .collapsed > :global(*),
   .expanded > :global(*) {
     flex: 1 1 0;
     min-height: 0;
