@@ -2,7 +2,7 @@
 name: Input and manual version monitoring
 'on':
   schedule:
-    - cron: 15 1,7,13,19 * * *
+  - cron: 15 1,7,13,19 * * *
   workflow_dispatch: {}
 permissions:
   contents: write
@@ -25,6 +25,9 @@ jobs:
         connect-timeout = 20
         stalled-download-timeout = 120
         download-attempts = 5
+        extra-substituters = https://install.determinate.systems https://cache.lix.systems https://nix-community.cachix.org https://cache.nixos.org/ https://ai.cachix.org https://cache.numtide.com https://codex-desktop-linux.cachix.org https://nix-on-droid.cachix.org https://virby-nix-darwin.cachix.org https://cache.nixos-cuda.org https://cache.flox.dev
+        extra-trusted-public-keys = cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.nixos.org-1:CNHJZBh9K4tP3EKF6FkkgeVYsS3ohTl+oS0Qa8bezVs= cache.lix.systems:aBnZUw8zA7H35Cz2RyKFVs3H4PlGTLawyY5KRbvJR8o= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= ai.cachix.org-1:N9dzRK+alWwoKXQlnn0H6aUx0lU/mspIoz8hMvGvbbc= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= codex-desktop-linux.cachix.org-1:nX/xy6AdK9hQE24A8ALGjkCKj2ObFmcnemiL5Cid4nk= nix-on-droid.cachix.org-1:56snoMJTXmDRC1Ei24CmKoUqvHJ9XCp+nidK7qkMQrU= lantian:WVGO7vsRMSEN+h7Lp7kv6SAmrkEXgUGbbXm7jMDjBuQ= virby-nix-darwin.cachix.org-1:z9GiEZeBU5bEeoDQjyfHPMGPBaIQJOOvYOOjGMKIlLo= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M= flox-cache-public-1:7F4OyH7ZCnFhcze3fJdfyXYLQw/aV7GEed86nQ7IsOs= niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=
+        connect-timeout = 20
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
@@ -32,45 +35,43 @@ jobs:
       image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
     if: ${{ (github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main')) }}
     steps:
-      - name: Checkout exact source without a Node dependency
-        env:
-          TOKEN: ${{ github.token }}
-          SERVER: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -eu
-          auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
-          git init -q .
-          git remote add origin "$SERVER/$REPO.git"
-          git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
-          git checkout -q --detach FETCH_HEAD
-      - name: Start isolated Determinate daemon
-        run: |-
-          set -eu
-          nix --version | grep -F 'Determinate Nix 3.24.1'
-          env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
-          daemon=$!
-          for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 $daemon; sleep 1; done
-          test -S /nix/var/nix/daemon-socket/socket
-          test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
-          nix store info --store daemon --json
-          printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
-      - name: Monitor manual package/file pins
-        id: monitor
-        env:
-          GH_TOKEN: ${{ secrets.GH_READ_TOKEN }}
-          MONITOR_TOKEN: ${{ github.token }}
-        run:
-          nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-          python3 ci/update-monitor.py
-      - name: Maintain one version monitoring issue
-        if: ${{ always() }}
-        env:
-          AUTOMATION_TOKEN: ${{ secrets.UPDATE_TOKEN || github.token }}
-        run:
-          nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-          python3 ci/automation-forge.py report
+    - name: Checkout exact source without a Node dependency
+      env:
+        TOKEN: ${{ github.token }}
+        SERVER: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -eu
+        auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
+        git init -q .
+        git remote add origin "$SERVER/$REPO.git"
+        git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
+        git checkout -q --detach FETCH_HEAD
+    - name: Start isolated Determinate daemon
+      run: |-
+        set -eu
+        nix --version | grep -F 'Determinate Nix 3.24.1'
+        env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
+        daemon=$!
+        for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 $daemon; sleep 1; done
+        test -S /nix/var/nix/daemon-socket/socket
+        test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
+        nix store info --store daemon --json
+        printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
+    - name: Monitor manual package/file pins
+      id: monitor
+      env:
+        GH_TOKEN: ${{ secrets.GH_READ_TOKEN }}
+        MONITOR_TOKEN: ${{ github.token }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/update-monitor.py
+    - name: Maintain one version monitoring issue
+      if: ${{ always() }}
+      env:
+        AUTOMATION_TOKEN: ${{ secrets.UPDATE_TOKEN || github.token }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/automation-forge.py report
   inputs:
     runs-on: nix-light
     timeout-minutes: 120
@@ -84,6 +85,9 @@ jobs:
         connect-timeout = 20
         stalled-download-timeout = 120
         download-attempts = 5
+        extra-substituters = https://install.determinate.systems https://cache.lix.systems https://nix-community.cachix.org https://cache.nixos.org/ https://ai.cachix.org https://cache.numtide.com https://codex-desktop-linux.cachix.org https://nix-on-droid.cachix.org https://virby-nix-darwin.cachix.org https://cache.nixos-cuda.org https://cache.flox.dev
+        extra-trusted-public-keys = cache.flakehub.com-3:hJuILl5sVK4iKm86JzgdXW12Y2Hwd5G07qKtHTOcDCM= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.nixos.org-1:CNHJZBh9K4tP3EKF6FkkgeVYsS3ohTl+oS0Qa8bezVs= cache.lix.systems:aBnZUw8zA7H35Cz2RyKFVs3H4PlGTLawyY5KRbvJR8o= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= ai.cachix.org-1:N9dzRK+alWwoKXQlnn0H6aUx0lU/mspIoz8hMvGvbbc= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= codex-desktop-linux.cachix.org-1:nX/xy6AdK9hQE24A8ALGjkCKj2ObFmcnemiL5Cid4nk= nix-on-droid.cachix.org-1:56snoMJTXmDRC1Ei24CmKoUqvHJ9XCp+nidK7qkMQrU= lantian:WVGO7vsRMSEN+h7Lp7kv6SAmrkEXgUGbbXm7jMDjBuQ= virby-nix-darwin.cachix.org-1:z9GiEZeBU5bEeoDQjyfHPMGPBaIQJOOvYOOjGMKIlLo= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M= flox-cache-public-1:7F4OyH7ZCnFhcze3fJdfyXYLQw/aV7GEed86nQ7IsOs= niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=
+        connect-timeout = 20
         extra-experimental-features = parallel-eval
         eval-cores = 2
       NIX_REMOTE: daemon
@@ -91,39 +95,37 @@ jobs:
       image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
     if: ${{ (github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main')) }}
     steps:
-      - name: Checkout exact source without a Node dependency
-        env:
-          TOKEN: ${{ github.token }}
-          SERVER: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -eu
-          auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
-          git init -q .
-          git remote add origin "$SERVER/$REPO.git"
-          git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
-          git checkout -q --detach FETCH_HEAD
-      - name: Start isolated Determinate daemon
-        run: |-
-          set -eu
-          nix --version | grep -F 'Determinate Nix 3.24.1'
-          env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
-          daemon=$!
-          for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 $daemon; sleep 1; done
-          test -S /nix/var/nix/daemon-socket/socket
-          test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
-          nix store info --store daemon --json
-          printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
-      - name: Resolve every tracked input and validate the exact candidate
-        env:
-          GH_TOKEN: ${{ secrets.GH_READ_TOKEN }}
-        run:
-          nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-          python3 ci/update-inputs.py
-      - name: Open a review PR for changed pins
-        env:
-          AUTOMATION_TOKEN: ${{ secrets.UPDATE_TOKEN || github.token }}
-        run:
-          nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
-          python3 ci/automation-forge.py inputs
+    - name: Checkout exact source without a Node dependency
+      env:
+        TOKEN: ${{ github.token }}
+        SERVER: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -eu
+        auth=$(printf "x-access-token:%s" "$TOKEN" | base64 | tr -d "\n")
+        git init -q .
+        git remote add origin "$SERVER/$REPO.git"
+        git -c http.extraHeader="Authorization: Basic $auth" fetch -q origin "$SHA"
+        git checkout -q --detach FETCH_HEAD
+    - name: Start isolated Determinate daemon
+      run: |-
+        set -eu
+        nix --version | grep -F 'Determinate Nix 3.24.1'
+        env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
+        daemon=$!
+        for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 $daemon; sleep 1; done
+        test -S /nix/var/nix/daemon-socket/socket
+        test "$(readlink -f /proc/$daemon/exe)" = "$(readlink -f "$(command -v nix)")"
+        nix store info --store daemon --json
+        printf 'NIX_REMOTE=daemon\n' >> "$GITHUB_ENV"
+    - name: Resolve every tracked input and validate the exact candidate
+      env:
+        GH_TOKEN: ${{ secrets.GH_READ_TOKEN }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/update-inputs.py
+    - name: Open a review PR for changed pins
+      env:
+        AUTOMATION_TOKEN: ${{ secrets.UPDATE_TOKEN || github.token }}
+      run: nix shell --option accept-flake-config false --no-write-lock-file --inputs-from . nixpkgs#python3 -c
+        python3 ci/automation-forge.py inputs
