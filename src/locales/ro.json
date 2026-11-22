@@ -10,8 +10,6 @@
     "space": "Spațiu",
     "lobby": "Anticameră",
     "newChat": "Conversație nouă",
-    "joinWithAddress": "Alătură-te cu adresă",
-    "exploreSpaces": "Explorează spații",
     "messageSearch": "Caută mesaje",
     "profile": "Profil",
     "editProfile": "Editează profilul",
@@ -64,7 +62,9 @@
     "sortRecent": "Activitate recentă",
     "home": "Acasă",
     "switchingAccount": "Se schimbă…",
-    "switchAccountFailed": "Schimbarea contului a eșuat. Încearcă din nou."
+    "switchAccountFailed": "Schimbarea contului a eșuat. Încearcă din nou.",
+    "navigation": "Navigație",
+    "notificationAccountMissing": "Această notificare este pentru un cont care nu mai este conectat."
   },
   "inbox": {
     "notifications": "Notificări",
@@ -145,7 +145,12 @@
     "notificationsEmptyAll": "Ai citit tot. Mențiunile, mesajele directe și notificările vor apărea aici.",
     "unlistedNotifications_one": "{{count, number}} notificare necitită",
     "unlistedNotifications_few": "{{count, number}} notificări necitite",
-    "unlistedNotifications_other": "{{count, number}} de notificări necitite"
+    "unlistedNotifications_other": "{{count, number}} de notificări necitite",
+    "filterThreads": "Fire",
+    "inThread": "Într-un fir",
+    "notificationsEmptyThreads": "Nici un fir cu răspunsuri.",
+    "reply": "Răspuns",
+    "repliedToYou": "Ți-a răspuns"
   },
   "room": {
     "createDescription": "Camerele conțin o conversații. Spațiile conțin camere.",
@@ -213,13 +218,7 @@
     "directoryTotal_one": "{{count, number}} cameră",
     "directoryTotal_few": "{{count, number}} camere",
     "directoryTotal_other": "{{count, number}} de camere",
-    "directoryJoinByAddress": "Alătură-te cu adresă",
     "joinTitle": "Alătură-te cu adresă",
-    "joinDescription": "Introdu o adresă publică pentru a te alătura camerei sau spațiului.",
-    "joinExamplesLabel": "Adresele sunt de forma:",
-    "joinAddressLabel": "Adresă",
-    "joinAddressPlaceholder": "#camera:server",
-    "joinInvalid": "Nu pare a fi o adresă de cameră sau un link matrix.to",
     "settingsTitle": "Setări cameră",
     "settingsOpen": "Setări cameră",
     "settingsClose": "Închide setările camerei",
@@ -271,7 +270,7 @@
       "restricted": "doar membrii spațiului",
       "knock_restricted": "membrii spațiului, sau cu cerere",
       "private": "privat",
-      "unknown": "o regulă pe care {{appName}} nu o recunoaște"
+      "unknown": "o regulă pe care aplicația asta nu o recunoaște"
     },
     "menuConvertToGroup": "Transformă în grup",
     "lobbyKnockSent": "Cerere trimisă",
@@ -689,7 +688,21 @@
     "cosmeticsApplying_other": "Se aplică… {{done, number}} din {{count, number}} de camere.",
     "cosmeticsApplied_one": "Sa aplicat pentru o cameră.",
     "cosmeticsApplied_few": "Sa aplicat pentru {{count, number}} camere.",
-    "cosmeticsApplied_other": "Sa aplicat pentru {{count, number}} de camere."
+    "cosmeticsApplied_other": "Sa aplicat pentru {{count, number}} de camere.",
+    "menuClose": "Închide conversația",
+    "notifySpace": "Spațiu ({{mode}})",
+    "notificationsClose": "Închide notificări",
+    "notificationsResize": "Redimensionează notificările",
+    "notificationsEmpty": "Încă nici o notificare din aceasta cameră pe acest dispozitiv.",
+    "notificationsSearch": "Filtrează după expeditor sau text",
+    "notificationsNoResults": "Nici o notificare nu se potrivește „{{query}}”.",
+    "notificationsOpen": "Notificările acestei camere",
+    "notificationsRead": "Deja am citit",
+    "spaceModeApplied_one": "{{space}} și {{count, number}} cameră a sa folosește acum {{mode}}",
+    "spaceModeApplied_few": "{{space}} și {{count, number}} camere ale sale folosesc acum {{mode}}",
+    "spaceModeApplied_other": "{{space}} și {{count, number}} de camere ale sale folosesc acum {{mode}}",
+    "spaceModeDefault": "implicit",
+    "menuJoinSpace": "Alătură-te"
   },
   "join": {
     "knocking": "Se trimite…",
@@ -725,9 +738,7 @@
     "findCommunityTitle": "Găsește o comunitate",
     "findCommunityDescription": "Explorează camere și spații publice pentru a găsi un grup de persoane cu lucruri în comun.",
     "startRoomTitle": "Începe o cameră",
-    "startRoomDescription": "Crează o cameră sau un spațiu pentru un grup de prieteni sau o comunitate.",
-    "joinConversationTitle": "Alatură-te unei camere sau unei conversații directe",
-    "joinConversationDescription": "Scrie o adresă a unei camere sau un ID de utilizator Matrix pentru a începe o conversație."
+    "startRoomDescription": "Crează o cameră sau un spațiu pentru un grup de prieteni sau o comunitate."
   },
   "emoji": {
     "unicode": "Emoji",
@@ -782,12 +793,12 @@
       "knock_accepted": "Cererea de alăturare de la {{user}} a fost acceptată",
       "knock_retracted": "{{user}} și-a retras cererea de alăturare",
       "knock_denied": "Cererea de alăturare de la {{user}} a fost refuzată",
-      "other": "Și-a modificat {{user}} apartenența"
+      "other": "{{user}} și-a modificat apartenența"
     },
     "profileNameChanged": "{{user}} este acum {{name}}",
     "profileNameSet": "{{user}} și-a schimbat numele la {{name}}",
     "profileNameRemoved": "{{user}} și-a șters numele",
-    "profileAvatarChanged": "{{user}} și-a fost schimbată",
+    "profileAvatarChanged": "{{user}} și-a schimbat iconița",
     "hiddenEvent": "{{user}} a fost trimis eveniment {{type}}",
     "unsupported": "Eveniment necunoscut: {{description}}",
     "newMessages_one": "{{count, number}} mesaj nou",
@@ -1097,11 +1108,6 @@
     "signInWithPassword": "Conectează-te cu parolă",
     "signInTitle": "Conectează-te",
     "resetPasswordTitle": "Resetează parola",
-    "stageSignInLabel": "Conectează-te în {{appName}}",
-    "stageCreateAccountLabel": "Crează-ți un cont de Matrix",
-    "stageRecoveryLabel": "Setează o metodă de recuperare",
-    "stageProfileLabel": "Alege detaliile profilului",
-    "stageConsentLabel": "Alege dacă trimiți rapoarte de erori",
     "signingIn": "Se conectează…",
     "moreWaysToSignIn": "Mai multe metode de conectare",
     "hideOtherWaysToSignIn": "Ascunde metodele suplimentare de conectare",
@@ -1109,7 +1115,6 @@
     "hideOtherWaysToCreateAccount": "Ascunde celelalte metode de a-ți crea un cont",
     "continue": "Continuă",
     "next": "Înainte",
-    "stageNavigation": "Navigarea configurării",
     "checking": "Se verifică…",
     "unableToStart": "{{appName}} nu a putut începe.",
     "chooseSignInMethod": "Alege o metodă de a te conecta oferită de server.",
@@ -2421,7 +2426,6 @@
     "label": "Forum",
     "threads": "Fire",
     "empty": "Încă nu sunt fire.",
-    "loadMore": "Încarcă firele mai vechi",
     "newThreadHint": "Trimite un mesaj pentru a începe un fir. Răspunde la un mesaj pentru a începe o discuție.",
     "thread": "{{name}}: {{preview}}",
     "threadUnread": "Necitit. {{name}}: {{preview}}",
@@ -2455,7 +2459,6 @@
     "imageCount_other": "{{count, number}} de imagini",
     "noImages": "Acest pachet încă nu are imagini.",
     "shortcode": "Cod scurt",
-    "shortcodePlaceholder": "cod scurt (opțional)",
     "upload": "Încarcă",
     "rename": "Redenumește :{{shortcode}}:",
     "remove": "Șterge :{{shortcode}}:",
@@ -2501,7 +2504,7 @@
     "askToJoin": "Alăturare prin cerere",
     "invitePeople": "Invită persoane",
     "add": "Adaugă",
-    "userIdFormatHint": "ID-ul de utilizator aree forma @cineva:server",
+    "userIdFormatHint": "ID-ul de utilizator are forma @cineva:server",
     "searchRooms": "Caută camere",
     "loadMore": "Afișează mai multe",
     "join": "Alătură-te",
@@ -2569,6 +2572,8 @@
     "sortNameDesc": "Z la A",
     "edit": "Editează",
     "sortManual": "Manuală",
-    "confirmIrreversible": "Înțeleg ca această acțiune este ireversibilă"
+    "confirmIrreversible": "Înțeleg ca această acțiune este ireversibilă",
+    "viewAvatar": "Vezi avatarul {{name}}",
+    "viewBanner": "Vezi banner-ul {{name}}"
   }
 }

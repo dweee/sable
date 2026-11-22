@@ -311,6 +311,27 @@ async fn thread_receipt_ts(room: &Room, thread_root: &OwnedEventId) -> u64 {
     latest
 }
 
+/// The later of the thread's receipt and the room's, which `read_state` skips for a room
+/// without notifications.
+async fn thread_read_ts(
+    core: &Core,
+    room: &Room,
+    thread_root: &OwnedEventId,
+    room_receipts: &mut HashMap<OwnedRoomId, u64>,
+) -> Result<u64, RpcError> {
+    let thread = core
+        .with_open_stores(async || thread_receipt_ts(room, thread_root).await)
+        .await;
+    let room_ts = if let Some(ts) = room_receipts.get(room.room_id()) {
+        *ts
+    } else {
+        let ts = room_receipt_ts(core, room).await?;
+        room_receipts.insert(room.room_id().to_owned(), ts);
+        ts
+    };
+    Ok(thread.max(room_ts))
+}
+
 async fn resolve_receipt_ts(room: &Room, stored: StoredReceipts) -> matrix_sdk::Result<u64> {
     if let Some(ts) = stored.cached_ts {
         return Ok(ts);
@@ -386,6 +407,13 @@ async fn read_state(core: &Core, room: &Room) -> Result<RoomReadState, RpcError>
             remaining,
         });
     }
+    Ok(RoomReadState {
+        receipt_ts: room_receipt_ts(core, room).await?,
+        remaining,
+    })
+}
+
+async fn room_receipt_ts(core: &Core, room: &Room) -> Result<u64, RpcError> {
     let receipt_ts = async {
         let stored = core
             .with_open_stores(async || stored_receipts(room).await)
@@ -393,13 +421,10 @@ async fn read_state(core: &Core, room: &Room) -> Result<RoomReadState, RpcError>
         resolve_receipt_ts(room, stored).await
     }
     .await;
-    Ok(RoomReadState {
-        receipt_ts: receipt_ts.map_err(|error| {
-            warn!("resolving the inbox read receipt failed: {error}");
-            RpcCode::Unavailable
-        })?,
-        remaining,
-    })
+    Ok(receipt_ts.map_err(|error| {
+        warn!("resolving the inbox read receipt failed: {error}");
+        RpcCode::Unavailable
+    })?)
 }
 
 async fn backfill_candidates(
@@ -535,6 +560,7 @@ impl Core {
         stored.cursors.extend(cursors);
         stored.unread_scans.extend(unread_scans);
         inbox.revision += 1;
+        self.inbox_changed.notify_one();
         Ok(added)
     }
 
@@ -603,6 +629,8 @@ impl Core {
         if write(bytes).await.is_ok() {
             let mut inbox = self.inbox.lock().await;
             inbox.saved = inbox.saved.max(revision);
+        } else {
+            self.inbox_changed.notify_one();
         }
     }
 
@@ -612,6 +640,7 @@ impl Core {
         self.track_session_task(
             spawn(async move {
                 loop {
+                    core.inbox_changed.notified().await;
                     matrix_sdk::sleep::sleep(INBOX_FLUSH_INTERVAL).await;
                     core.flush_inbox(&client).await;
                 }
@@ -686,6 +715,7 @@ impl Core {
         let stored = self.stored_inbox(&client).await?;
         let mut rooms: HashMap<OwnedRoomId, Option<(bool, RoomReadState)>> = HashMap::new();
         let mut threads: HashMap<OwnedEventId, u64> = HashMap::new();
+        let mut room_receipts: HashMap<OwnedRoomId, u64> = HashMap::new();
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut items = Vec::new();
         let mut has_more = false;
@@ -734,17 +764,14 @@ impl Core {
                     } else {
                         let ts = match client.get_room(&entry.room_id) {
                             Some(room) => {
-                                self.with_open_stores(async || {
-                                    thread_receipt_ts(&room, thread_root).await
-                                })
-                                .await
+                                thread_read_ts(self, &room, thread_root, &mut room_receipts).await?
                             }
                             None => 0,
                         };
                         threads.insert(thread_root.clone(), ts);
                         ts
                     };
-                    entry.ts > read.receipt_ts.max(thread_read_ts)
+                    entry.ts > thread_read_ts
                 }
                 None => is_unread(&entry, read),
             };
@@ -826,7 +853,7 @@ impl Core {
                     if every_encrypted && notifications::raw_is_encrypted(event.raw()) {
                         continue;
                     }
-                    let actions = crate::push_rules::related_actions(
+                    let actions = push_rules::related_actions(
                         &room,
                         event.raw(),
                         event.push_actions().unwrap_or_default().to_vec(),
@@ -945,11 +972,7 @@ mod tests {
         (core, client, room)
     }
 
-    fn message(
-        event_id: &str,
-        ts: u64,
-        user: Option<&matrix_sdk::ruma::UserId>,
-    ) -> serde_json::Value {
+    fn message(event_id: &str, ts: u64, user: Option<&ruma::UserId>) -> serde_json::Value {
         json!({"type": "m.room.message", "event_id": event_id, "room_id": "!room:example.org",
             "sender": User::Alice, "origin_server_ts": ts,
             "content": {"msgtype": "m.text", "body": "hello", "m.mentions": {"user_ids": user.into_iter().collect::<Vec<_>>()}}})
@@ -1291,6 +1314,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_room_receipt_reads_thread_replies_in_a_room_without_notifications() {
+        let server = MatrixMockServer::new().await;
+        let (core, client, room) = setup(&server, 0).await;
+        let factory = EventFactory::new().room(room.room_id()).sender(User::Alice);
+        server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(room.room_id()).add_receipt(
+                    factory
+                        .read_receipts()
+                        .add(
+                            event_id!("$read"),
+                            client.user_id().unwrap(),
+                            ReceiptType::Read,
+                            ReceiptThread::Unthreaded,
+                        )
+                        .into_event(),
+                ),
+            )
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex("/event/.*read$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(message("$read", 250, None)))
+            .mount(server.server())
+            .await;
+        let in_thread = |event: &str, ts| Entry {
+            thread_root: Some(event_id!("$root").to_owned()),
+            ..entry(event, ts)
+        };
+        core.record_inbox(
+            &client,
+            vec![in_thread("seen", 200), in_thread("new", 300)],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let (items, _) = core
+            .inbox_notifications(InboxFilter::All, true, 30, None, InboxScope::default())
+            .await
+            .unwrap();
+        let read: Vec<_> = items
+            .iter()
+            .map(|item| (item.event_id.as_str(), item.read))
+            .collect();
+        assert_eq!(read, [("$new", false), ("$seen", true)]);
+    }
+
     #[test]
     fn an_entry_stored_before_threads_were_recorded_is_not_in_a_thread() {
         let stored = json!({"room_id": "!room:example.org", "event_id": "$old", "ts": 1,
@@ -1318,7 +1391,7 @@ mod tests {
                                 client.user_id().unwrap(),
                                 ReceiptType::Read,
                                 ReceiptThread::Unthreaded,
-                                Some(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(300u32.into())),
+                                Some(ruma::MilliSecondsSinceUnixEpoch(300u32.into())),
                             )
                             .into_event(),
                     )
@@ -1396,7 +1469,7 @@ mod tests {
                                 client.user_id().unwrap(),
                                 ReceiptType::Read,
                                 ReceiptThread::Unthreaded,
-                                Some(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(150u32.into())),
+                                Some(ruma::MilliSecondsSinceUnixEpoch(150u32.into())),
                             )
                             .into_event(),
                     )
@@ -1502,8 +1575,7 @@ mod tests {
                 format!("extra{index}")
             };
             if index > 0 {
-                let room_id =
-                    matrix_sdk::ruma::RoomId::parse(format!("!{name}:example.org")).unwrap();
+                let room_id = ruma::RoomId::parse(format!("!{name}:example.org")).unwrap();
                 let factory = EventFactory::new().room(&room_id).sender(User::Alice);
                 server
                     .sync_room(

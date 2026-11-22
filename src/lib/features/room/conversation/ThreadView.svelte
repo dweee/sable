@@ -28,6 +28,7 @@
   import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
   import { replyPreviewBody } from '../messages/reply-preview.js';
   import TimelineList from '../timeline/TimelineList.svelte';
+  import type { TimelineCallbacks } from '../timeline/timeline-row.svelte.js';
   import {
     clampThreadPanelWidth,
     MIN_THREAD_PANEL_WIDTH,
@@ -99,9 +100,11 @@
     personas,
     timeline,
     roomId: () => roomId,
-    spaceIds: (id) => personaSpaces(roomList.rooms, id, page.params.spaceId).order,
+    spaceIds: (id) => personaSpaces(roomList, id, page.params.spaceId).order,
     encrypted: () => encrypted,
+    publicRoom: () => roomList.byId(roomId)?.join_rule === 'public',
     threadRoot: untrack(() => rootEventId),
+    canRedactOwn: () => canRedactOwn,
     beforeSend: () => returnToThread(),
     afterSend: (id) => donateSentMessage(core, roomList.byId(id)),
   });
@@ -185,6 +188,37 @@
       fully_read: false,
     });
   }
+  const timelineCallbacks: TimelineCallbacks = {
+    get onSenderProfile() {
+      return onSenderProfile;
+    },
+    get onMatrixLink() {
+      return onMatrixLink;
+    },
+    onMentionUser: (userId, name) => composer?.insertMention(userId, name),
+    get onCopyLink() {
+      return onCopyLink;
+    },
+    onOpenMedia: (eventId) =>
+      mediaViewerState.openPanel(timelineMediaItems(timeline.items), eventId, (target) => {
+        timelineList?.jumpToEvent(target);
+      }),
+    get onReply() {
+      return readOnly ? undefined : conversation.reply;
+    },
+    onCancelContext: conversation.clearContext,
+    get onEdit() {
+      return readOnly ? undefined : conversation.edit;
+    },
+    onDelete: conversation.redact,
+    get onToggleReaction() {
+      return canReact ? conversation.toggleReaction : undefined;
+    },
+    onVotePoll: conversation.votePoll,
+    onEndPoll: conversation.endPoll,
+    onRetrySend: conversation.retrySend,
+    onCancelSend: conversation.cancelSend,
+  };
 </script>
 
 <svelte:window
@@ -228,7 +262,7 @@
           : (backLabel ?? i18n.t('timeline.backToConversation'))}
         onclick={onClose}
       >
-        {#if sidePanel}<XIcon />{:else}<BackIcon />{/if}
+        {#if sidePanel}<XIcon />{:else}<BackIcon class="mirror-rtl" />{/if}
       </PanelHeaderButton>
     {/snippet}
     {#snippet suffix()}
@@ -283,26 +317,10 @@
     {canRedactOthers}
     {canPin}
     {encrypted}
-    {onSenderProfile}
-    {onMatrixLink}
-    onMentionUser={(userId, name) => composer?.insertMention(userId, name)}
-    {onCopyLink}
-    onOpenMedia={(eventId) =>
-      mediaViewerState.openPanel(timelineMediaItems(timeline.items), eventId, (target) => {
-        timelineList?.jumpToEvent(target);
-      })}
+    callbacks={timelineCallbacks}
     onRequestHistory={requestHistory}
     onRequestFuture={requestFuture}
     onRead={markRead}
-    onReply={readOnly ? undefined : conversation.reply}
-    onCancelContext={conversation.clearContext}
-    onEdit={readOnly ? undefined : conversation.edit}
-    onDelete={conversation.redact}
-    onToggleReaction={canReact ? conversation.toggleReaction : undefined}
-    onVotePoll={conversation.votePoll}
-    onEndPoll={conversation.endPoll}
-    onRetrySend={conversation.retrySend}
-    onCancelSend={conversation.cancelSend}
     currentUserId={core.session?.user_id ?? null}
   />
 

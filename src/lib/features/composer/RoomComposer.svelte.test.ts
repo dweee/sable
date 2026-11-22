@@ -46,6 +46,7 @@ afterEach(() => {
   mediaConfig.mockReset();
   mediaConfig.mockResolvedValue({ upload_size: 100 * 1024 * 1024 });
   clearDrafts();
+  setPreference('composerForm', 'tall');
   setPreference('formattingToolbar', false);
   setPreference('composerFormatButton', true);
   setPreference('composerButtonOrder', ['gif', 'sticker', 'emoticon', 'persona', 'format']);
@@ -465,6 +466,7 @@ test('sends multiple staged files as one gallery', async () => {
     formattedCaption: null,
     mentions: { user_ids: [], room: false },
     spoilers: [false, false],
+    gifs: [undefined, undefined],
   });
   expect(attachment).not.toHaveBeenCalled();
 });
@@ -675,7 +677,7 @@ test.each([true, false])(
     const message = vi.fn(async () => {});
     const body = 'hey @_one:example.org :wave:';
     const html =
-      'hey <a href="https://matrix.to/#/@one:example.org">@_one:example.org</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">';
+      'hey <a href="matrix:u/one:example.org">@_one:example.org</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">';
     setup({
       roomId: '!room:example.org',
       onSend: message,
@@ -800,7 +802,7 @@ test.each([true, false])(
     expect(attachment).toHaveBeenCalledWith('!room:example.org', file, {
       caption: 'hey Member One :wave:',
       formattedCaption:
-        'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">',
+        'hey <a href="matrix:u/one:example.org">Member One</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">',
       mentions: { user_ids: ['@one:example.org'], room: false },
       spoiler: false,
     });
@@ -2030,13 +2032,13 @@ test('an edited scheduled message loads its text and saves through its own time'
     context: {
       kind: 'schedule',
       eventId: 'delay',
-      body: 'see you tomorow',
+      body: 'see you tomorrow',
       scheduled: { source: 'server', dueTs },
     },
   });
   await flushed();
 
-  expect(editorText()).toBe('see you tomorow');
+  expect(editorText()).toBe('see you tomorrow');
 
   submit();
   await flushed();
@@ -2050,7 +2052,7 @@ test('an edited scheduled message loads its text and saves through its own time'
   if (!scheduleForm) throw new Error('schedule form not found');
   await fireEvent.submit(scheduleForm);
 
-  expect(schedule).toHaveBeenCalledWith('!room:example.org', 'see you tomorow', null, dueTs);
+  expect(schedule).toHaveBeenCalledWith('!room:example.org', 'see you tomorrow', null, dueTs);
 });
 
 test('a press beside the text focuses the editor, and one on a button does not', async () => {
@@ -2123,6 +2125,37 @@ test('the expand button makes the editor taller and keeps focus in it', async ()
   expect(toggle).toHaveAttribute('aria-pressed', 'true');
   expect(document.querySelector('.editor')).toHaveClass('expanded');
   expect(document.querySelector('[contenteditable="true"]')).toHaveFocus();
+});
+
+test('an expanded composer keeps the expand button laid out while it is empty', async () => {
+  setPreference('composerForm', 'short');
+  setup({ roomId: '!room:example.org' });
+  await flushed();
+  expect(document.querySelector('.composer-row')).toHaveClass('short');
+
+  await press(screen.getByRole('button', { name: 'Expand composer' }));
+
+  expect(document.querySelector('.editor')).toHaveClass('expanded');
+  expect(document.querySelector('.composer-row')).not.toHaveClass('short');
+});
+
+test('sending a message collapses an expanded composer', async () => {
+  setPreference('composerForm', 'short');
+  draftText('hello');
+  const send = vi.fn(async () => {});
+  setup({ roomId: '!room:example.org', onSend: send });
+  await flushed();
+  await press(screen.getByRole('button', { name: 'Expand composer' }));
+  expect(document.querySelector('.editor')).toHaveClass('expanded');
+
+  submit();
+
+  await vi.waitFor(() => {
+    expect(send).toHaveBeenCalled();
+  });
+  await vi.waitFor(() => {
+    expect(document.querySelector('.editor')).not.toHaveClass('expanded');
+  });
 });
 
 test('the insert menu offers scheduling once there is something to send', async () => {

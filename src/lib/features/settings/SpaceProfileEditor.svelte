@@ -20,14 +20,14 @@
   import { senderColor } from '../room/timeline/timeline-format';
   import { i18n, t } from '#lib/i18n.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { joinedSpaceRooms } from '#lib/rooms/spaces.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import ProfileCard from '#lib/ui/primitives/ProfileCard.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import TimelineItem from '#lib/features/room/timeline/TimelineItem.svelte';
   import { previewMessage } from '#lib/features/room/timeline/preview-message.js';
-  import { uprightJpeg } from '#lib/ui/upright-jpeg.js';
+  import { requestCrop } from '#lib/ui/image-crop/crop-request.svelte.js';
+  import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
   import ColorSetting from '#lib/ui/ColorSetting.svelte';
   import { hexColorOrEmpty } from '#lib/ui/hex-color.js';
   import { type SenderCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
@@ -94,7 +94,7 @@
     name_color_light: draft.light || profile.name_color_light,
     name_color_dark: draft.dark || profile.name_color_dark,
   });
-  let applyTargets = $derived(joinedSpaceRooms(space, (id) => roomList.byId(id)));
+  let applyTargets = $derived(space ? (roomList.section(space.room_id)?.descendants ?? []) : []);
 
   const previewCosmetics = $derived<SenderCosmetics>({
     colorOnLight: previewProfile.name_color_light,
@@ -174,11 +174,8 @@
     try {
       let avatar = draft.avatar;
       if (avatarFile) {
-        const upright = await uprightJpeg(avatarFile);
-        avatar = await core.media.uploadMedia(
-          upright.type || 'image/*',
-          new Uint8Array(await upright.arrayBuffer())
-        );
+        const { mime, bytes } = await uprightImageBytes(avatarFile);
+        avatar = await core.media.uploadMedia(mime, bytes);
       }
       const identityChanged = draft.name !== base.name || avatar !== base.avatar;
       const colorsChanged = draft.light !== base.light || draft.dark !== base.dark;
@@ -350,10 +347,11 @@
                 type="file"
                 accept="image/*"
                 disabled={loading}
-                onchange={(event: Event & { currentTarget: HTMLInputElement }) => {
+                onchange={async (event: Event & { currentTarget: HTMLInputElement }) => {
                   const file = event.currentTarget.files?.[0];
                   event.currentTarget.value = '';
-                  if (file) setAvatar(file);
+                  const cropped = file && (await requestCrop(file, 'avatar'));
+                  if (cropped) setAvatar(cropped);
                 }}
               />
               {i18n.t('common.changePicture')}

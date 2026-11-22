@@ -1,3 +1,4 @@
+import { storybookTest } from '@storybook/addon-vitest/vitest-plugin';
 import { playwright } from '@vitest/browser-playwright';
 import { mergeConfig } from 'vite';
 import { defineConfig, defineProject } from 'vitest/config';
@@ -12,6 +13,40 @@ const TOUCH_BROWSER_TESTS = [
   'src/lib/features/sidebar/AppShell.browser.test.ts',
   'src/lib/ui/primitives/BottomSheet.browser.test.ts',
 ];
+
+const storybookProject = (theme: 'light' | 'dark') => ({
+  ...mergeConfig(
+    viteConfig,
+    defineProject({
+      optimizeDeps: { include: ['katex'] },
+      plugins: [
+        storybookTest({ configDir: '.storybook', initialGlobals: { theme } }),
+        {
+          // SvelteKit scans every route, which imports WASM bindings Storybook never builds.
+          name: 'storybook-scan-entries',
+          enforce: 'post',
+          config(config) {
+            config.optimizeDeps = {
+              ...config.optimizeDeps,
+              entries: ['src/**/*.stories.svelte', '.storybook/preview.ts'],
+            };
+          },
+        },
+      ],
+      test: {
+        name: `storybook-${theme}`,
+        maxWorkers: 4,
+        browser: {
+          enabled: true,
+          headless: true,
+          provider: playwright({ contextOptions: { reducedMotion: 'reduce' } }),
+          instances: [{ browser: 'chromium' }],
+        },
+      },
+    })
+  ),
+  extends: false,
+});
 
 const HAPPY_DOM_TESTS = [
   'src/lib/features/composer/VoiceRecorder.svelte.test.ts',
@@ -43,6 +78,7 @@ export default mergeConfig(
     resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
     test: {
       maxWorkers: 4,
+      silent: 'passed-only',
       setupFiles: ['./tests/vitest-setup.ts'],
       // Async mode schedules updates on animation frames, which would never fire if faked.
       fakeTimers: {
@@ -134,10 +170,12 @@ export default mergeConfig(
           ),
           extends: false,
         },
+        storybookProject('light'),
+        storybookProject('dark'),
       ],
       coverage: {
         provider: 'v8',
-        reporter: ['text', 'html', 'lcov'],
+        reporter: ['text-summary', 'html', 'lcov'],
         include: ['src/**/*.{ts,svelte}'],
         exclude: [
           'src/**/*.d.ts',

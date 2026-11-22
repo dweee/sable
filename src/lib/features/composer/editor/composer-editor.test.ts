@@ -144,7 +144,7 @@ test('committing a room mention replaces the whole query with spaces', () => {
   if (!doc) throw new Error('no doc');
   const message = serializeComposer(doc);
   expect(message.body).toBe('join #Sable Dev  tomorrow');
-  expect(message.formatted).toContain('https://matrix.to/#/#dev:example.org');
+  expect(message.formatted).toContain('matrix:r/dev:example.org');
   expect(doc.nodeAt(6)?.type.name).toBe('mention');
 });
 
@@ -188,7 +188,7 @@ describe('attachVia', () => {
     const doc = editor.doc();
 
     expect(doc && serializeComposer(doc).formatted).toBe(
-      '<a href="https://matrix.to/#/!abc:example.org?via=sable.moe">#Sable</a>'
+      '<a href="matrix:roomid/abc:example.org?via=sable.moe">#Sable</a>'
     );
   });
 
@@ -329,12 +329,12 @@ describe('setHtml', () => {
   test('keeps a mention as a mention, not as a link', () => {
     const editor = open();
 
-    editor.setHtml('<p>ask <a href="https://matrix.to/#/@one:example.org">Member One</a></p>');
+    editor.setHtml('<p>ask <a href="matrix:u/one:example.org">Member One</a></p>');
     const doc = editor.doc();
 
     expect(doc && serializeComposer(doc)).toEqual({
       body: 'ask Member One',
-      formatted: 'ask <a href="https://matrix.to/#/@one:example.org">Member One</a>',
+      formatted: 'ask <a href="matrix:u/one:example.org">Member One</a>',
       mentions: { user_ids: ['@one:example.org'], room: false },
     });
   });
@@ -1341,6 +1341,27 @@ describe('pasting', () => {
       }
     });
     expect(hrefs).toEqual(['https://example.org']);
+  });
+
+  test('a matrix: URI pasted over a selection links it instead of replacing it', () => {
+    const editor = open();
+    editor.setText('the docs');
+    const editorView = view(editor);
+    editorView.dispatch(
+      editorView.state.tr.setSelection(
+        TextSelection.create(editorView.state.doc, 1, editorView.state.doc.content.size - 1)
+      )
+    );
+    editorView.pasteText('matrix:r/dev:example.org');
+
+    expect(editor.doc()?.textContent).toBe('the docs');
+    const hrefs: string[] = [];
+    editor.doc()?.descendants((node) => {
+      for (const mark of node.marks) {
+        if (mark.type.name === 'link') hrefs.push(mark.attrs.href as string);
+      }
+    });
+    expect(hrefs).toEqual(['matrix:r/dev:example.org']);
   });
 
   test('an address pasted over a selection in the plain composer is written as markdown', () => {
@@ -2634,12 +2655,17 @@ describe('a pasted user id becomes a mention', () => {
     return found;
   }
 
-  test.each([true, false])('in the composer with rich text %s', (rich) => {
+  test.each([
+    [true, 'link.sable.moe'],
+    [false, 'link.sable.moe'],
+    [true, 'matrix.to'],
+    [false, 'matrix.to'],
+  ])('in the composer with rich text %s and host %s', (rich, host) => {
     preferences.richTextComposer = rich;
     const editor = openWith({
       mentionName: (userId) => (userId === '@ana:example.org' ? 'Ana' : null),
     });
-    paste('ping @ana:example.org and https://matrix.to/#/@bob:example.org please');
+    paste(`ping @ana:example.org and https://${host}/#/@bob:example.org please`);
 
     expect(mentions(editor)).toEqual([
       { userId: '@ana:example.org', name: '@Ana' },

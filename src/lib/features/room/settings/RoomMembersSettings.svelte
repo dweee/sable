@@ -7,7 +7,7 @@
     RoomListItemView,
   } from '#src/generated/protocol';
 
-  import { CoreError } from '#src/transport';
+  import { isCoreError } from '#src/transport';
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
@@ -18,8 +18,6 @@
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
-  import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
-  import FormField from '#lib/ui/primitives/FormField.svelte';
   import Select from '#lib/ui/primitives/Select.svelte';
   import Switcher from '#lib/ui/primitives/Switcher.svelte';
   import MemberIdentityRow from '../members/MemberIdentityRow.svelte';
@@ -44,11 +42,15 @@
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
 
   import '#lib/ui/primitives/settings-row.css';
-  import TextInput from '#lib/ui/primitives/TextInput.svelte';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
+  import { toasts } from '#lib/ui/toasts.svelte.js';
+  import ModerationDialog from '../members/ModerationDialog.svelte';
+  import { deletedMessagesNotice } from '../members/member-profile-actions';
 
   import {
     FOUNDER_POWER_LEVEL,
     isValidPowerLevel,
+    needsPowerConfirmation,
     type PowerLevelTagMap,
   } from './power-level-tags';
 
@@ -93,7 +95,9 @@
   let ownPowerLevel = $derived(permissions?.own_power_level ?? 0);
   let canSetPower = $derived(permissions?.can_change_power_levels ?? false);
   let selfId = $derived(core.session?.user_id ?? null);
-  let selfDemotion = $state<{ member: MemberView; level: number } | null>(null);
+  let powerConfirm = $state<{ member: MemberView; level: number } | null>(null);
+  // Outlives powerConfirm so the dialog keeps its wording while it closes.
+  let promoted = $state<MemberView | null>(null);
   let powerResets = $state(0);
   let isDirect = $derived(room?.is_direct ?? false);
   let canInviteInline = $derived(
@@ -243,7 +247,7 @@
       console.warn('[sable room] member action failed', error);
       await load();
       failed = true;
-      denied = error instanceof CoreError && error.detail.code === 'denied';
+      denied = isCoreError(error, 'denied');
     } finally {
       busy = null;
     }
@@ -273,8 +277,9 @@
   function setPower(member: MemberView, level: number, confirmed = false): void {
     const target = roomId;
     if (!target || level === member.power_level) return;
-    if (member.user_id === selfId && !confirmed) {
-      selfDemotion = { member, level };
+    if (needsPowerConfirmation(member.user_id === selfId, level, ownPowerLevel) && !confirmed) {
+      promoted = member.user_id === selfId ? null : member;
+      powerConfirm = { member, level };
       return;
     }
     void act(
@@ -290,46 +295,29 @@
   }
 
   let moderationTarget = $state<{ userId: string; action: 'kick' | 'ban' } | null>(null);
-  let moderationReason = $state('');
-  let moderationBusy = $state(false);
-  let moderationMember = $derived.by(() => {
+  let moderationName = $derived.by(() => {
     const target = moderationTarget;
-    if (target === null) return null;
-    return members.find((member) => member.user_id === target.userId) ?? null;
+    if (target === null) return '';
+    const member = members.find((entry) => entry.user_id === target.userId);
+    return member ? memberName(member) : target.userId;
   });
 
   function openModeration(userId: string, action: 'kick' | 'ban'): void {
     moderationTarget = { userId, action };
-    moderationReason = '';
   }
 
-  function cancelModeration(): void {
-    moderationTarget = null;
-    moderationReason = '';
-  }
-
-  function submitModeration(): void {
-    void confirmModeration();
-  }
-
-  async function confirmModeration(): Promise<void> {
+  async function confirmModeration(reason: string | null, redactEvents: boolean): Promise<void> {
     const target = moderationTarget;
     const room = roomId;
-    if (!target || !room || moderationBusy) return;
+    if (!target || !room) return;
 
-    const reason = moderationReason.trim() || null;
-    moderationBusy = true;
-    try {
-      await act(target.userId, () =>
-        target.action === 'kick'
-          ? core.rpc.members.kick({ room_id: room, user_id: target.userId, reason })
-          : core.rpc.members.ban({ room_id: room, user_id: target.userId, reason })
-      );
-    } finally {
-      moderationBusy = false;
-      moderationTarget = null;
-      moderationReason = '';
-    }
+    const params = { room_id: room, user_id: target.userId, reason, redact_events: redactEvents };
+    await act(target.userId, async () => {
+      const deleted = await (target.action === 'kick'
+        ? core.rpc.members.kick(params)
+        : core.rpc.members.ban(params));
+      if (redactEvents) toasts.info(deletedMessagesNotice(moderationName, deleted));
+    });
   }
 </script>
 
@@ -370,13 +358,9 @@
   </div>
 
   <div class="search">
-    <TextInput
+    <SearchField
       bind:value={search}
-      type="search"
-      placeholder={canInviteInline
-        ? i18n.t('room.membersSearchOrInvite')
-        : i18n.t('timeline.searchMembers')}
-      aria-label={canInviteInline
+      label={canInviteInline
         ? i18n.t('room.membersSearchOrInvite')
         : i18n.t('timeline.searchMembers')}
     />
@@ -634,69 +618,47 @@
 />
 
 <ConfirmDialog
-  open={selfDemotion !== null}
-  title={i18n.t('timeline.profileDemoteSelfTitle')}
-  description={i18n.t('timeline.profileDemoteSelfBody')}
-  confirmLabel={i18n.t('timeline.profileDemoteSelfConfirm')}
+  open={powerConfirm !== null}
+  title={promoted
+    ? i18n.t('timeline.profilePromoteEqualTitle', { name: memberName(promoted) })
+    : i18n.t('timeline.profileDemoteSelfTitle')}
+  description={promoted
+    ? i18n.t('timeline.profilePromoteEqualBody', {
+        name: memberName(promoted),
+        user: promoted.user_id,
+      })
+    : i18n.t('timeline.profileDemoteSelfBody')}
+  confirmLabel={promoted
+    ? i18n.t('timeline.profilePromoteEqualConfirm')
+    : i18n.t('timeline.profileDemoteSelfConfirm')}
   onOpenChange={(next: boolean) => {
-    if (next || selfDemotion === null) return;
-    selfDemotion = null;
+    if (next || powerConfirm === null) return;
+    powerConfirm = null;
     powerResets += 1;
   }}
   onCancel={() => {
-    selfDemotion = null;
+    powerConfirm = null;
     powerResets += 1;
   }}
   onConfirm={() => {
-    const pending = selfDemotion;
-    selfDemotion = null;
+    const pending = powerConfirm;
+    powerConfirm = null;
     if (pending) setPower(pending.member, pending.level, true);
   }}
 />
 
-<DialogFrame
-  open={moderationTarget !== null}
-  onOpenChange={(next) => {
-    if (!next) cancelModeration();
-  }}
-  variant="verification"
-  label={moderationTarget?.action === 'ban'
-    ? i18n.t('timeline.profileBan')
-    : i18n.t('timeline.profileKick')}
-  onConfirm={submitModeration}
->
-  {#if moderationTarget}
-    <div class="moderation">
-      <h2>
-        {moderationTarget.action === 'ban'
-          ? i18n.t('timeline.profileBanConfirm', {
-              name: moderationMember ? memberName(moderationMember) : moderationTarget.userId,
-            })
-          : i18n.t('timeline.profileKickConfirm', {
-              name: moderationMember ? memberName(moderationMember) : moderationTarget.userId,
-            })}
-      </h2>
-      <FormField fieldId="member-moderation-reason" label={i18n.t('timeline.deleteReason')}>
-        <TextInput id="member-moderation-reason" bind:value={moderationReason} autocomplete="off" />
-      </FormField>
-      <div class="moderation-actions">
-        <Button type="button" variant="ghost" disabled={moderationBusy} onclick={cancelModeration}>
-          {i18n.t('common.cancel')}
-        </Button>
-        <Button type="submit" variant="danger" loading={moderationBusy}>
-          {moderationTarget.action === 'ban'
-            ? i18n.t('timeline.profileBan')
-            : i18n.t('timeline.profileKick')}
-        </Button>
-      </div>
-    </div>
-  {/if}
-</DialogFrame>
+<ModerationDialog
+  action={moderationTarget?.action ?? null}
+  name={moderationName}
+  onConfirm={confirmModeration}
+  onClose={() => (moderationTarget = null)}
+/>
 
 <style>
   .section {
     display: grid;
     gap: var(--space-600);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .tabs {
@@ -716,11 +678,6 @@
     gap: var(--space-200);
   }
 
-  .search > :global(.text-input) {
-    flex: 1;
-    min-width: 0;
-  }
-
   .user-id {
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
@@ -729,24 +686,5 @@
   .power {
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
-  }
-
-  .moderation {
-    display: grid;
-    gap: var(--space-300);
-    width: min(27rem, calc(100vw - 2rem));
-  }
-
-  .moderation h2 {
-    font-size: var(--font-size-heading);
-    line-height: 1.3;
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .moderation-actions {
-    display: flex;
-    gap: var(--space-200);
-    justify-content: flex-end;
   }
 </style>

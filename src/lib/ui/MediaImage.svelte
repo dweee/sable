@@ -161,7 +161,7 @@
   let intrinsicCssWidth = $derived(
     eventRatio !== null && intrinsicWidth !== null ? `${String(intrinsicWidth)}px` : undefined
   );
-  let animated = $derived(
+  let mayAnimate = $derived(
     animatedHint ??
       (ANIMATED_MIMES.includes(mime ?? '') ||
         ANIMATED_EXTENSIONS.some((extension) => named(extension)))
@@ -183,7 +183,7 @@
     original ||
       !thumbnailWorthIt ||
       mime === 'image/svg+xml' ||
-      animated ||
+      mayAnimate ||
       servedSideways ||
       undecodableThumbnail === source
   );
@@ -191,7 +191,7 @@
     thumbnail !== null &&
       isEncryptedMedia(source) &&
       !original &&
-      !animated &&
+      !mayAnimate &&
       !servedSideways &&
       undecodableThumbnail !== source
       ? thumbnail
@@ -222,6 +222,13 @@
       : mediaAspectRatio(core, requested, requestedWidth, requestedHeight)
   );
   let imageLoaded = $derived(url !== null && loadedUrl === url);
+  /* Without a hint, the frames in the file decide once it has loaded. */
+  let animated = $derived(
+    mayAnimate &&
+      (animatedHint !== null ||
+        url === null ||
+        cachedMediaAnimated(core, requested, requestedWidth, requestedHeight) !== false)
+  );
   let naturalImage = $derived(
     imageLoaded && asIs && requested === source ? (imageElement ?? null) : null
   );
@@ -260,7 +267,8 @@
     const image = imageElement;
     const source = url;
     if (!paused || !imageLoaded || !image || !source) return;
-    if (cachedMediaAnimated(core, requested, requestedWidth, requestedHeight) === false) return;
+    if (!animated && cachedMediaAnimated(core, requested, requestedWidth, requestedHeight) !== true)
+      return;
     let current = true;
     void stillFrame(image, source).then((still) => {
       if (current && still) heldFrame = { url: source, still };
@@ -728,6 +736,7 @@
       {
         interactive: !showUnavailable && (manualGif || onclick || href),
         gif: manualGif,
+        animated,
         pixelated,
         painted,
       },
@@ -789,7 +798,7 @@
   </span>
 {:else if !showUnavailable && (manualGif || onclick)}
   <button
-    class={[className, 'media-image', 'interactive', { gif: manualGif, pixelated }]}
+    class={[className, 'media-image', 'interactive', { gif: manualGif, animated, pixelated }]}
     {style}
     style:--media-ratio={aspectRatio}
     style:--media-width={intrinsicCssWidth}
@@ -806,7 +815,7 @@
   </button>
 {:else}
   <span
-    class={[className, 'media-image', { pixelated }]}
+    class={[className, 'media-image', { animated, pixelated }]}
     {style}
     style:--media-ratio={aspectRatio}
     style:--media-width={intrinsicCssWidth}
@@ -854,7 +863,7 @@
     display: block;
     height: 100%;
     padding: 0;
-    text-align: left;
+    text-align: start;
     text-decoration: none;
     width: 100%;
   }
@@ -974,6 +983,7 @@
     box-shadow: var(--shadow-float);
     color: var(--surface-on-container);
     display: flex;
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
     left: 50%;
     padding: var(--space-200);
     position: absolute;
@@ -994,9 +1004,11 @@
     flex-wrap: wrap;
     font-size: var(--font-size-small);
     gap: var(--space-100);
-    height: 100%;
+    inset: 0;
+    overflow: hidden;
     padding: var(--space-200);
     place-content: center center;
+    position: absolute;
     text-align: center;
   }
 
@@ -1004,6 +1016,47 @@
     flex: none;
     height: var(--icon-size-medium);
     width: var(--icon-size-medium);
+  }
+
+  .media-image:has(.media-image-unavailable) {
+    container-type: size;
+  }
+
+  .media-image-unavailable :global(button.retry-media) {
+    max-height: 100%;
+    overflow: hidden;
+  }
+
+  @container (height < 8rem) {
+    .media-image-unavailable :global(svg) {
+      display: none;
+    }
+  }
+
+  @container (width < 8rem) {
+    .media-image-unavailable {
+      padding: var(--space-050);
+    }
+
+    .media-image-unavailable :global(button.retry-media) {
+      padding-inline: var(--space-100);
+    }
+  }
+
+  @container (height < 5.5rem) {
+    .media-image-unavailable {
+      padding: var(--space-050);
+    }
+
+    .media-image-unavailable:has(:global(.retry-media)) > span {
+      display: none;
+    }
+
+    .media-image-unavailable :global(button.retry-media) {
+      margin-top: 0;
+      min-height: 0;
+      padding-block: 0;
+    }
   }
 
   .media-image.interactive {
@@ -1014,7 +1067,7 @@
     background: none;
     border: 0;
     padding: 0;
-    text-align: left;
+    text-align: start;
   }
 
   .media-image.interactive.gif {

@@ -1,14 +1,20 @@
 // @vitest-environment happy-dom
 import { expect, test, vi } from 'vitest';
 import type { CoreClient } from '#lib/core/client.svelte.js';
-import type { TimelineItemView } from '#src/generated/protocol';
+import type { TimelineItemView, UrlPreviewView } from '#src/generated/protocol';
 import { toasts } from '#lib/ui/toasts.svelte.js';
+import { preferences } from '#lib/settings/preferences.svelte.js';
 import { MessageActionExecutor } from './message-action-controller.svelte.js';
 import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
 
 const writeClipboard = vi.fn((_text?: string) => Promise.resolve());
 vi.mock('#lib/platform/clipboard.js', () => ({
   copyText: (text: string) => writeClipboard(text),
+}));
+
+const features = vi.hoisted(() => ({ list: [] as string[] }));
+vi.mock('#lib/core/server-features.svelte.js', () => ({
+  serverFeatures: () => features.list,
 }));
 
 function message(): TimelineItemView {
@@ -39,6 +45,8 @@ function message(): TimelineItemView {
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    shared_by: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,
@@ -56,6 +64,7 @@ function fixture() {
     senderTimezone: null,
     anchor: null,
     hasLinkPreviews: false,
+    linkPreviews: [] as UrlPreviewView[],
     onEdit: vi.fn(),
     onDelete: vi.fn(),
     onOpenThread: vi.fn(),
@@ -166,4 +175,20 @@ test('copying message text writes to clipboard and shows confirmation toast', as
   await Promise.resolve();
   expect(writeClipboard).toHaveBeenCalledWith('hello');
   expect(toasts.items.at(-1)?.message).toBe('Copied');
+});
+
+test('developer tools offer deleted content without the redact level when the server supports it', () => {
+  const { context, executor } = fixture();
+  context.item.is_own = false;
+  context.item.content = { kind: 'redacted', reason: null, redacted_by: null };
+  features.list = ['fi.mau.msc2815'];
+  expect(executor.actions.onViewRedacted).toBeUndefined();
+  preferences.developerTools = true;
+  expect(executor.actions.onViewRedacted).toBeDefined();
+  features.list = [];
+  expect(executor.actions.onViewRedacted).toBeUndefined();
+  context.canRedactOthers = true;
+  context.item.redacted_on_ban = true;
+  expect(executor.actions.onViewRedacted).toBeDefined();
+  preferences.developerTools = false;
 });

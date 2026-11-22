@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { copyText } from '#lib/platform/clipboard.js';
+  import { Copied } from '#lib/ui/copied.svelte.js';
   import ArrowLeftIcon from 'phosphor-svelte/lib/ArrowLeftIcon';
   import DownloadSimpleIcon from 'phosphor-svelte/lib/DownloadSimpleIcon';
 
@@ -8,10 +8,13 @@
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import LinkButton from '#lib/ui/primitives/LinkButton.svelte';
-  import { toasts } from '#lib/ui/toasts.svelte.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
 
+  import CodeViewControls from './CodeViewControls.svelte';
+  import { splitCodeLines } from './code-lines.js';
+
   const MAX_HIGHLIGHT_CHARS = 100_000;
+  const MAX_NUMBERED_LINES = 5000;
   const PREVIEW_LINES = 12;
   const PREVIEW_CHARS = 2000;
 
@@ -26,14 +29,22 @@
 
   let text = $state<string | null>(null);
   let open = $state(false);
-  let copied = $state(false);
+  let wrapped = $state(true);
+  let lineNumbers = $derived(language !== null);
+  const copied = new Copied();
   let html = $state<string | null>(null);
   let previewHtml = $state<string | null>(null);
 
   let preview = $derived(
-    text === null ? '' : text.split('\n').slice(0, PREVIEW_LINES).join('\n').slice(0, PREVIEW_CHARS)
+    text === null ? '' : text.split('\n', PREVIEW_LINES).join('\n').slice(0, PREVIEW_CHARS)
   );
   let truncated = $derived(text !== null && preview.length < text.length);
+  let numberable = $derived.by(() => {
+    if (!open || text === null) return false;
+    const lines = text.split('\n', MAX_NUMBERED_LINES + 1).length;
+    return lines > 1 && lines <= MAX_NUMBERED_LINES;
+  });
+  let numbered = $derived(numberable && lineNumbers);
 
   $effect(() => {
     let active = true;
@@ -89,21 +100,18 @@
     return highlightCode(source, language);
   }
 
-  function paint(painted: string | null) {
+  function paint(source: string, painted: string | null, numbered = false) {
     return (node: HTMLElement) => {
-      if (painted !== null) node.innerHTML = painted;
+      if (painted === null) node.textContent = source;
+      else node.innerHTML = painted;
+      if (numbered) splitCodeLines(node);
+      else node.classList.remove('code-lines');
     };
   }
 
   async function copy(): Promise<void> {
     if (text === null) return;
-    try {
-      await copyText(text);
-      copied = true;
-    } catch (error) {
-      console.debug('[sable media] clipboard unavailable', error);
-      toasts.error(i18n.t('errors.actionFailed'));
-    }
+    await copied.copy(text);
   }
 </script>
 
@@ -116,7 +124,7 @@
       open = true;
     }}
   >
-    <pre class="text-preview-body"><code {@attach paint(previewHtml)}>{preview}</code></pre>
+    <pre class="text-preview-body"><code {@attach paint(preview, previewHtml)}></code></pre>
     {#if truncated}
       <span class="text-preview-more">{i18n.t('timeline.openFileMore')}</span>
     {/if}
@@ -132,20 +140,27 @@
         variant="ghost"
         onclick={() => {
           open = false;
-        }}><ArrowLeftIcon /></IconButton
+        }}><ArrowLeftIcon class="mirror-rtl" /></IconButton
       >
       <span class="text-viewer-name">{name}</span>
+      <CodeViewControls bind:wrapped bind:lineNumbers {numberable} />
       <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- an object URL for the media bytes, not a route -->
       <LinkButton href={src} download={name} size="small" onclick={onDownload}>
         <DownloadSimpleIcon aria-hidden="true" />
         {i18n.t('common.download')}
       </LinkButton>
       <Button variant="primary" size="small" onclick={copy}>
-        {copied ? i18n.t('common.copied') : i18n.t('timeline.copyAll')}
+        {copied.value ? i18n.t('common.copied') : i18n.t('timeline.copyAll')}
       </Button>
     </header>
-    <div class="text-viewer-scroll" {@attach scrollHint}>
-      <pre class="text-viewer-body"><code {@attach paint(html)}>{text ?? ''}</code></pre>
+    <div
+      class="text-viewer-scroll"
+      data-wrapped={wrapped ? '' : undefined}
+      data-line-numbers={numbered ? '' : undefined}
+      {@attach scrollHint}
+    >
+      <pre class="text-viewer-body code-body"><code {@attach paint(text ?? '', html, numbered)}
+        ></code></pre>
     </div>
   </div>
 </DialogFrame>
@@ -207,6 +222,7 @@
     border-bottom: var(--border-width) solid var(--surface-container-line);
     display: flex;
     flex: none;
+    flex-wrap: wrap;
     gap: var(--space-200);
     padding: var(--space-200);
   }
@@ -230,9 +246,7 @@
   .text-viewer-body {
     line-height: var(--code-line-height);
     margin: 0;
-    overflow-wrap: anywhere;
     padding: var(--space-500);
-    white-space: pre-wrap;
   }
 
   .text-viewer-body code {

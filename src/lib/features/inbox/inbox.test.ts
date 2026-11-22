@@ -1,9 +1,9 @@
 import { expect, test } from 'vitest';
 
-import type { BookmarkView, RoomListItemView } from '#src/generated/protocol';
+import type { BookmarkView, InboxItemView, RoomListItemView } from '#src/generated/protocol';
 
 import { NO_UNREAD, type RoomUnread } from '#lib/rooms/unread.js';
-import { withCounts } from '#lib/rooms/summary-fixtures.js';
+import { roomView } from '#lib/test-support/room-views.js';
 
 import {
   backfillSignal,
@@ -18,37 +18,15 @@ import {
   parseFilter,
   pendingInvites,
   senderName,
+  timelineMentions,
   unlistedNotifications,
 } from './inbox';
 
 function room(overrides: Partial<RoomListItemView>): RoomListItemView {
-  return withCounts({
-    room_id: '!room:example.org',
-    canonical_alias: null,
-    name: null,
-    topic: null,
-    topic_html: null,
-    avatar_url: null,
-    is_direct: false,
-    direct_targets: [],
-    join_rule: 'invite',
-    tags: [],
-    state: 'joined',
-    encrypted: null,
-    is_tombstoned: false,
-    call_participants: [],
-    screen_sharers: [],
-    room_kind: 'text',
+  return roomView({
     supports_knock: true,
     supports_restricted: true,
     supports_knock_restricted: true,
-    space_children: [],
-    bridge: null,
-    unread: 0,
-    notifying: 0,
-    highlight: 0,
-    marked_unread: false,
-    latest_event: null,
     ...overrides,
   });
 }
@@ -94,17 +72,19 @@ test('a room the badge counts but the list does not show is unlisted', () => {
     room({ room_id: '!listed', is_direct: true, unread: 1, notifying: 1 }),
     room({ room_id: '!stale', is_direct: true, unread: 2, notifying: 2 }),
     room({ room_id: '!quiet-room', unread: 7, notifying: 7 }),
+    room({ room_id: '!edited', notifying: 1 }),
   ];
 
   const badgeFor = badgesOf({
     '!listed': { unread: 1, notifying: 1 },
     '!stale': { unread: 2, notifying: 2 },
     '!quiet-room': { unread: 7 },
+    '!edited': { unread: 0, notifying: 1 },
   });
 
   expect(
     unlistedNotifications(rooms, 'all', badgeFor, ['!listed']).map((each) => each.room_id)
-  ).toEqual(['!stale']);
+  ).toEqual(['!stale', '!edited']);
   expect(unlistedNotifications(rooms, 'mentions', badgeFor, [])).toEqual([]);
 });
 
@@ -180,7 +160,16 @@ test('notifications keep the order of the rooms they are given', () => {
       latest_event:
         timestamp === null
           ? null
-          : { sender: null, body: 'hi', timestamp, sending: false, event_id: null },
+          : {
+              sender: null,
+              own: false,
+              sender_label: null,
+              kind: 'text',
+              body: 'hi',
+              timestamp,
+              sending: false,
+              event_id: null,
+            },
     });
 
   const ordered = notifications(
@@ -212,7 +201,16 @@ test('an invite without a sender still lists', () => {
     inviter(
       room({
         state: 'invited',
-        latest_event: { sender: '@a:x', body: '', timestamp: 1, sending: false, event_id: null },
+        latest_event: {
+          sender: '@a:x',
+          own: false,
+          sender_label: null,
+          kind: 'text',
+          body: '',
+          timestamp: 1,
+          sending: false,
+          event_id: null,
+        },
       })
     )
   ).toBe('@a:x');
@@ -341,4 +339,16 @@ test('only a room with notifications moves the backfill signal', () => {
 
   expect(backfillSignal([quiet('$chatter'), pinged('$b')])).toBe(before);
   expect(backfillSignal([quiet('$a'), pinged('$ping')])).not.toBe(before);
+});
+
+test('the mentions to visit in a room are ordered oldest first and leave thread mentions out', () => {
+  const mention = (event_id: string, ts: number, thread_root: string | null = null) =>
+    ({ event_id, ts, thread_root }) as InboxItemView;
+  expect(
+    timelineMentions([
+      mention('$newest', 30),
+      mention('$threaded', 20, '$root'),
+      mention('$oldest', 10),
+    ])
+  ).toEqual(['$oldest', '$newest']);
 });

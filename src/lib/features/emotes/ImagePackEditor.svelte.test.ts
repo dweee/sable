@@ -49,6 +49,18 @@ function pack(usage: ImagePackView['usage']): ImagePackView {
   };
 }
 
+function crowdedPack(count: number): ImagePackView {
+  const base = pack(['emoticon', 'sticker']);
+  return {
+    ...base,
+    images: Array.from({ length: count }, (_, index) => ({
+      ...base.images[0],
+      shortcode: `emote${index}`,
+      url: `mxc://a/emote${index}`,
+    })),
+  };
+}
+
 const button = (name: string) => screen.getByRole('button', { name });
 
 function imageInput(): HTMLInputElement {
@@ -64,9 +76,6 @@ async function pickImage(): Promise<void> {
     imageInput(),
     new File([new Uint8Array([1])], 'party.png', { type: 'image/png' })
   );
-  await vi.waitFor(() => {
-    expect(button('Upload')).toBeEnabled();
-  });
 }
 
 async function appliedDraft(applied: PackDraft[]): Promise<PackDraft> {
@@ -75,7 +84,17 @@ async function appliedDraft(applied: PackDraft[]): Promise<PackDraft> {
   return applied[0];
 }
 
+// happy-dom has no layout, so rows would measure zero tall and all fit in the viewport.
+function giveRowsHeight(): void {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (
+    this: HTMLElement
+  ) {
+    return this.matches('.setting-row') ? 56 : 0;
+  });
+}
+
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
@@ -84,16 +103,71 @@ test('upload controls appear before the existing images', () => {
   render(ImagePackEditor, { props: { pack: pack(['sticker']), canEdit: true } });
 
   const image = screen.getByText(':wave:');
-  for (const control of [screen.getByRole('textbox', { name: 'Shortcode' }), button('Upload')]) {
-    expect(control.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  }
+  expect(
+    button('Upload').compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy();
+});
+
+test('a picked image waits for its shortcode and uploads on save', async () => {
+  mocks.uploadMedia.mockResolvedValue('mxc://example.org/party');
+  const applied: PackDraft[] = [];
+  render(ImagePackEditor, {
+    props: {
+      pack: pack(['sticker']),
+      canEdit: true,
+      onApply: (draft: PackDraft) => {
+        applied.push(draft);
+        return Promise.resolve();
+      },
+    },
+  });
+
+  await pickImage();
+  const field = screen.getByRole('textbox', { name: 'Shortcode' });
+  expect(field).toHaveValue('party');
+  expect(mocks.uploadMedia).not.toHaveBeenCalled();
+
+  await userEvent.clear(field);
+  await userEvent.type(field, 'parrot');
+  const draft = await appliedDraft(applied);
+
+  expect(mocks.uploadMedia).toHaveBeenCalledOnce();
+  expect(draft.images.map((image) => image.shortcode)).toEqual(['wave', 'parrot']);
+  expect(screen.queryByRole('textbox', { name: 'Shortcode' })).not.toBeInTheDocument();
+});
+
+test('a picked image with a taken or invalid shortcode blocks saving', async () => {
+  render(ImagePackEditor, {
+    props: { pack: pack(['sticker']), canEdit: true, onApply: () => Promise.resolve() },
+  });
+
+  await pickImage();
+  const field = screen.getByRole('textbox', { name: 'Shortcode' });
+  await userEvent.clear(field);
+  await userEvent.type(field, 'wave');
+
+  expect(button('Apply changes')).toBeDisabled();
+  expect(field).toHaveAttribute('aria-invalid', 'true');
+
+  await userEvent.clear(field);
+  await userEvent.type(field, 'bad code');
+  expect(button('Apply changes')).toBeDisabled();
+});
+
+test('resetting drops picked images without uploading them', async () => {
+  render(ImagePackEditor, { props: { pack: pack(['sticker']), canEdit: true } });
+
+  await pickImage();
+  await userEvent.click(button('Reset'));
+
+  expect(screen.queryByRole('textbox', { name: 'Shortcode' })).not.toBeInTheDocument();
+  expect(mocks.uploadMedia).not.toHaveBeenCalled();
 });
 
 test('read-only packs do not show upload controls', () => {
   render(ImagePackEditor, { props: { pack: pack(['sticker']), canEdit: false } });
 
   expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('textbox', { name: 'Shortcode' })).not.toBeInTheDocument();
 });
 
 test('an image uploaded to a sticker-only pack follows the pack usage', async () => {
@@ -406,4 +480,40 @@ test('navigating with nothing edited, or within the same url, is left alone', as
 
   await userEvent.type(screen.getByRole('textbox', { name: 'Attribution' }), 'x');
   expect(navigate('http://localhost/rooms/a')).not.toHaveBeenCalled();
+});
+
+test('a pack with hundreds of images mounts only the rows near the top', () => {
+  giveRowsHeight();
+  render(ImagePackEditor, { props: { pack: crowdedPack(400), canEdit: true } });
+
+  const rows = screen.getAllByText(/^:emote\d+:$/);
+  expect(rows.length).toBeGreaterThan(0);
+  expect(rows.length).toBeLessThan(60);
+  expect(screen.getByText(':emote0:')).toBeTruthy();
+  expect(screen.queryByText(':emote399:')).toBeNull();
+});
+
+test('the row being renamed stays mounted after it scrolls out of view', async () => {
+  giveRowsHeight();
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  document.body.append(scroller);
+  render(ImagePackEditor, {
+    target: scroller,
+    props: { pack: crowdedPack(400), canEdit: true },
+  });
+
+  // Without layout the list never moves up the page as the host scrolls, so say where it is.
+  const list = screen.getByText(':emote0:').closest('ul');
+  if (!list) throw new Error('the image list was not found');
+  list.getBoundingClientRect = () => new DOMRect(0, -scroller.scrollTop, 0, 0);
+
+  await userEvent.click(screen.getByRole('button', { name: 'Rename :emote0:' }));
+  scroller.scrollTop = 6000;
+  scroller.dispatchEvent(new Event('scroll'));
+
+  await vi.waitFor(() => {
+    expect(screen.queryByText(':emote1:')).toBeNull();
+  });
+  expect(screen.getByRole('group', { name: 'Rename :emote0:' })).toBeTruthy();
 });

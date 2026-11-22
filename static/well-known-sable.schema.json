@@ -25,6 +25,14 @@
         "themeUrl": {
           "type": "string",
           "pattern": "^(https://|[^:]*$)"
+        },
+        "lightThemeUrl": {
+          "type": "string",
+          "pattern": "^(https://|[^:]*$)"
+        },
+        "darkThemeUrl": {
+          "type": "string",
+          "pattern": "^(https://|[^:]*$)"
         }
       }
     },
@@ -111,6 +119,7 @@
             "system",
             "ar",
             "bg",
+            "ca",
             "cs",
             "de",
             "en",
@@ -191,6 +200,11 @@
             "light"
           ],
           "default": "system"
+        },
+        "deploymentTheme": {
+          "title": "Use this server’s theme",
+          "type": "boolean",
+          "default": true
         },
         "fontFamily": {
           "type": "string",
@@ -280,15 +294,47 @@
           ],
           "default": "always"
         },
+        "showEncryptionStatusIcon": {
+          "title": "Show encryption status icon",
+          "type": "boolean",
+          "default": true
+        },
+        "voiceParticipantPlacement": {
+          "title": "Voice room participants",
+          "enum": [
+            "both",
+            "below",
+            "inline"
+          ],
+          "default": "both"
+        },
         "showRoomBanners": {
           "title": "Room banners above the list",
           "type": "boolean",
           "default": true
         },
+        "bannerFit": {
+          "title": "Banner size",
+          "enum": [
+            "fixed",
+            "image"
+          ],
+          "default": "fixed"
+        },
         "showDmTopics": {
           "title": "Show topics in direct messages",
           "type": "boolean",
           "default": true
+        },
+        "messagePreviews": {
+          "title": "Message previews",
+          "enum": [
+            "off",
+            "direct",
+            "rooms",
+            "all"
+          ],
+          "default": "off"
         },
         "roomBannerHeight": {
           "type": "number",
@@ -312,7 +358,7 @@
           "default": "3"
         },
         "showHome": {
-          "title": "All rooms in the sidebar",
+          "title": "Show Home with all rooms",
           "type": "boolean",
           "default": false
         },
@@ -419,6 +465,11 @@
           "title": "Hide members in read-only rooms",
           "type": "boolean",
           "default": true
+        },
+        "hideSentBeforeJoined": {
+          "title": "Hide messages sent before you joined",
+          "type": "boolean",
+          "default": false
         },
         "showTombstoneEvents": {
           "title": "Show removed-message placeholders",
@@ -529,6 +580,7 @@
         "roomSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],
@@ -537,6 +589,7 @@
         "directSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],
@@ -609,6 +662,15 @@
           "title": "Edit your last message with s/old/new",
           "type": "boolean",
           "default": false
+        },
+        "linkMscReferences": {
+          "title": "Link MSC references",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "default": "ask"
         },
         "inlineEditing": {
           "title": "Edit messages in the timeline",
@@ -826,6 +888,11 @@
           "type": "boolean",
           "default": true
         },
+        "reuploadGifs": {
+          "title": "Upload picked GIFs to your homeserver",
+          "type": "boolean",
+          "default": false
+        },
         "urlPreviews": {
           "title": "Server-side embeds",
           "type": "boolean",
@@ -863,7 +930,7 @@
           "default": true
         },
         "faviconForMentionsOnly": {
-          "title": "Tab badge for mentions and keywords",
+          "title": "Tab badge only for mentions and keywords",
           "type": "boolean",
           "default": false
         },
@@ -913,6 +980,7 @@
             "system",
             "ar",
             "bg",
+            "ca",
             "cs",
             "de",
             "en",
@@ -993,6 +1061,11 @@
             "light"
           ],
           "default": "system"
+        },
+        "deploymentTheme": {
+          "title": "Use this server’s theme",
+          "type": "boolean",
+          "default": true
         },
         "fontFamily": {
           "type": "string",
@@ -1082,15 +1155,47 @@
           ],
           "default": "always"
         },
+        "showEncryptionStatusIcon": {
+          "title": "Show encryption status icon",
+          "type": "boolean",
+          "default": true
+        },
+        "voiceParticipantPlacement": {
+          "title": "Voice room participants",
+          "enum": [
+            "both",
+            "below",
+            "inline"
+          ],
+          "default": "both"
+        },
         "showRoomBanners": {
           "title": "Room banners above the list",
           "type": "boolean",
           "default": true
         },
+        "bannerFit": {
+          "title": "Banner size",
+          "enum": [
+            "fixed",
+            "image"
+          ],
+          "default": "fixed"
+        },
         "showDmTopics": {
           "title": "Show topics in direct messages",
           "type": "boolean",
           "default": true
+        },
+        "messagePreviews": {
+          "title": "Message previews",
+          "enum": [
+            "off",
+            "direct",
+            "rooms",
+            "all"
+          ],
+          "default": "off"
         },
         "roomBannerHeight": {
           "type": "number",
@@ -1114,7 +1219,7 @@
           "default": "3"
         },
         "showHome": {
-          "title": "All rooms in the sidebar",
+          "title": "Show Home with all rooms",
           "type": "boolean",
           "default": false
         },
@@ -1221,6 +1326,11 @@
           "title": "Hide members in read-only rooms",
           "type": "boolean",
           "default": true
+        },
+        "hideSentBeforeJoined": {
+          "title": "Hide messages sent before you joined",
+          "type": "boolean",
+          "default": false
         },
         "showTombstoneEvents": {
           "title": "Show removed-message placeholders",
@@ -1331,6 +1441,7 @@
         "roomSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],
@@ -1339,6 +1450,7 @@
         "directSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],
@@ -1411,6 +1523,15 @@
           "title": "Edit your last message with s/old/new",
           "type": "boolean",
           "default": false
+        },
+        "linkMscReferences": {
+          "title": "Link MSC references",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "default": "ask"
         },
         "inlineEditing": {
           "title": "Edit messages in the timeline",
@@ -1628,6 +1749,11 @@
           "type": "boolean",
           "default": true
         },
+        "reuploadGifs": {
+          "title": "Upload picked GIFs to your homeserver",
+          "type": "boolean",
+          "default": false
+        },
         "urlPreviews": {
           "title": "Server-side embeds",
           "type": "boolean",
@@ -1665,7 +1791,7 @@
           "default": true
         },
         "faviconForMentionsOnly": {
-          "title": "Tab badge for mentions and keywords",
+          "title": "Tab badge only for mentions and keywords",
           "type": "boolean",
           "default": false
         },

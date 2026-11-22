@@ -281,7 +281,7 @@ impl Core {
         }
     }
 
-    async fn room_document(
+    pub(crate) async fn room_document(
         &self,
         room_id: &OwnedRoomId,
         event_type: &str,
@@ -318,8 +318,16 @@ impl Core {
         SetMediaPreviewConfigParams { config: update }: SetMediaPreviewConfigParams,
     ) -> Result<MediaPreviewConfigView, RpcError> {
         let _guard = self.account_data_lock.lock().await;
-        let content = media_preview_content(self.stored_media_preview_config().await?, update);
-        self.set_account_data(MEDIA_PREVIEW_EVENT, &content).await?;
+        let mut content = Value::Null;
+        self.update_account_data_locked(
+            &[MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT],
+            "set_media_preview_settings",
+            async |stored| {
+                content = media_preview_content(stored, update);
+                Ok(Some(content.clone()))
+            },
+        )
+        .await?;
         self.set_account_data(UNSTABLE_MEDIA_PREVIEW_EVENT, &content)
             .await?;
         Ok(media_preview_config(Some(&content)))
@@ -341,7 +349,7 @@ impl Core {
         let content = room_media_previews_content(stored, previews);
         let room = self.room(room_id).await?;
         for event in [MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT] {
-            let raw = matrix_sdk::ruma::serde::Raw::new(&content)
+            let raw = ruma::serde::Raw::new(&content)
                 .or_failed(self, "set_room_media_previews")?
                 .cast_unchecked();
             room.set_account_data_raw(event.into(), raw)
@@ -361,7 +369,7 @@ impl Core {
 
     pub(crate) async fn synced_dm_spaces_of(
         client: &matrix_sdk::Client,
-        room_id: &matrix_sdk::ruma::RoomId,
+        room_id: &ruma::RoomId,
     ) -> Vec<OwnedRoomId> {
         synced_dm_spaces(client)
             .await
@@ -374,14 +382,12 @@ impl Core {
         room_id: OwnedRoomId,
         space_ids: Vec<OwnedRoomId>,
     ) -> Result<BTreeMap<OwnedRoomId, Vec<OwnedRoomId>>, RpcError> {
-        let _guard = self.account_data_lock.lock().await;
-        let content = dm_spaces_content(
-            self.account_document(DM_SPACES_EVENT).await?,
-            room_id,
-            space_ids,
-        );
-        self.set_account_data(DM_SPACES_EVENT, &content).await?;
-        Ok(dm_spaces(Some(&content)))
+        let content = self
+            .update_account_data(&[DM_SPACES_EVENT], "set_dm_spaces", async |stored| {
+                Ok(Some(dm_spaces_content(stored, room_id, space_ids)))
+            })
+            .await?;
+        Ok(dm_spaces(content.as_ref()))
     }
 
     pub(crate) async fn space_notifications(&self) -> Result<SpaceNotifications, RpcError> {
@@ -396,14 +402,14 @@ impl Core {
         &self,
         update: impl FnOnce(&mut SpaceNotifications),
     ) -> Result<SpaceNotifications, RpcError> {
-        let _guard = self.account_data_lock.lock().await;
-        let content = space_notifications_content(
-            self.account_document(SPACE_NOTIFICATIONS_EVENT).await?,
-            update,
-        );
-        self.set_account_data(SPACE_NOTIFICATIONS_EVENT, &content)
+        let content = self
+            .update_account_data(
+                &[SPACE_NOTIFICATIONS_EVENT],
+                "update_space_notifications",
+                async |stored| Ok(Some(space_notifications_content(stored, update))),
+            )
             .await?;
-        Ok(space_notifications(Some(&content)))
+        Ok(space_notifications(content.as_ref()))
     }
 
     pub(crate) async fn dismissed_invites(&self) -> Result<Vec<OwnedRoomId>, RpcError> {
@@ -419,15 +425,23 @@ impl Core {
         room_id: OwnedRoomId,
         dismissed: bool,
     ) -> Result<Vec<OwnedRoomId>, RpcError> {
-        let _guard = self.account_data_lock.lock().await;
-        let mut room_ids = self.dismissed_invites().await?;
-        room_ids.retain(|known| *known != room_id);
-        if dismissed {
-            room_ids.push(room_id);
-        }
-        let out = DismissedInvitesOut { room_ids };
-        self.set_account_data(DISMISSED_INVITES_EVENT, &out).await?;
-        Ok(out.room_ids)
+        let content = self
+            .update_account_data(
+                &[DISMISSED_INVITES_EVENT],
+                "set_invite_dismissed",
+                async |stored| {
+                    let mut room_ids = dismissed_invites(stored.as_ref());
+                    room_ids.retain(|known| *known != room_id);
+                    if dismissed {
+                        room_ids.push(room_id);
+                    }
+                    serde_json::to_value(DismissedInvitesOut { room_ids })
+                        .map(Some)
+                        .or_failed(self, "set_invite_dismissed")
+                },
+            )
+            .await?;
+        Ok(dismissed_invites(content.as_ref()))
     }
 }
 
@@ -562,7 +576,7 @@ mod tests {
         );
         assert_eq!(
             dismissed_invites(Some(&json!({ "roomIds": "nope" }))),
-            [] as [matrix_sdk::ruma::OwnedRoomId; 0]
+            Vec::<ruma::OwnedRoomId>::new()
         );
     }
 

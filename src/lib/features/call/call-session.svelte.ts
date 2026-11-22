@@ -27,6 +27,7 @@ import { acquireCallOwner, type CallOwnerLease } from './call-owner';
 import type { LivekitTransport } from './livekit-transport';
 import { createNativeTransport } from './native-transport';
 import { hasNativeCalls, nativeCallOwnsAudio, setNativeCallAudio } from '#lib/platform/calls.js';
+import { LocalNetworkBlockedError, withLocalNetworkAccess } from '#lib/platform/local-network.js';
 import { commandErrorCode } from './command-error';
 import { CallTelemetry } from './call-telemetry';
 import { recordCallDebug, type CallDebug } from './call-debug.svelte.js';
@@ -40,7 +41,13 @@ import { playSound, releaseNotificationAudio } from '../notifications/sound';
 
 export type CallLifecycle = 'idle' | 'joining' | 'connecting' | 'active' | 'leaving' | 'failed';
 
-export type CallFailure = 'busy' | 'no-focus' | 'e2ee-unsupported' | 'e2ee-failed' | 'setup-failed';
+export type CallFailure =
+  | 'busy'
+  | 'no-focus'
+  | 'e2ee-unsupported'
+  | 'e2ee-failed'
+  | 'local-network-blocked'
+  | 'setup-failed';
 
 export type CallMedia = { microphone: boolean; camera: boolean };
 
@@ -286,11 +293,7 @@ export class CallSession {
           this.#client.rpc,
           roomId,
           serviceUrl,
-          hasNativeCalls()
-            ? 'legacy'
-            : preferences.callMode === 'auto'
-              ? null
-              : preferences.callMode,
+          preferences.callMode === 'auto' ? null : preferences.callMode,
           media.camera ? 'video' : 'audio'
         )
       );
@@ -323,14 +326,12 @@ export class CallSession {
                 : 'native';
             return { transport: injected, kind };
           }
-          if (grant.mode === 'legacy') {
-            const native = await createNativeTransport(
-              String(grant.session),
-              grant.identity,
-              this.#deps.roomName?.(roomId) ?? roomId
-            );
-            if (native) return { transport: native, kind: 'native' };
-          }
+          const native = await createNativeTransport(
+            String(grant.session),
+            grant.identity,
+            this.#deps.roomName?.(roomId) ?? roomId
+          );
+          if (native) return { transport: native, kind: 'native' };
           if (grant.backends.length) {
             const multi = await import('./multi-sfu-transport');
             return {
@@ -364,7 +365,6 @@ export class CallSession {
       }
       recordCallDebug({
         requested: preferences.callMode,
-        nativeForced: hasNativeCalls(),
         mode: grant.mode,
         reason: grant.mode_reason,
         stickyAvailable: grant.sticky_available,
@@ -451,17 +451,19 @@ export class CallSession {
       const connectPublisherId = this.#latestBackends?.publisherId ?? grant.publisher_id;
       this.#keysAccepted = true;
       await telemetry.step('call.transport.connect', async () => {
-        await transport.connect({
-          url: grant.url,
-          token: grant.jwt,
-          microphoneEnabled: this.#canTransmit(),
-          microphoneStandby:
-            this.microphoneEnabled && !this.listenOnly && this.inputMode === 'push-to-talk',
-          cameraEnabled: media.camera && !this.listenOnly,
-          encryptionKeys: encryptionKeys.map(({ key }) => key),
-          publisherId: connectPublisherId,
-          backends: connectBackends,
-        });
+        await withLocalNetworkAccess(grant.url, () =>
+          transport.connect({
+            url: grant.url,
+            token: grant.jwt,
+            microphoneEnabled: this.#canTransmit(),
+            microphoneStandby:
+              this.microphoneEnabled && !this.listenOnly && this.inputMode === 'push-to-talk',
+            cameraEnabled: media.camera && !this.listenOnly,
+            encryptionKeys: encryptionKeys.map(({ key }) => key),
+            publisherId: connectPublisherId,
+            backends: connectBackends,
+          })
+        );
         if (transport.getState().connection !== 'connected') {
           throw new Error('transport-not-connected');
         }
@@ -711,10 +713,13 @@ export class CallSession {
 
   #classify(error: unknown): CallFailure {
     if (error instanceof Error && error.message === 'own-key-timeout') return 'e2ee-failed';
+    if (error instanceof LocalNetworkBlockedError) return 'local-network-blocked';
     return commandErrorCode(error) === 'no_call_focus' ? 'no-focus' : 'setup-failed';
   }
 
   #fail(failure: CallFailure): void {
+    // A call that was up and dropped sounds like leaving it; one that never connected is silent.
+    if (this.connectedAt !== null) this.#cue('call_leave');
     this.failure = failure;
     this.lifecycle = 'failed';
     this.connectedAt = null;

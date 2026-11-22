@@ -540,26 +540,6 @@
     }
   },
   {
-    "markdown": "MSC1234 and msc42",
-    "pills": [],
-    "body": "MSC1234 and msc42",
-    "formatted_body": "<a href=\"https://github.com/matrix-org/matrix-spec-proposals/pull/1234\">MSC1234</a> and <a href=\"https://github.com/matrix-org/matrix-spec-proposals/pull/42\">msc42</a>",
-    "mentions": {
-      "user_ids": [],
-      "room": false
-    }
-  },
-  {
-    "markdown": "see MSC4550's text",
-    "pills": [],
-    "body": "see MSC4550's text",
-    "formatted_body": "see <a href=\"https://github.com/matrix-org/matrix-spec-proposals/pull/4550\">MSC4550</a>'s text",
-    "mentions": {
-      "user_ids": [],
-      "room": false
-    }
-  },
-  {
     "markdown": "`MSC1234`",
     "pills": [],
     "body": "`MSC1234`",
@@ -760,7 +740,7 @@
       }
     ],
     "body": "hi Alice!",
-    "formatted_body": "hi <a href=\"https://matrix.to/#/@alice:example.org\">Alice</a>!",
+    "formatted_body": "hi <a href=\"matrix:u/alice:example.org\">Alice</a>!",
     "mentions": {
       "user_ids": ["@alice:example.org"],
       "room": false
@@ -800,7 +780,7 @@
       }
     ],
     "body": "**Alice** in Lounge",
-    "formatted_body": "<a href=\"https://matrix.to/#/@alice:example.org\">Alice</a> in <a href=\"https://matrix.to/#/!room:example.org?via=example.org&amp;via=other.org\">Lounge</a>",
+    "formatted_body": "<a href=\"matrix:u/alice:example.org\">Alice</a> in <a href=\"matrix:roomid/room:example.org?via=example.org&amp;via=other.org\">Lounge</a>",
     "mentions": {
       "user_ids": ["@alice:example.org"],
       "room": false

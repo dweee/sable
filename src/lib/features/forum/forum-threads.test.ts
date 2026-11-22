@@ -1,8 +1,8 @@
 import { expect, test } from 'vitest';
 
-import type { TimelineItemView } from '#src/generated/protocol';
+import type { PerMessageProfileView, TimelineItemView } from '#src/generated/protocol';
 
-import { collectForumThreads } from './forum-threads';
+import { collectForumThreads, filterThreads, sortThreads } from './forum-threads';
 import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
 
 function item(overrides: Partial<TimelineItemView> & { id: string }): TimelineItemView {
@@ -32,6 +32,8 @@ function item(overrides: Partial<TimelineItemView> & { id: string }): TimelineIt
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    shared_by: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,
@@ -60,6 +62,39 @@ test('collects an item with a thread summary as a root', () => {
   expect(threads[0]?.lastBody).toBe('latest');
   expect(threads[0]?.lastActivityAt).toBe(100);
 });
+
+test('hides a redacted post even when its thread summary remains', () => {
+  const root = item({
+    id: 'root',
+    content: { kind: 'redacted', reason: null, redacted_by: null },
+    thread_summary: {
+      num_replies: 2,
+      latest_event_id: '$reply',
+      latest_body: 'latest',
+      latest_fallback: null,
+    },
+  });
+  const reply = item({ id: 'reply', thread_root: '$root' });
+  const visible = item({ id: 'visible' });
+
+  expect(collectForumThreads([root, reply, visible], null).map((thread) => thread.eventId)).toEqual(
+    ['$visible']
+  );
+});
+
+test.each([false, true])(
+  'a stale root cannot restore a redacted post (listed first: %s)',
+  (listedFirst) => {
+    const listed = item({ id: 'root' });
+    const redacted = item({
+      id: 'root',
+      content: { kind: 'redacted', reason: null, redacted_by: null },
+    });
+    const items = listedFirst ? [listed, redacted] : [redacted, listed];
+
+    expect(collectForumThreads(items, null)).toEqual([]);
+  }
+);
 
 test('collects a post nobody has replied to yet', () => {
   const plain = item({ id: 'plain', timestamp: 5 });
@@ -105,6 +140,7 @@ test('ignores a thread reply, a plain reply and a state change', () => {
       sender_name: null,
       body: null,
       fallback: null,
+      emotes: [],
     },
   });
   const joined = item({
@@ -291,4 +327,215 @@ test('uses hydrated latest replies and thread receipts when the main timeline hi
     collectForumThreads([older], '@alice:example.org', [reply], new Map([['$older', false]]))[0]
       ?.unread
   ).toBe(false);
+});
+
+test('counts each voter once across thumbs-up variants', () => {
+  const root = item({
+    id: 'root',
+    reactions: [
+      { key: '👍', senders: ['@a:example.org', '@b:example.org'] },
+      { key: '👍🏽', senders: ['@a:example.org', '@c:example.org'] },
+      { key: '🎉', senders: ['@d:example.org'] },
+    ],
+  });
+
+  expect(collectForumThreads([root], null)[0]?.votes).toBe(3);
+});
+
+test('remembers which thumbs-up variant the user voted with', () => {
+  const root = item({
+    id: 'root',
+    reactions: [
+      { key: '👍', senders: ['@a:example.org'] },
+      { key: '👍🏽', senders: ['@me:example.org'] },
+      { key: '🎉', senders: ['@me:example.org'] },
+    ],
+  });
+
+  expect(collectForumThreads([root], '@me:example.org')[0]?.ownVote).toBe('👍🏽');
+  expect(collectForumThreads([root], '@other:example.org')[0]?.ownVote).toBeNull();
+});
+
+test('keeps the votes the timeline saw when the server lists the root too', () => {
+  const seen = item({ id: 'root', reactions: [{ key: '👍', senders: ['@a:example.org'] }] });
+  const listed = item({ id: 'root' });
+
+  expect(collectForumThreads([seen, listed], null)[0]?.votes).toBe(1);
+});
+
+test('marks a thread resolved only when its author reacted with a check mark', () => {
+  const byAuthor = item({
+    id: 'done',
+    reactions: [{ key: '✅', senders: ['@alice:example.org'] }],
+  });
+  const byOther = item({ id: 'open', reactions: [{ key: '✅', senders: ['@bob:example.org'] }] });
+
+  const threads = collectForumThreads([byAuthor, byOther], null);
+
+  expect(threads.find((thread) => thread.id === 'done')?.resolved).toBe(true);
+  expect(threads.find((thread) => thread.id === 'open')?.resolved).toBe(false);
+});
+
+test('sorts by votes, then activity, with resolved threads last', () => {
+  const voters = (count: number): string[] =>
+    Array.from({ length: count }, (_, index) => `@voter${index}:example.org`);
+  const threads = collectForumThreads(
+    [
+      item({ id: 'few', timestamp: 4, reactions: [{ key: '👍', senders: voters(1) }] }),
+      item({ id: 'many', timestamp: 1, reactions: [{ key: '👍', senders: voters(3) }] }),
+      item({ id: 'old', timestamp: 2 }),
+      item({ id: 'new', timestamp: 3 }),
+      item({
+        id: 'done',
+        timestamp: 5,
+        reactions: [
+          { key: '👍', senders: voters(9) },
+          { key: '✅', senders: ['@alice:example.org'] },
+        ],
+      }),
+    ],
+    null
+  );
+
+  expect(sortThreads(threads, 'votes').map((thread) => thread.id)).toEqual([
+    'many',
+    'few',
+    'new',
+    'old',
+    'done',
+  ]);
+});
+
+test('sorts by the date a thread was started', () => {
+  const reply = item({ id: 'reply', timestamp: 9, thread_root: '$first' });
+  const threads = collectForumThreads(
+    [item({ id: 'first', timestamp: 1 }), item({ id: 'second', timestamp: 2 }), reply],
+    null
+  );
+
+  expect(threads.map((thread) => thread.id)).toEqual(['first', 'second']);
+  expect(sortThreads(threads, 'created').map((thread) => thread.id)).toEqual(['second', 'first']);
+});
+
+test('filters threads by title, body or author', () => {
+  const threads = collectForumThreads(
+    [
+      item({ id: 'titled', forum_title: 'Release Plans' }),
+      item({ id: 'body' }),
+      item({ id: 'other', sender_name: 'Bob' }),
+    ],
+    null
+  );
+  const ids = (query: string): string[] => filterThreads(threads, query).map((thread) => thread.id);
+
+  expect(ids('  release ')).toEqual(['titled']);
+  expect(ids('BODY')).toEqual(['body']);
+  expect(ids('bob')).toEqual(['other']);
+  expect(ids('')).toHaveLength(3);
+});
+
+test('takes the thumbnail from the first image or video of a thread', () => {
+  const image = {
+    kind: 'image' as const,
+    filename: 'cat.png',
+    caption: null,
+    source: 'mxc://example.org/cat',
+    mime: 'image/png',
+    width: 640,
+    height: 480,
+    size: 1,
+    blurhash: null,
+    thumbnail: 'mxc://example.org/cat-small',
+    spoiler: 'surprise',
+  };
+  const video = { ...image, kind: 'video' as const, thumbnail: null, spoiler: null };
+  const threads = collectForumThreads(
+    [
+      item({ id: 'text' }),
+      item({
+        id: 'gallery',
+        content: { kind: 'gallery', body: '', html: '', items: [image] },
+      }),
+      item({ id: 'bare', content: { kind: 'gallery', body: '', html: '', items: [video] } }),
+    ],
+    null
+  );
+  const thumbnail = (id: string) => threads.find((thread) => thread.id === id)?.thumbnail;
+
+  expect(thumbnail('text')).toBeNull();
+  expect(thumbnail('bare')).toBeNull();
+  expect(thumbnail('gallery')).toMatchObject({
+    source: 'mxc://example.org/cat',
+    thumbnail: 'mxc://example.org/cat-small',
+    video: false,
+    spoiler: true,
+  });
+});
+
+test('a deleted latest reply falls back to the previous reply', () => {
+  const root = item({
+    id: 'root',
+    timestamp: 1,
+    thread_summary: {
+      num_replies: 2,
+      latest_event_id: '$deleted',
+      latest_body: 'Deleted reply text',
+      latest_fallback: null,
+    },
+  });
+  const earlier = item({ id: 'earlier', thread_root: '$root', timestamp: 5 });
+  const deleted = item({
+    id: 'deleted',
+    thread_root: '$root',
+    timestamp: 9,
+    content: { kind: 'redacted', reason: null, redacted_by: null },
+  });
+
+  const threads = collectForumThreads([root, earlier, deleted], null);
+  expect(threads[0]?.lastBody).toBe('earlier');
+  expect(threads[0]?.lastActivityAt).toBe(5);
+});
+
+test.each(['timeline', 'hydrated'])('a deleted latest reply from %s is not previewed', (source) => {
+  const root = item({
+    id: 'root',
+    thread_summary: {
+      num_replies: 1,
+      latest_event_id: '$reply',
+      latest_body: 'Deleted reply text',
+      latest_fallback: null,
+    },
+  });
+  const reply = item({
+    id: 'reply',
+    thread_root: '$root',
+    content: { kind: 'redacted', reason: null, redacted_by: null },
+  });
+  const threads =
+    source === 'timeline'
+      ? collectForumThreads([root, reply], null)
+      : collectForumThreads([root], null, [reply]);
+
+  expect(threads).toHaveLength(1);
+  expect(threads[0]?.preview).toBe('root');
+  expect(threads[0]?.lastBody).toBeNull();
+});
+
+test('names the latest reply by its per-message profile', () => {
+  const root = item({ id: 'root', timestamp: 100 });
+  const reply = item({
+    id: 'reply',
+    timestamp: 300,
+    thread_root: '$root',
+    sender: '@bob:example.org',
+    sender_name: 'Bob',
+    per_message_profile: {
+      id: 'p',
+      display_name: 'Silver',
+      avatar_url: null,
+      pronouns: [],
+    } as unknown as PerMessageProfileView,
+  });
+
+  expect(collectForumThreads([root, reply], null)[0]?.lastSenderName).toBe('Silver');
 });

@@ -1,15 +1,13 @@
 <script lang="ts">
   import type { ReplyView } from '#src/generated/protocol';
 
-  import '../members/avatar-button.css';
+  import './timeline-highlight.css';
   import { mediaProgress } from '#lib/ui/media-progress.svelte.js';
   import { senderDisplayColors } from '../members/members.js';
-  import { previewableLinks } from '../media/link-preview.js';
   import LinkEmbed from '../media/embeds/LinkEmbed.svelte';
   import { isMediaCaptionContent } from '../messages/media-caption.js';
   import { i18n } from '#lib/i18n.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
-  import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Skeleton from '#lib/ui/primitives/Skeleton.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import { nameColorOnDark, nameColorOnLight } from '#lib/ui/primitives/readable-color.js';
@@ -18,6 +16,8 @@
   import MessageBody from '../messages/MessageBody.svelte';
   import MessageReactions from '../messages/MessageReactions.svelte';
   import MessageActions from '../messages/MessageActions.svelte';
+  import RevealedRedaction from '../messages/RevealedRedaction.svelte';
+  import { revealState } from '../messages/revealed-redactions.svelte.js';
 
   import '#lib/ui/primitives/menu.css';
   import ReadReceiptStack from './ReadReceiptStack.svelte';
@@ -29,7 +29,9 @@
   import { formatFullTimestamp, formatMessageTimestamp, formatTime } from '#lib/ui/date-time.js';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
 
+  import { MessageLinkPreviews } from './message-link-previews.svelte';
   import { MessageSender } from './message-sender.svelte';
+  import { MessageTransfer } from './message-transfer.svelte';
   import { TimelineRow, type TimelineItemProps } from './timeline-row.svelte';
   import TimelineReplyPreview from './TimelineReplyPreview.svelte';
   import TimelineSendFailure from './TimelineSendFailure.svelte';
@@ -38,6 +40,8 @@
   import TimelineTransfer from './TimelineTransfer.svelte';
   import UndecryptableNotice from './UndecryptableNotice.svelte';
   import MessageShieldNotice from './MessageCryptoStatus.svelte';
+  import MessageSharedBy from './MessageSharedBy.svelte';
+  import TimelineSenderAvatar from './TimelineSenderAvatar.svelte';
 
   let {
     item,
@@ -88,8 +92,11 @@
   }: TimelineItemProps = $props();
 
   const labelId = $props.id();
+  const reveal = $derived(revealState(roomId, item.event_id));
   const named = $derived(layout === 'compact' || !collapsed);
+  const ownBubble = $derived(layout === 'bubble' && item.is_own && alignOwn);
 
+  const linkPreviews = new MessageLinkPreviews(() => item);
   const row = new TimelineRow(() => ({
     item,
     roomId,
@@ -102,7 +109,8 @@
     editing,
     overrideCosmetics,
     replySender,
-    hasLinkPreviews: bundledPreviews.length > 0 || previewUrls.length > 0,
+    hasLinkPreviews: linkPreviews.any,
+    linkPreviews: linkPreviews.shown,
     onToggleReaction,
     onMarkUnread,
     onReply,
@@ -130,46 +138,20 @@
     item.in_reply_to ? (events?.get(item.in_reply_to.event_id) ?? null) : null
   );
   let replySender = $derived(item.in_reply_to?.sender ?? replyTarget?.sender ?? null);
+  let shieldShown = $derived(
+    item.shield !== null && (item.shield.critical || !preferences.hideMessageShields)
+  );
   let emote = $derived(item.content.kind === 'message' && item.content.msgtype === 'emote');
   let notice = $derived(item.content.kind === 'message' && item.content.msgtype === 'notice');
   let jumbo = $derived(item.content.kind === 'message' ? (item.content.jumbo ?? null) : null);
-  let upload = $derived(
-    item.send_state?.status === 'sending' ? (item.send_state.progress ?? null) : null
-  );
-  let uploading = $derived(
-    row.pending &&
-      (item.content.kind === 'image' ||
-        item.content.kind === 'video' ||
-        item.content.kind === 'audio' ||
-        item.content.kind === 'file' ||
-        item.content.kind === 'gallery')
-  );
-  let galleryCount = $derived(item.content.kind === 'gallery' ? item.content.items.length : 0);
   const saving = mediaProgress(row.core, () => row.actionExecutor.savingSource);
-  let transfer = $derived.by(() => {
-    const onCancel = item.transaction_id ? cancelSend : undefined;
-    if (upload !== null) {
-      const part = upload.total > 0 ? Math.min(1, upload.current / upload.total) : 0;
-      const gallery = galleryCount > 1;
-      return {
-        label: i18n.t('timeline.uploading'),
-        max: 1,
-        value: gallery ? Math.min(1, (upload.index + part) / galleryCount) : part,
-        count: gallery
-          ? i18n.t('timeline.uploadingItem', {
-              current: Math.min(upload.index + 1, galleryCount),
-              count: galleryCount,
-            })
-          : null,
-        onCancel,
-      };
-    }
-    if (uploading) return { label: i18n.t('timeline.uploading'), onCancel };
-    if (saving.percent !== null)
-      return { label: i18n.t('timeline.downloading'), max: 100, value: saving.percent };
-    if (row.actionExecutor.savingSlow) return { label: i18n.t('timeline.downloading') };
-    return null;
-  });
+  const transfer = new MessageTransfer(() => ({
+    item,
+    pending: row.pending,
+    savingPercent: saving.percent,
+    savingSlow: row.actionExecutor.savingSlow,
+    onCancel: cancelSend,
+  }));
 
   let editable = $derived(
     !item.forwarded &&
@@ -192,28 +174,14 @@
       receiptReaders.length > 0
   );
   let nonTextContent = $derived(item.content.kind !== 'message');
-  let previewsRemoved = $derived(item.link_previews_removed === true);
-  let bundledPreviews = $derived(previewsRemoved ? [] : item.bundled_link_previews);
-  let previewUrls = $derived.by(() => {
-    if (previewsRemoved || bundledPreviews.length > 0) return [];
-    const content = item.content;
-    if (content.kind === 'message' || content.kind === 'gallery')
-      return previewableLinks(content.html, content.body);
-    if (isMediaCaptionContent(content) && content.caption !== null)
-      return previewableLinks(content.html ?? '', content.caption).filter(
-        (url) => url !== content.external_url
-      );
-    return [];
-  });
   let receiptWidth = $state(0);
   let receiptsInline = $derived(
     (!nonTextContent || item.content.kind === 'redacted') &&
       item.reactions.length === 0 &&
       !threadSummary &&
       !item.thread_root &&
-      bundledPreviews.length === 0 &&
-      previewUrls.length === 0 &&
-      upload === null &&
+      !linkPreviews.any &&
+      transfer.upload === null &&
       row.stalled === null
   );
 
@@ -250,6 +218,22 @@
   </span>
 {/snippet}
 
+{#snippet reactions()}
+  <MessageReactions
+    reactions={item.reactions}
+    eventId={item.event_id}
+    {currentUserId}
+    {members}
+    {roomId}
+    actionable={row.actionable}
+    onReact={row.actions.onReact}
+    {onToggleReaction}
+    onViewReactions={(index: number) => {
+      row.dialogs.open(item, { kind: 'reactions', active: index });
+    }}
+  />
+{/snippet}
+
 {#snippet inlineReceiptSlot()}
   {#if inlineReceipts}
     <span class="receipt-space" aria-hidden="true"></span>
@@ -270,28 +254,14 @@
   />
 {/snippet}
 
-{#snippet senderAvatarButton(size: 'tiny' | 'small')}
-  {#snippet avatar()}
-    <Avatar
-      class="message-avatar"
-      src={sender.avatar}
-      {size}
-      id={sender.tint ? null : item.sender}
-      name={sender.name}
-    />
-  {/snippet}
-  {#if item.sender && onSenderProfile}
-    <button
-      class="avatar-button"
-      type="button"
-      aria-label={i18n.t('timeline.senderProfile', { name: sender.name })}
-      onclick={openSenderProfile}
-    >
-      {@render avatar()}
-    </button>
-  {:else}
-    {@render avatar()}
-  {/if}
+{#snippet senderAvatar(size: 'tiny' | 'small')}
+  <TimelineSenderAvatar
+    src={sender.avatar}
+    id={sender.tint ? null : item.sender}
+    name={sender.name}
+    {size}
+    onOpenProfile={item.sender && onSenderProfile ? sender.openProfile : undefined}
+  />
 {/snippet}
 
 {#snippet actions()}
@@ -404,7 +374,9 @@
       />
     {/if}
     {#if layout !== 'compact' && !collapsed}
-      {@render senderAvatarButton('small')}
+      {#if !ownBubble}
+        {@render senderAvatar('small')}
+      {/if}
       {@render actions()}
     {:else if layout !== 'compact' && row.pending}
       <span class="collapsed-pending">
@@ -422,7 +394,7 @@
           {@render messageTime(formatTime)}
           <div class="compact-user">
             {#if avatarsInHeaders}
-              {@render senderAvatarButton('tiny')}
+              {@render senderAvatar('tiny')}
             {/if}
             <SenderName
               displayName={sender.name}
@@ -441,7 +413,7 @@
       {/if}
       {#if !collapsed && layout !== 'compact'}
         <header>
-          {#if !emote}
+          {#if !emote && !(ownBubble && !sender.persona)}
             <SenderName
               displayName={sender.name}
               accountName={sender.persona ? sender.accountName : undefined}
@@ -554,6 +526,20 @@
               redactionReason={item.event_id ? events?.redactionReason(item.event_id) : null}
               redactedBy={events?.redactor(item) ?? item.content.redacted_by ?? null}
             />
+            {#if row.actions.onViewRedacted}
+              <RevealedRedaction
+                {item}
+                {reveal}
+                onToggle={row.actions.onViewRedacted}
+                senderTimezone={row.senderTimezone}
+                {members}
+                {canRedactOthers}
+                {encrypted}
+                {onMatrixLink}
+                {onOpenMedia}
+                {onSenderProfile}
+              />
+            {/if}
             {@render inlineReceiptSlot()}
           </div>
         {:else if item.content.kind === 'unable_to_decrypt'}
@@ -579,10 +565,10 @@
           </div>
         {/if}
         {#if !editor}
-          {#each bundledPreviews as preview (preview.url)}
+          {#each linkPreviews.bundled as preview (preview.url)}
             <LinkEmbed url={preview.url} bundled={preview} {encrypted} />
           {/each}
-          {#each previewUrls as url (url)}
+          {#each linkPreviews.urls as url (url)}
             <LinkEmbed {url} {encrypted} />
           {/each}
         {/if}
@@ -596,23 +582,16 @@
             }}
           />
         {/if}
-        {#if item.reactions.length > 0}
-          <MessageReactions
-            reactions={item.reactions}
-            eventId={item.event_id}
-            {currentUserId}
-            {members}
-            {roomId}
-            actionable={row.actionable}
-            onReact={row.actions.onReact}
-            {onToggleReaction}
-            onViewReactions={(index: number) => {
-              row.dialogs.open(item, { kind: 'reactions', active: index });
-            }}
-          />
+        {#if item.reactions.length > 0 && layout === 'bubble' && trailingReceiptBadge}
+          <div class="reaction-row">
+            {@render reactions()}
+            {@render receiptSlot()}
+          </div>
+        {:else if item.reactions.length > 0}
+          {@render reactions()}
         {/if}
-        {#if transfer}
-          <TimelineTransfer {...transfer} />
+        {#if transfer.props}
+          <TimelineTransfer {...transfer.props} />
         {/if}
         {#if row.stalled}
           <TimelineSendFailure
@@ -623,14 +602,23 @@
             {onCancelSend}
           />
         {/if}
-        {#if trailingReceiptBadge}
+        {#if trailingReceiptBadge && layout === 'bubble' && item.reactions.length === 0}
+          {@render receiptSlot()}
+        {:else if trailingReceiptBadge && layout !== 'bubble'}
           <span class="receipt-tail" aria-hidden="true"></span>
         {/if}
       </div>
-      {#if item.shield && (item.shield.critical || !preferences.hideMessageShields)}
-        <MessageShieldNotice shield={item.shield} />
+      {#if shieldShown || item.shared_by}
+        <span class="crypto-indicators">
+          {#if item.shield && shieldShown}
+            <MessageShieldNotice shield={item.shield} />
+          {/if}
+          {#if item.shared_by}
+            <MessageSharedBy sharedBy={item.shared_by} />
+          {/if}
+        </span>
       {/if}
-      {#if trailingReceiptBadge}
+      {#if trailingReceiptBadge && layout !== 'bubble'}
         {@render receiptSlot()}
       {/if}
     </div>
@@ -709,7 +697,7 @@
     }
   }
 
-  .message:not(.layout-compact) > :global(.avatar-button),
+  .message:not(.layout-compact) > :global(.sender-avatar-button),
   .message:not(.layout-compact) > :global(.avatar-root.message-avatar) {
     translate: 0 var(--space-100);
   }
@@ -765,13 +753,17 @@
   }
 
   .message.collapsed {
-    padding-left: calc(var(--page-gutter) + var(--avatar-size-small) + var(--timeline-row-gap));
+    padding-inline-start: calc(
+      var(--page-gutter) + var(--avatar-size-small) + var(--timeline-row-gap)
+    );
     padding-top: 0;
   }
 
   .message.collapsed.mention-silent,
   .message.collapsed.mention-loud {
-    padding-left: calc(var(--avatar-size-small) + var(--timeline-row-gap) + var(--space-200));
+    padding-inline-start: calc(
+      var(--avatar-size-small) + var(--timeline-row-gap) + var(--space-200)
+    );
   }
 
   .collapsed-pending {
@@ -804,14 +796,6 @@
 
   .message.collapsed :global(.message-actions) {
     inset-inline-end: 0;
-  }
-
-  .message.layout-bubble.own.align-own > .collapsed-pending {
-    inset-inline: auto var(--page-gutter);
-  }
-
-  .message.highlighted {
-    --message-highlight-duration: 6s;
   }
 
   .message.highlighted:not(.mention-silent, .mention-loud) {
@@ -863,53 +847,6 @@
     line-height: 1.35;
   }
 
-  @keyframes jump {
-    0% {
-      background-color: var(--primary-container);
-      color: var(--primary-on-container);
-    }
-
-    16% {
-      background-color: var(--primary-container-active);
-      color: var(--primary-on-container);
-    }
-
-    33%,
-    100% {
-      background-color: transparent;
-      color: inherit;
-    }
-  }
-
-  @media (prefers-reduced-motion: no-preference) {
-    :global(html:not([data-reduced-motion='on'])) .message.highlighted {
-      animation: jump var(--message-highlight-duration) var(--motion-easing-standard);
-    }
-  }
-
-  @keyframes jump-reduced {
-    0% {
-      background-color: var(--primary-container);
-      color: var(--primary-on-container);
-    }
-
-    33%,
-    100% {
-      background-color: transparent;
-      color: inherit;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .message.highlighted {
-      animation: jump-reduced var(--message-highlight-duration) steps(1, end);
-    }
-  }
-
-  :global(html[data-reduced-motion='on']) .message.highlighted {
-    animation: jump-reduced var(--message-highlight-duration) steps(1, end);
-  }
-
   @media (--app-layout) and (any-hover: hover) and (any-pointer: fine) {
     /* Matches the base mention rule's specificity, so the gutter the row's
        negative margin assumes survives. */
@@ -923,11 +860,14 @@
        owes the avatar gutter. */
     .message.collapsed.mention-silent,
     .message.collapsed.mention-loud {
-      padding-left: calc(
+      padding-inline-start: calc(
         var(--page-gutter) - var(--space-100) + var(--avatar-size-small) + var(--timeline-row-gap)
       );
     }
+  }
 
+  /* Not any-hover: phones report it, and a tap there shows actions that vanish on release. */
+  @media (hover: hover) and (pointer: fine) {
     .message:hover,
     .message.menu-open {
       background-color: var(--surface-container-hover);
@@ -982,10 +922,40 @@
     display: inline;
   }
 
+  /* Chromium skips an isolate when it picks the line direction, so an inline
+     body must not be one. */
+  .has-receipts,
+  .has-edited,
+  .emote {
+    unicode-bidi: plaintext;
+  }
+
+  .has-receipts :global(.formatted-body),
+  .has-receipts :global(.formatted-body > p:only-child),
+  .has-edited :global(.formatted-body),
+  .emote :global(.formatted-body) {
+    unicode-bidi: normal;
+  }
+
   .has-receipts .receipt-slot {
     inset-block-end: 0;
     inset-inline-end: 0;
     position: absolute;
+  }
+
+  .crypto-indicators {
+    align-self: flex-start;
+    display: flex;
+    gap: var(--space-100);
+    margin-inline-start: var(--space-200);
+  }
+
+  .crypto-indicators > :global(button) {
+    margin-inline-start: 0;
+  }
+
+  .message-content:has(> .crypto-indicators) > .receipt-slot {
+    inset-inline-end: calc(var(--space-200) + var(--font-size-body));
   }
 
   .receipt-space {
@@ -996,6 +966,11 @@
 
   .has-receipts:global([data-receipt-narrow]) {
     padding-inline-end: calc(var(--receipt-reserve) + var(--space-200));
+  }
+
+  /* Move the badge, not the text: Firefox left-aligns an RTL line after a <br> on reflow. */
+  .has-receipts:global([data-receipt-flip]) .receipt-slot {
+    inset-inline: 0 auto;
   }
 
   .has-receipts:global([data-receipt-narrow]) .receipt-space {
@@ -1132,7 +1107,7 @@
     );
   }
 
-  .message.has-connected-reply:not(.layout-compact) > :global(.avatar-button),
+  .message.has-connected-reply:not(.layout-compact) > :global(.sender-avatar-button),
   .message.has-connected-reply:not(.layout-compact) > :global(.avatar-root.message-avatar) {
     margin-top: var(--space-600);
   }
@@ -1169,9 +1144,14 @@
     grid-row: 2;
   }
 
-  .message.layout-compact :global(.message-crypto-status) {
+  .message.layout-compact .crypto-indicators {
     grid-column: 3;
     grid-row: 2;
+  }
+
+  .message.layout-compact :global(.undecryptable) {
+    margin-top: 0;
+    padding-block: 0;
   }
 
   .message.layout-compact :global(.message-actions) {
@@ -1213,6 +1193,10 @@
     gap: var(--space-100);
   }
 
+  .message.layout-bubble {
+    padding-bottom: var(--space-050);
+  }
+
   .message.layout-bubble .message-main {
     align-items: flex-start;
     display: flex;
@@ -1251,20 +1235,66 @@
     width: var(--timeline-bubble-width);
   }
 
+  .message.layout-bubble.own .content-bubble,
+  .message.layout-bubble.own :global(.formatted-body) {
+    background: var(--primary-container);
+    color: var(--primary-on-container);
+  }
+
+  .message.layout-bubble.own .content-bubble :global(.formatted-body) {
+    background: none;
+  }
+
+  .message.layout-bubble.own.align-own .content-bubble {
+    text-align: end;
+  }
+
+  .message.layout-bubble.own.align-own .content-bubble :global(:is(.image, .media, .sticker)) {
+    margin-inline-start: auto;
+  }
+
+  .message.layout-bubble .content-bubble:has(:global(.image, .sticker, .media-frame-video)) {
+    width: fit-content;
+  }
+
   .message.layout-bubble .has-edited :global(.formatted-body) {
     display: inline-block;
   }
 
   .message.layout-bubble .has-receipts {
-    padding-inline-end: calc(var(--receipt-reserve) + var(--space-200));
+    align-items: flex-end;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-100);
   }
 
-  .message.layout-bubble .has-receipts:not(.content-bubble) {
-    max-width: min(100%, calc(50rem + var(--receipt-reserve) + var(--space-200)));
+  .message.layout-bubble .has-receipts > .receipt-slot {
+    flex-basis: 100%;
+    justify-content: flex-end;
+    margin-block-start: var(--space-100);
+    position: static;
+  }
+
+  .message.layout-bubble .message-main > .receipt-slot {
+    align-self: stretch;
+    justify-content: flex-end;
+    margin-block-start: var(--space-100);
+  }
+
+  .reaction-row {
+    align-items: flex-end;
+    display: flex;
+    gap: var(--space-200);
+    justify-content: space-between;
   }
 
   .message.layout-bubble .has-receipts :global(.formatted-body) {
     display: inline-block;
+  }
+
+  .message.layout-bubble .has-receipts :global(.formatted-body),
+  .message.layout-bubble .has-edited :global(.formatted-body) {
+    unicode-bidi: plaintext;
   }
 
   .message.layout-bubble .receipt-space,
@@ -1293,7 +1323,7 @@
     flex: 0 1 auto;
   }
 
-  .message:not(.layout-bubble.own.align-own)
+  .message:not(.layout-bubble)
     .message-main:has(> .receipt-tail)
     > :global(.reactions):nth-last-child(2),
   .message:not(.layout-bubble)
@@ -1311,24 +1341,6 @@
     user-select: none;
   }
 
-  .message.layout-bubble:not(.own.align-own)
-    .message-main:has(> .receipt-tail)
-    > :nth-last-child(2),
-  .message.layout-bubble:not(.own.align-own)
-    .message-main:has(> .receipt-tail)
-    > :global(:where(.reply-preview, .thread-summary, .transfer, .send-failure)):nth-last-child(2) {
-    margin-inline-end: calc(var(--receipt-reserve) + var(--space-200));
-  }
-
-  .message.layout-bubble.own.align-own
-    .message-main:has(> .receipt-tail)
-    > :global(*):nth-last-child(2) {
-    margin-inline-end: max(
-      calc(var(--space-100) * 0),
-      calc(var(--receipt-reserve) + var(--space-200) - var(--avatar-size-small) - var(--space-250))
-    );
-  }
-
   .message.layout-bubble.own.align-own .has-edited {
     align-items: flex-end;
     display: flex;
@@ -1338,6 +1350,16 @@
 
   .message.layout-bubble.own.align-own .has-edited .edited {
     margin-inline-start: 0;
+  }
+
+  .message.layout-bubble.own.align-own .has-receipts {
+    flex-direction: row-reverse;
+  }
+
+  .message.layout-bubble:not(.own.align-own) .has-receipts:not(.content-bubble),
+  .message.layout-bubble:not(.own.align-own) .reaction-row {
+    align-self: stretch;
+    max-width: none;
   }
 
   /* The one mode where your own side changes. */
@@ -1355,16 +1377,7 @@
   }
 
   .message.layout-bubble.own.align-own.collapsed {
-    padding-left: 0;
-    padding-right: calc(var(--avatar-size-small) + var(--space-250));
-  }
-
-  .message.layout-bubble.own.align-own .message-content > .receipt-slot {
-    margin-inline-end: calc(-1 * (var(--avatar-size-small) + var(--timeline-row-gap)));
-  }
-
-  .message.layout-bubble.own.align-own.collapsed .message-content > .receipt-slot {
-    margin-inline-end: calc(-1 * (var(--avatar-size-small) + var(--space-250)));
+    padding-inline: var(--page-gutter);
   }
 
   @supports not (color: color-mix(in srgb, black, white)) {

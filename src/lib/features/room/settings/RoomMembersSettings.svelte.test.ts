@@ -6,6 +6,7 @@ import { expect, test, vi } from 'vitest';
 
 import { CoreError } from '#src/transport';
 import type {
+  InviteHistoryView,
   MemberView,
   PowerLevelTagView,
   RoomPermissionsView,
@@ -30,7 +31,7 @@ Object.assign(core.rpc.members, {
     Promise.resolve({})
   ),
 });
-Object.assign(core.rpc.rooms, { invite: vi.fn<(params: object) => Promise<null>>() });
+Object.assign(core.rpc.rooms, { invite: vi.fn<(params: object) => Promise<InviteHistoryView>>() });
 Object.assign(core.rpc.room_state, { sendEvent: vi.fn<() => Promise<string>>() });
 Object.assign(core.rpc.account, { searchUserDirectory });
 
@@ -98,8 +99,8 @@ test('offers approval and denial for join requests', async () => {
 
 test.each(['Approve', 'Deny'])('answers a join request with %s', async (action) => {
   core.rpc.members.list.mockResolvedValue([{ ...alice, membership: 'knock' }]);
-  core.rpc.rooms.invite.mockResolvedValue(null);
-  core.rpc.members.kick.mockResolvedValue(null);
+  core.rpc.rooms.invite.mockResolvedValue('not_shared');
+  core.rpc.members.kick.mockResolvedValue(0);
   render(RoomMembersSettings, { room, permissions: { ...permissions, can_invite: true } });
   const user = userEvent.setup();
   await user.click(screen.getByRole('radio', { name: 'Requests' }));
@@ -124,7 +125,7 @@ test.each(['Approve', 'Deny'])('answers a join request with %s', async (action) 
 
 test('collects an optional reason before kicking a member', async () => {
   core.rpc.members.list.mockResolvedValue([alice]);
-  core.rpc.members.kick.mockResolvedValue(null);
+  core.rpc.members.kick.mockResolvedValue(0);
   const user = await renderMembers();
 
   await user.click(screen.getByRole('button', { name: 'Remove from room' }));
@@ -140,13 +141,14 @@ test('collects an optional reason before kicking a member', async () => {
       room_id: '!room:example.org',
       user_id: '@alice:example.org',
       reason: 'spamming links',
+      redact_events: false,
     });
   });
 });
 
 test('sends no reason when the moderation reason is left blank', async () => {
   core.rpc.members.list.mockResolvedValue([alice]);
-  core.rpc.members.ban.mockResolvedValue(null);
+  core.rpc.members.ban.mockResolvedValue(0);
   const user = await renderMembers();
 
   await user.click(screen.getByRole('button', { name: 'Ban from room' }));
@@ -158,6 +160,7 @@ test('sends no reason when the moderation reason is left blank', async () => {
       room_id: '!room:example.org',
       user_id: '@alice:example.org',
       reason: null,
+      redact_events: false,
     });
   });
 });
@@ -183,7 +186,7 @@ test('searches the directory and invites from the members list', async () => {
       },
     ],
   });
-  core.rpc.rooms.invite.mockResolvedValue(null);
+  core.rpc.rooms.invite.mockResolvedValue('not_shared');
   const user = await renderMembers({ ...permissions, can_invite: true });
 
   await user.type(search(), 'bo');
@@ -313,6 +316,33 @@ test('offers no role above your own and asks before lowering your own', async ()
       room_id: '!room:example.org',
       user_id: '@me:example.org',
       power_level: 0,
+    });
+  });
+  core.session = null;
+});
+
+test('asks before giving someone a role equal to your own', async () => {
+  core.session = { user_id: '@me:example.org' };
+  core.rpc.members.list.mockResolvedValue([alice]);
+  core.rpc.members.setUserPowerLevel.mockReset().mockResolvedValue(null);
+  const user = await renderMembers({
+    ...permissions,
+    own_power_level: 50,
+    can_change_power_levels: true,
+  });
+
+  await user.click(screen.getByRole('combobox', { name: 'Change role' }));
+  await user.click(await screen.findByRole('option', { name: /Moderator/ }));
+  const dialog = await screen.findByRole('dialog', { name: 'Give Alice your own role?' });
+  expect(within(dialog).getByText(/@alice:example\.org/)).toBeInTheDocument();
+  expect(core.rpc.members.setUserPowerLevel).not.toHaveBeenCalled();
+
+  await user.click(within(dialog).getByRole('button', { name: 'Give role' }));
+  await vi.waitFor(() => {
+    expect(core.rpc.members.setUserPowerLevel).toHaveBeenCalledWith({
+      room_id: '!room:example.org',
+      user_id: alice.user_id,
+      power_level: 50,
     });
   });
   core.session = null;

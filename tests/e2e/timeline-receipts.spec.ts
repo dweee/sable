@@ -1,7 +1,7 @@
 import type { Locator } from '@playwright/test';
 
 import { expect, test, SIGNED_OUT } from './fixtures/test';
-import { timelineImage, timelineItem } from './fixtures/timeline-items';
+import { linkPreview, timelineImage, timelineItem } from './fixtures/timeline-items';
 
 test.use({ storageState: SIGNED_OUT });
 
@@ -113,11 +113,11 @@ test('own bubble receipts reach the same edge as everyone else’s on mobile', a
   const subscription = await core.subscription();
   await core.setTimelineItemById(subscription, 'general-19', reacted('general-19', true));
   await core.setTimelineItemById(subscription, 'general-18', reacted('general-18', false));
-  await expect(page.locator('.message-content > .receipt-slot')).toHaveCount(2);
+  await expect(timeline.container.locator('.receipt-slot')).toHaveCount(2);
 
   const edges = await page.evaluate(() =>
     Object.fromEntries(
-      [...document.querySelectorAll('.message-content > .receipt-slot')].map((node) => [
+      [...document.querySelectorAll('.timeline-viewport .receipt-slot')].map((node) => [
         node.closest('.message')?.classList.contains('own') ? 'own' : 'other',
         Math.round(node.getBoundingClientRect().right),
       ])
@@ -145,21 +145,11 @@ test('receipts beside text, reactions, an embed or an image add no row of their 
     embed: {
       ...text,
       bundled_link_previews: [
-        {
-          url: 'https://example.test/page',
+        linkPreview('https://example.test/page', {
           title: 'Example page',
           description: 'A description of the page',
           site_name: 'Example',
-          image: null,
-          image_mime: null,
-          image_width: null,
-          image_height: null,
-          post: null,
-          video: null,
-          theme_color: null,
-          card: null,
-          author_name: null,
-        },
+        }),
       ],
     },
     image: timelineImage('general-18'),
@@ -203,21 +193,11 @@ test('a receipt under a picture or an embed that fills the column never covers i
     '.link-preview': {
       ...timelineItem('general-18', 'see https://example.test/page'),
       bundled_link_previews: [
-        {
-          url: 'https://example.test/page',
+        linkPreview('https://example.test/page', {
           title: 'Example page',
           description: 'A description of the page long enough to fill the whole card width',
           site_name: 'Example',
-          image: null,
-          image_mime: null,
-          image_width: null,
-          image_height: null,
-          post: null,
-          video: null,
-          theme_color: null,
-          card: null,
-          author_name: null,
-        },
+        }),
       ],
     },
   };

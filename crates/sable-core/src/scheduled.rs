@@ -15,6 +15,7 @@ use crate::ResultExt;
 use crate::delayed_events::{self, DelayedEvent, DelayedEventsSupport};
 use crate::protocol::{AttachmentInfoView, RpcCode, RpcError, ScheduledMessageView};
 use crate::view::SPOILER_PROPERTY;
+use sable_model::animation::gif_flags;
 
 #[derive(Serialize)]
 struct MediaInfoOut {
@@ -31,6 +32,10 @@ struct MediaInfoOut {
         skip_serializing_if = "Option::is_none"
     )]
     blurhash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_animated: Option<bool>,
+    #[serde(flatten)]
+    playback: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +87,12 @@ fn attachment_content(
             height: info.height,
             duration_ms: info.duration_ms,
             blurhash: info.blurhash,
+            is_animated: info.animated.filter(|_| mime.type_() == mime::IMAGE),
+            playback: if mime.type_() == mime::VIDEO && info.gif == Some(true) {
+                gif_flags()
+            } else {
+                serde_json::Map::new()
+            },
         },
         extra: spoiler
             .then(|| (SPOILER_PROPERTY.to_owned(), serde_json::Value::Bool(true)))
@@ -210,16 +221,14 @@ impl Core {
         }
         let client = self.client().await?;
         let response = client
-            .send(get_all_delayed_events::unstable::Request::new())
+            .send(get_all_delayed_events::msc4140::Request::new())
             .await
             .or_failed(self, "scheduled_messages")?;
 
         Ok(response
             .delayed_events
             .into_iter()
-            .filter(|item| {
-                item.event_type == matrix_sdk::ruma::events::TimelineEventType::RoomMessage
-            })
+            .filter(|item| item.event_type == ruma::events::TimelineEventType::RoomMessage)
             .filter(|item| item.finalized_ts.is_none())
             .filter(|item| room_id.is_none_or(|wanted| &item.room_id == wanted))
             .filter_map(|item| {
@@ -229,15 +238,15 @@ impl Core {
                     .ok()?;
                 let delay_ms = u64::try_from(item.delay.as_millis()).unwrap_or(u64::MAX);
                 let formatted = match &content.msgtype {
-                    matrix_sdk::ruma::events::room::message::MessageType::Text(text) => text
+                    ruma::events::room::message::MessageType::Text(text) => text
                         .formatted
                         .as_ref()
                         .map(|formatted| formatted.body.clone()),
-                    matrix_sdk::ruma::events::room::message::MessageType::Notice(notice) => notice
+                    ruma::events::room::message::MessageType::Notice(notice) => notice
                         .formatted
                         .as_ref()
                         .map(|formatted| formatted.body.clone()),
-                    matrix_sdk::ruma::events::room::message::MessageType::Emote(emote) => emote
+                    ruma::events::room::message::MessageType::Emote(emote) => emote
                         .formatted
                         .as_ref()
                         .map(|formatted| formatted.body.clone()),
@@ -298,6 +307,62 @@ mod tests {
                 "page.codeberg.everypizza.msc4193.spoiler": true
             })
         );
+    }
+
+    #[test]
+    fn only_a_video_chosen_as_a_gif_is_scheduled_as_one() {
+        let url = OwnedMxcUri::from("mxc://example.org/abc");
+        let content = |mime: &str, gif| {
+            let mime: Mime = mime.parse().expect("mime");
+            let info = AttachmentInfoView {
+                gif,
+                ..AttachmentInfoView::default()
+            };
+            serde_json::to_value(attachment_content(
+                "clip".to_owned(),
+                &mime,
+                url.clone(),
+                7,
+                info,
+                false,
+            ))
+            .unwrap()
+        };
+
+        assert_eq!(content("video/mp4", Some(true))["info"]["fi.mau.gif"], true);
+        assert!(
+            content("video/mp4", None)["info"]
+                .get("fi.mau.gif")
+                .is_none()
+        );
+        assert!(
+            content("image/png", Some(true))["info"]
+                .get("fi.mau.gif")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn only_an_image_carries_is_animated() {
+        let content = |mime: &str| {
+            let mime: Mime = mime.parse().expect("mime");
+            let info = AttachmentInfoView {
+                animated: Some(true),
+                ..AttachmentInfoView::default()
+            };
+            serde_json::to_value(attachment_content(
+                "a".to_owned(),
+                &mime,
+                OwnedMxcUri::from("mxc://example.org/abc"),
+                7,
+                info,
+                false,
+            ))
+            .unwrap()
+        };
+
+        assert_eq!(content("image/webp")["info"]["is_animated"], true);
+        assert!(content("video/mp4")["info"].get("is_animated").is_none());
     }
 
     #[test]

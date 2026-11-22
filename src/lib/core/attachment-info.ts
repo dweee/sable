@@ -6,9 +6,21 @@ const MEASURE_TIMEOUT_MS = 5_000;
 
 type Size = { width: number; height: number; blurhash: string | null };
 
-export async function measureAttachment(
-  file: Blob
-): Promise<{ info: AttachmentInfoView | null; thumbnail: AttachmentThumbnail | null }> {
+type Measured = { info: AttachmentInfoView | null; thumbnail: AttachmentThumbnail | null };
+
+const measured = new WeakMap<Blob, Promise<Measured>>();
+
+/** Measured once per file: the composer reads a staged video before it is sent. */
+export function measureAttachment(file: Blob): Promise<Measured> {
+  let measuring = measured.get(file);
+  if (measuring === undefined) {
+    measuring = measure(file);
+    measured.set(file, measuring);
+  }
+  return measuring;
+}
+
+async function measure(file: Blob): Promise<Measured> {
   const kind = file.type.split('/')[0];
 
   if (kind === 'image') {
@@ -20,10 +32,11 @@ export async function measureAttachment(
           : {
               ...size,
               duration_ms: null,
-              animated: animated(file.type),
+              animated: null,
               waveform: null,
               voice: false,
               audio_metadata: null,
+              gif: null,
             },
       thumbnail: null,
     };
@@ -43,6 +56,7 @@ export async function measureAttachment(
           waveform: [...recorded.waveform],
           voice: true,
           audio_metadata: null,
+          gif: null,
         },
         thumbnail: null,
       };
@@ -60,6 +74,7 @@ export async function measureAttachment(
         waveform: null,
         voice: false,
         audio_metadata: tags,
+        gif: null,
       },
       thumbnail: metadata.thumbnail,
     };
@@ -112,12 +127,6 @@ export function markVoiceRecording(
   durationMs: number
 ): void {
   voiceRecordings.set(file, { waveform, durationMs });
-}
-
-function animated(mime: string): boolean | null {
-  if (mime === 'image/gif') return true;
-  if (mime === 'image/webp' || mime === 'image/apng') return null;
-  return false;
 }
 
 async function imageSize(file: Blob): Promise<Size | null> {

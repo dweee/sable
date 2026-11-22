@@ -26,7 +26,7 @@ pub(super) fn content(
 fn service_focus(alias: String, service: String) -> Focus {
     let mut focus = RumaLivekitFocus::with_service_url(service);
     focus.alias = Some(alias);
-    Focus::Livekit(focus)
+    Focus::LegacyLivekit(focus)
 }
 
 pub(super) fn content_at(
@@ -145,7 +145,7 @@ struct StableFocus {
     kind: &'static str,
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    server_name: Option<matrix_sdk::ruma::OwnedServerName>,
+    server_name: Option<ruma::OwnedServerName>,
 }
 
 #[derive(Serialize)]

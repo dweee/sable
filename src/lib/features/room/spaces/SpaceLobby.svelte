@@ -27,7 +27,13 @@
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { createDragList, type DropEdge, type DropInstruction } from '#lib/ui/drag-list.js';
   import { joinErrorMessage } from '#lib/rooms/join-errors.js';
-  import { matrixLinkPath, copyRoomLink, joinVia, roomSectionPath } from '#lib/rooms/permalink.js';
+  import {
+    matrixLinkPath,
+    copyRoomLink,
+    joinVia,
+    roomSectionPath,
+    type PermalinkFormat,
+  } from '#lib/rooms/permalink.js';
   import { roomPathParam, roomPathParamFromId, useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { layoutSpaceIds, withoutSpace, withSpace } from '#lib/spaces/sidebar-layout.js';
   import { useSpaceSidebar } from '#lib/spaces/sidebar-layout.svelte.js';
@@ -461,6 +467,24 @@
     }
   }
 
+  function copyChildLink(
+    child: HierarchyRoomView,
+    parentId: string | null,
+    format: PermalinkFormat
+  ): void {
+    const edge =
+      parentId === null
+        ? undefined
+        : childEdges(merged, parentId).find((edge) => edge.room_id === child.room_id);
+    const routing = joinedIds.has(child.room_id)
+      ? undefined
+      : {
+          via: edge?.via ?? [],
+          parentId: parentId !== null && joinedIds.has(parentId) ? parentId : spaceId,
+        };
+    void copyRoomLink(core, child, null, format, routing);
+  }
+
   async function remove(section: HierarchySection, entry: HierarchyRoom): Promise<void> {
     const parentId = section.space?.room_id ?? spaceId;
     if (!parentId) return;
@@ -670,7 +694,7 @@
           label={i18n.t('timeline.back')}
           onclick={backToRoomList}
         >
-          <BackIcon />
+          <BackIcon class="mirror-rtl" />
         </IconButton>
       </div>
     {/if}
@@ -713,6 +737,7 @@
       name={space?.name ?? ''}
       size="large"
       uniform
+      autoplay
     />
     <h1>{space?.name ?? i18n.t('nav.space')}</h1>
     {#if space?.topic}
@@ -886,12 +911,7 @@
         ) => {
           void join(child, via, parentId, action);
         }}
-        onCopyLink={(child: HierarchyRoomView) => {
-          void copyRoomLink(core, child).then((copied) => {
-            if (!copied) toasts.error(i18n.t('errors.copyFailed'));
-            else toasts.info(i18n.t('timeline.linkCopied'));
-          });
-        }}
+        onCopyLink={copyChildLink}
         onRemove={(section: HierarchySection, entry: HierarchyRoom) => {
           void remove(section, entry);
         }}
@@ -1022,14 +1042,14 @@
   }
 
   .mobile-back-menu {
-    left: 0;
+    inset-inline-start: 0;
     position: absolute;
     top: var(--space-300);
   }
 
   .hero-menu {
+    inset-inline-end: 0;
     position: absolute;
-    right: 0;
     top: var(--space-300);
   }
 

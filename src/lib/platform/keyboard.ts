@@ -6,6 +6,8 @@ import { startSwipeGesture, updateSwipeGesture, type SwipeGesture } from '#lib/u
 import { hasIosKeyboardContextQuirk } from './input.js';
 
 export function dismissKeyboardOnScroll(node: HTMLElement): () => void {
+  // Android chat apps keep the keyboard up while the message list scrolls.
+  if (document.documentElement.dataset.tauriOs === 'android') return () => {};
   let gesture: SwipeGesture | undefined;
   let field: HTMLElement | null = null;
 
@@ -42,10 +44,69 @@ export function dismissKeyboardOnScroll(node: HTMLElement): () => void {
   };
 }
 
+// Android resizes the webview for the IME, so the keyboard is open while the
+// window is shorter than the tallest height seen at the same width.
+function trackAndroidKeyboard(): { shown: () => boolean; stop: () => void } {
+  const tallest = new Map<number, number>();
+  const measure = (): void => {
+    const height = tallest.get(window.innerWidth) ?? 0;
+    if (window.innerHeight > height) tallest.set(window.innerWidth, window.innerHeight);
+  };
+  measure();
+  return {
+    shown: () => {
+      measure();
+      return window.innerHeight < (tallest.get(window.innerWidth) ?? 0) - 100;
+    },
+    stop: on(window, 'resize', measure),
+  };
+}
+
+/**
+ * Chromium shows the IME on any tap while an editable is focused, so a
+ * keyboard dismissed without blurring would pop up again: let the tap blur it.
+ */
+export function keepKeyboardOnTap(node: HTMLElement): () => void {
+  let touchedAt = -Infinity;
+  const android =
+    document.documentElement.dataset.tauriOs === 'android' ? trackAndroidKeyboard() : undefined;
+  const keyboardShown = (): boolean =>
+    android ? android.shown() : softwareKeyboardShown() !== false;
+
+  const touched = (): void => {
+    touchedAt = performance.now();
+  };
+  const press = (event: MouseEvent): void => {
+    if (performance.now() - touchedAt > 1000) return;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !isEditableTarget(active) || node.contains(active))
+      return;
+    const target = event.target;
+    if (target instanceof HTMLElement && (isEditableTarget(target) || target.closest('label')))
+      return;
+    if (!keyboardShown()) return;
+    event.preventDefault();
+  };
+
+  const stop = [on(node, 'touchend', touched, { passive: true }), on(node, 'mousedown', press)];
+  return () => {
+    for (const off of stop) off();
+    android?.stop();
+  };
+}
+
 function keyboardInset(viewport: VisualViewport): number {
   const scale = viewport.scale || 1;
   const offset = scale === 1 ? viewport.offsetTop : 0;
   return Math.max(0, Math.round(window.innerHeight - (viewport.height * scale + offset)));
+}
+
+/** Null where it cannot be measured: Android resizes the native webview for the IME. */
+export function softwareKeyboardShown(): boolean | null {
+  if (document.documentElement.dataset.tauriOs === 'android') return null;
+  const viewport = window.visualViewport;
+  const height = document.documentElement.clientHeight;
+  return viewport ? Math.round(height - viewport.height * (viewport.scale || 1)) > 0 : null;
 }
 
 export function resetDocumentScroll(): void {

@@ -6,11 +6,15 @@ vi.mock('#lib/config/runtime-config.js', () => ({
   runtimeConfig: () =>
     Promise.resolve({
       embeds: { serviceUrl: 'https://embeds.test' },
-      gifs: { klipyApiKey: 'klipy-key' },
     }),
 }));
 
-import { loadUrlPreview, resetUrlPreviews, resolveUrlPreview } from './link-preview-cache';
+import {
+  loadUrlPreview,
+  resetUrlPreviews,
+  resolveUrlPreview,
+  usesTunnel,
+} from './link-preview-cache';
 
 afterEach(() => {
   resetUrlPreviews();
@@ -67,14 +71,7 @@ test('a hung request resolves to nothing, frees its slot, and lets the next sour
 
   await expect(pending).resolves.toBeNull();
   expect(urlPreview.mock.calls).toEqual([
-    [
-      {
-        url: 'https://example.org/hung',
-        client: true,
-        service: 'https://embeds.test',
-        klipy_api_key: 'klipy-key',
-      },
-    ],
+    [{ url: 'https://example.org/hung', client: true, service: 'https://embeds.test' }],
     [{ url: 'https://example.org/hung', service: null }],
   ]);
   void loadUrlPreview({ urlPreview }, 'https://example.org/hung', true, 'https://embeds.test');
@@ -82,14 +79,33 @@ test('a hung request resolves to nothing, frees its slot, and lets the next sour
   vi.useRealTimers();
 });
 
-test('a Klipy link is previewed with the Klipy key and never by the homeserver', async () => {
+test('a Klipy link is previewed by the embed service and never by the homeserver', async () => {
   const urlPreview = vi.fn((_params: { url: string; client?: boolean }) => Promise.resolve(null));
   const url = 'https://klipy.com/gifs/greetings-PSr';
 
   await resolveUrlPreview({ urlPreview }, url, { client: true, server: true });
   await resolveUrlPreview({ urlPreview }, url, { client: false, server: true });
 
+  expect(urlPreview.mock.calls).toEqual([[{ url, client: true, service: 'https://embeds.test' }]]);
+});
+
+test('only a public room without encryption asks the preview service', () => {
+  expect(usesTunnel(false, true)).toBe(false);
+  expect(usesTunnel(false, false)).toBe(true);
+  expect(usesTunnel(true, true)).toBe(true);
+  expect(usesTunnel(null, true)).toBe(true);
+});
+
+test('a tunnel preview is asked for and cached apart from a service one', async () => {
+  const urlPreview = vi.fn((_params: { url: string; tunnel?: boolean }) => Promise.resolve(null));
+  const url = 'https://example.org/both';
+
+  await loadUrlPreview({ urlPreview }, url, true, 'https://embeds.test', true);
+  await loadUrlPreview({ urlPreview }, url, true, 'https://embeds.test', false);
+  await loadUrlPreview({ urlPreview }, url, true, 'https://embeds.test', true);
+
   expect(urlPreview.mock.calls).toEqual([
-    [{ url, client: true, service: 'https://embeds.test', klipy_api_key: 'klipy-key' }],
+    [{ url, client: true, service: 'https://embeds.test', tunnel: true }],
+    [{ url, client: true, service: 'https://embeds.test' }],
   ]);
 });

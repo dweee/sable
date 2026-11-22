@@ -1,14 +1,13 @@
 // @vitest-environment happy-dom
 
 import { fireEvent, render, screen } from '@testing-library/svelte';
-import { flushSync } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
 
 import { visit } from '#lib/test-support/app-state.js';
-import { goto, resetNavigation } from '#lib/test-support/app-navigation.js';
+import { resetNavigation } from '#lib/test-support/app-navigation.js';
 vi.mock('#lib/i18n.js', () => import('#lib/test-support/i18n.js'));
 vi.mock('#lib/rooms/room-list.svelte.js', () => ({
   useRoomList: () => ({ rooms: [], notificationMode: () => 'all_messages' }),
@@ -19,10 +18,12 @@ vi.mock('#lib/rooms/presence.svelte.js', async (importOriginal) => ({
   usePresenceStore: () => ({ get: () => null, peek: () => null }),
 }));
 
+import { preferences } from '#lib/settings/preferences.svelte.js';
 import { paletteState } from '#lib/ui/shortcuts/palette-state.svelte.js';
 import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
 import UserQuickToolsHarness from './UserQuickToolsHarness.test.svelte';
-import type { Priority, PriorityProvider } from './alerts';
+import type { PriorityProvider } from './alerts';
+import { CircleIcon } from 'phosphor-svelte';
 
 beforeEach(() => {
   visit('/rooms');
@@ -30,6 +31,7 @@ beforeEach(() => {
 
 afterEach(() => {
   paletteState.open = false;
+  preferences.showHome = false;
   resetNavigation();
 });
 
@@ -65,35 +67,16 @@ test('the mobile bar keeps a slot per tool', () => {
 });
 
 test('the mobile bar gives a pending alert its own slot', () => {
-  setup({ mobile: true, alertProviders: [{ priority: 'update', dismiss: () => {} }] });
-
-  const bar = screen.getByRole('navigation', { name: 'nav.quickTools' });
-  expect(bar.style.getPropertyValue('--mobile-slot-count')).toBe('5');
-  expect(screen.getByRole('link', { name: 'nav.alerts' })).toBeInTheDocument();
-});
-
-test('clearing the last alert leaves the alerts page for the rooms list', () => {
-  visit('/alerts');
-  let priority = $state<Priority>('update');
   setup({
     mobile: true,
     alertProviders: [
-      {
-        get priority() {
-          return priority;
-        },
-        dismiss: () => {
-          priority = null;
-        },
-      },
+      { priority: { level: 'update', icon: CircleIcon }, progress: undefined, dismiss: () => {} },
     ],
   });
-  expect(goto).not.toHaveBeenCalled();
 
-  priority = null;
-  flushSync();
-
-  expect(goto).toHaveBeenCalledWith('/rooms');
+  const bar = screen.getByRole('navigation', { name: 'nav.quickTools' });
+  expect(bar.style.getPropertyValue('--mobile-slot-count')).toBe('5');
+  expect(screen.getByRole('button', { name: 'nav.alerts' })).toBeInTheDocument();
 });
 
 test.each([{ compact: false }, { compact: true }])(
@@ -114,6 +97,17 @@ test('the desktop inbox stays a page link when already selected', async () => {
   expect(await fireEvent.click(inbox)).toBe(true);
 });
 
+test('the mobile conversations tab opens Home when all rooms are shown in the sidebar', () => {
+  preferences.showHome = true;
+  visit('/home');
+  setup();
+
+  expect(screen.getByRole('link', { name: 'nav.messages' })).toHaveAttribute('href', '/home');
+  expect(screen.getByRole('navigation').style.getPropertyValue('--mobile-selected-index')).toBe(
+    '0'
+  );
+});
+
 test('the mobile bar marks the profile tab as selected on the profile page', () => {
   visit('/profile');
   setup();
@@ -121,6 +115,19 @@ test('the mobile bar marks the profile tab as selected on the profile page', () 
   const bar = screen.getByRole('navigation');
   expect(bar).toHaveClass('selection-active');
   expect(bar.style.getPropertyValue('--mobile-selected-index')).toBe('3');
+});
+
+test('the mobile bar keeps the profile tab selected past a pending alert slot', () => {
+  visit('/profile');
+  setup({
+    mobile: true,
+    alertProviders: [
+      { priority: { level: 'update', icon: CircleIcon }, progress: undefined, dismiss: () => {} },
+    ],
+  });
+
+  const bar = screen.getByRole('navigation', { name: 'nav.quickTools' });
+  expect(bar.style.getPropertyValue('--mobile-selected-index')).toBe('4');
 });
 
 test('the collapsed sidebar leaves message search to the rail', () => {

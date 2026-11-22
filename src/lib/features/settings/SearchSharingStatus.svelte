@@ -104,7 +104,11 @@
     if (sharing.state === 'waiting') return i18n.t('settings.searchPeerWaiting', { device });
     if (sharing.state === 'connecting') return i18n.t('settings.searchPeerConnecting', { device });
     if (sharing.state === 'receiving')
-      return i18n.t('settings.searchPeerTransferring', { device, count: sharing.rooms_copied });
+      return i18n.t('settings.searchPeerTransferring', {
+        device,
+        transferred: sharing.transferred_rooms,
+        total: sharing.total_rooms,
+      });
     if (sharing.state === 'sending') return i18n.t('settings.searchPeerSending', { device });
     if (sharing.outcome === 'no_answer' && sharing.automatic)
       return i18n.t('settings.searchPeerNoAnswerRetrying');
@@ -114,13 +118,17 @@
 
   async function find(): Promise<void> {
     finding = true;
-    await core.rpc.search.peerFind({}).catch(() => {});
+    await core.rpc.search.peerFind({}).catch((error: unknown) => {
+      console.warn('[sable search] looking for the other device failed', error);
+    });
     finding = false;
   }
 
   async function reset(): Promise<void> {
     resetting = true;
-    await core.rpc.search.peerReset({}).catch(() => {});
+    await core.rpc.search.peerReset({}).catch((error: unknown) => {
+      console.warn('[sable search] resetting search sharing failed', error);
+    });
     resetting = false;
   }
 </script>
@@ -224,6 +232,6 @@
     font-family: var(--font-family-mono);
     font-variant-ligatures: none;
     overflow-wrap: anywhere;
-    text-align: right;
+    text-align: end;
   }
 </style>

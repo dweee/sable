@@ -1,5 +1,11 @@
 import { afterEach, expect, onTestFinished, test, vi } from 'vitest';
-import { dismissKeyboardOnScroll, resetDocumentScroll, trackKeyboardInset } from './keyboard';
+import {
+  dismissKeyboardOnScroll,
+  keepKeyboardOnTap,
+  resetDocumentScroll,
+  softwareKeyboardShown,
+  trackKeyboardInset,
+} from './keyboard';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -39,6 +45,14 @@ test.each([-30, 30])('vertical touch scrolling dismisses the keyboard (%i)', asy
   expect(document.activeElement).not.toBe(field);
   expect(field.value).toBe('Unsent draft');
   expect(event.defaultPrevented).toBe(false);
+});
+
+test('scrolling on Android keeps the keyboard up', async () => {
+  document.documentElement.dataset.tauriOs = 'android';
+  const { field, touch } = await scrollKeyboardHarness();
+  touch('touchstart');
+  touch('touchmove', 2, 30);
+  expect(document.activeElement).toBe(field);
 });
 
 test('taps, small movements, and horizontal swipes preserve composer focus', async () => {
@@ -224,6 +238,29 @@ test('pinch zoom and panning do not become keyboard insets', async () => {
   stop();
 });
 
+test.each([
+  [800, 500, true],
+  [500, 500, true],
+  [800, 800, false],
+])(
+  'a window %i tall with a visual viewport %i tall shows a keyboard=%s',
+  (innerHeight, height, shown) => {
+    vi.stubGlobal('visualViewport', Object.assign(new EventTarget(), { height }));
+    vi.stubGlobal('innerHeight', innerHeight);
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    expect(softwareKeyboardShown()).toBe(shown);
+    vi.restoreAllMocks();
+  }
+);
+
+test('the Android app cannot tell whether its keyboard is shown', () => {
+  document.documentElement.dataset.tauriOs = 'android';
+  vi.stubGlobal('visualViewport', Object.assign(new EventTarget(), { height: 800, offsetTop: 0 }));
+  vi.stubGlobal('innerHeight', 800);
+  expect(softwareKeyboardShown()).toBeNull();
+  delete document.documentElement.dataset.tauriOs;
+});
+
 test('a document offset the shell cannot scroll back is zeroed', () => {
   const scrollTo = vi.fn();
   vi.stubGlobal('scrollTo', scrollTo);
@@ -279,4 +316,64 @@ test('a window scroll event zeroes a wedged document offset', async () => {
     stop();
     delete (document as { scrollingElement?: unknown }).scrollingElement;
   }
+});
+
+async function tapKeyboardHarness() {
+  const node = document.createElement('div');
+  const button = document.createElement('button');
+  const input = document.createElement('input');
+  const field = document.createElement('textarea');
+  node.append(button, input);
+  document.body.append(node, field);
+  field.focus();
+  const stop = keepKeyboardOnTap(node);
+  await Promise.resolve();
+  onTestFinished(() => {
+    stop();
+    node.remove();
+    field.remove();
+  });
+  const tap = (target: HTMLElement, touch = true): MouseEvent => {
+    if (touch) target.dispatchEvent(new Event('touchend', { bubbles: true }));
+    const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event;
+  };
+  return { node, button, input, field, tap };
+}
+
+test('tapping the timeline keeps the composer focused', async () => {
+  const { node, button, tap } = await tapKeyboardHarness();
+  expect(tap(node).defaultPrevented).toBe(true);
+  expect(tap(button).defaultPrevented).toBe(true);
+});
+
+test('mouse presses and taps on editable fields move focus as usual', async () => {
+  const { node, input, tap } = await tapKeyboardHarness();
+  expect(tap(node, false).defaultPrevented).toBe(false);
+  expect(tap(input).defaultPrevented).toBe(false);
+});
+
+test('taps without a focused field outside the timeline are left alone', async () => {
+  const { node, field, tap } = await tapKeyboardHarness();
+  field.blur();
+  expect(tap(node).defaultPrevented).toBe(false);
+});
+
+test('on Android a tap blurs the composer once its keyboard was dismissed', async () => {
+  document.documentElement.dataset.tauriOs = 'android';
+  vi.stubGlobal('innerWidth', 400);
+  vi.stubGlobal('innerHeight', 800);
+  const { node, tap } = await tapKeyboardHarness();
+  vi.stubGlobal('innerHeight', 450);
+  expect(tap(node).defaultPrevented).toBe(true);
+  vi.stubGlobal('innerHeight', 800);
+  expect(tap(node).defaultPrevented).toBe(false);
+});
+
+test('on iOS a tap blurs the composer once its keyboard was dismissed', async () => {
+  vi.stubGlobal('innerHeight', 800);
+  vi.stubGlobal('visualViewport', { height: 800, offsetTop: 0, scale: 1 });
+  const { node, tap } = await tapKeyboardHarness();
+  expect(tap(node).defaultPrevented).toBe(false);
 });

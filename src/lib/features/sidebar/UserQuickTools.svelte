@@ -10,6 +10,7 @@
   import { isDeclining } from '#lib/rooms/invites.svelte.js';
   import { dismissedInvites } from '#lib/rooms/dismissed-invites.svelte.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import { paletteState } from '#lib/ui/shortcuts/palette-state.svelte.js';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import UnreadBadge from '#lib/ui/primitives/UnreadBadge.svelte';
@@ -20,8 +21,8 @@
   import AccountSwitcher from './AccountSwitcher.svelte';
   import '#lib/ui/primitives/nav-tab.css';
   import './sidebar-tools.css';
-  import AlertPopover from './AlertPopover.svelte';
   import { useAlertProviders } from './alerts.js';
+  import AlertListButton from './AlertListButton.svelte';
 
   interface Props {
     mobile?: boolean;
@@ -49,17 +50,18 @@
 
   let hasAlerts = $derived(alertProviders.some((provider) => provider.priority !== null));
 
-  const mobileTools = [
-    { href: resolve('/(app)/rooms'), icon: ChatsIcon, label: 'nav.messages' },
+  const messagesHref = $derived(resolve(preferences.showHome ? '/(app)/home' : '/(app)/rooms'));
+  const mobileTools = $derived([
+    { href: messagesHref, icon: ChatsIcon, label: 'nav.messages' },
     {
       href: resolve('/(app)/navigate'),
       icon: ListMagnifyingGlassIcon,
       label: 'shortcuts.paletteTitle',
     },
     { href: resolve('/(app)/inbox'), icon: BellIcon, label: 'nav.inbox' },
-  ] as const;
+  ] as const);
   const mobileSlotCount = $derived(mobileTools.length + 1 + (hasAlerts ? 1 : 0));
-  const ROOM_LIST_PATHS = ['/rooms', '/direct', '/space/'];
+  const roomListPaths = $derived([messagesHref, '/direct', '/space/']);
   const desktopTools = [
     { href: resolve('/(app)/inbox'), icon: BellIcon, label: 'nav.inbox' },
     { href: resolve('/(app)/settings'), icon: GearIcon, label: 'nav.settings' },
@@ -86,18 +88,14 @@
   }
 
   function isToolActive(href: string): boolean {
-    if (href === '/rooms')
-      return ROOM_LIST_PATHS.some((path) => page.url.pathname.startsWith(path));
+    if (href === messagesHref)
+      return roomListPaths.some((path) => page.url.pathname.startsWith(path));
     return page.url.pathname.startsWith(href);
   }
 
   let mobileSelectedIndex = $derived.by(() => {
     if (page.url.pathname === '/profile') {
-      return mobileTools.length;
-    }
-
-    if (page.url.pathname === '/alerts') {
-      return mobileTools.length + 1;
+      return mobileSlotCount - 1;
     }
 
     return mobileTools.findIndex((item) => isToolActive(item.href));
@@ -153,17 +151,17 @@
           <!-- eslint-enable svelte/no-navigation-without-resolve -->
         </div>
       {/each}
+      <div class="mobile-tool-slot" style:display={hasAlerts ? undefined : 'none'}>
+        <AlertListButton mode="mobile" />
+      </div>
       <div class="mobile-tool-slot">
         <AccountSwitcher mode="mobile" />
-      </div>
-      <div class="mobile-tool-slot" style:display={hasAlerts ? undefined : 'none'}>
-        <AlertPopover mode="mobile" />
       </div>
     </div>
   </nav>
 {:else if compact}
   <nav class="compact-tools" aria-label={i18n.t('nav.quickTools')}>
-    <AlertPopover mode="compact" />
+    <AlertListButton mode="compact" />
     {@render roomSwitcher('compact-tool nav-tab-side', 'right')}
     {#each desktopTools as item (item.href)}
       {@const toolActive = isToolActive(item.href)}
@@ -199,7 +197,7 @@
   <nav class="desktop-tools" aria-label={i18n.t('nav.quickTools')}>
     <AccountSwitcher mode="desktop" />
     <div class="desktop-tool-actions">
-      <AlertPopover mode="desktop" />
+      <AlertListButton mode="desktop" />
       {@render roomSwitcher('desktop-tool nav-tab-bottom', 'top')}
       {#each desktopTools as item (item.href)}
         {@const toolActive = isToolActive(item.href)}
@@ -241,7 +239,7 @@
   .desktop-tools {
     align-items: center;
     background: var(--surface-container);
-    border-right: var(--border-width) solid var(--surface-container-line);
+    border-inline-end: var(--border-width) solid var(--surface-container-line);
     border-top: var(--border-width) solid var(--surface-container-line);
     box-sizing: border-box;
     color: var(--surface-on-container);
@@ -260,7 +258,7 @@
   .compact-tools {
     align-items: center;
     background: var(--bg-container);
-    border-right: var(--border-width) solid var(--bg-container-line);
+    border-inline-end: var(--border-width) solid var(--bg-container-line);
     box-sizing: border-box;
     color: var(--bg-on-container);
     display: flex;
@@ -305,7 +303,7 @@
     border-radius: var(--radius-pill);
     content: '';
     height: var(--control-height-large);
-    left: 0;
+    inset-inline-start: 0;
     opacity: 0;
     pointer-events: none;
     position: absolute;

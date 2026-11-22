@@ -29,7 +29,9 @@ beforeEach(() => {
   Object.assign(core, {
     accounts: [],
     crashed: null,
+    deviceList: [],
     localNetworkBlocked: null,
+    localNetworkOffer: null,
     verification: null,
   });
   visit('/inbox');

@@ -1,10 +1,14 @@
+import { serverNameOf } from '#lib/matrix-id.js';
+import { t } from '#lib/i18n.js';
 import { copyText } from '#lib/platform/clipboard.js';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 import { resolve } from '$app/paths';
 
 import type { RoomListItemView } from '#src/generated/protocol';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
 
+import { mentionUri } from '#lib/model/model.js';
 import { splitVia } from '#lib/rooms/join-address.js';
 import { matrixLinkAction, matrixLinkParameters, parseMatrixLink } from '#lib/rooms/matrix-link.js';
 
@@ -117,14 +121,12 @@ export async function joinVia(
   via: readonly string[],
   parentId: string | null
 ): Promise<string[]> {
-  const own = core.session?.user_id.split(':').slice(1).join(':');
+  const own = core.session ? serverNameOf(core.session.user_id) : undefined;
   if (parentId === null || via.some((server) => server !== own)) return [...via];
   return [...via, ...(await core.rpc.rooms.viaServers({ room_id: parentId }))];
 }
 
-/**
- * A matrix.to link others can follow; a room id needs `via` to be routable.
- */
+/** Room ids need `via` to be routable; aliases resolve on their own. */
 export function matrixToUrl(
   address: string,
   via: readonly string[],
@@ -138,31 +140,55 @@ export function matrixToUrl(
   const query = new URLSearchParams(
     viaFor(address, via).map((server) => ['via', server])
   ).toString();
-  return `https://matrix.to/#/${path}${query === '' ? '' : `?${query}`}`;
+  return `https://link.sable.moe/#/${path}${query === '' ? '' : `?${query}`}`;
 }
 
+export function matrixEventUri(roomId: string, eventId: string, via: readonly string[]): string {
+  const query = new URLSearchParams(via.map((server) => ['via', server])).toString();
+  const path = `roomid/${encodeURIComponent(roomId.slice(1))}/e/${encodeURIComponent(eventId.slice(1))}`;
+  return `matrix:${path}${query === '' ? '' : `?${query}`}`;
+}
+
+export type PermalinkFormat = 'matrix' | 'external';
+
 export async function copyRoomLink(
-  core: Pick<CoreClient, 'rpc'>,
+  core: Pick<CoreClient, 'rpc' | 'session'>,
   room: Pick<RoomListItemView, 'room_id' | 'canonical_alias'>,
-  eventId?: string | null
+  eventId?: string | null,
+  format: PermalinkFormat = 'external',
+  hierarchy?: { via: readonly string[]; parentId: string | null }
 ): Promise<boolean> {
   try {
-    const via = room.canonical_alias
-      ? []
-      : await core.rpc.rooms.viaServers({ room_id: room.room_id });
-    await copyText(matrixToUrl(room.canonical_alias ?? room.room_id, via, eventId));
-    return true;
+    const alias = eventId ? null : room.canonical_alias;
+    const address = alias ?? room.room_id;
+    let via: readonly string[] = [];
+    if (!alias) {
+      via = hierarchy
+        ? await joinVia(core, hierarchy.via, hierarchy.parentId)
+        : await core.rpc.rooms.viaServers({ room_id: room.room_id });
+    }
+    const link =
+      format === 'external'
+        ? matrixToUrl(address, via, eventId)
+        : eventId
+          ? matrixEventUri(room.room_id, eventId, via)
+          : mentionUri(address, via);
+    if (link === undefined) throw new Error('Invalid Matrix room address');
+    await copyText(link);
   } catch (error) {
     console.debug('[sable room] copy link failed', error);
+    toasts.error(t('errors.copyFailed'));
     return false;
   }
+  toasts.info(t('timeline.linkCopied'));
+  return true;
 }
 
 /** A room link resolves to a route; a user link has no route of its own. */
 export type PermalinkTarget = { kind: 'room'; path: string } | { kind: 'user'; userId: string };
 
 /**
- * Resolves the tail of a `/to/...` URL, still percent-encoded so the matrix.to parser decodes it.
+ * Resolves the tail of a `/to/...` URL, still percent-encoded so the permalink parser decodes it.
  */
 export function permalinkTarget(
   rooms: readonly RoomListItemView[],
@@ -170,7 +196,7 @@ export function permalinkTarget(
 ): PermalinkTarget | null {
   // `?via=` sits inside the fragment, where it would otherwise be parsed as
   // part of the last id.
-  const { href, via } = splitVia(`https://matrix.to/#/${encodedFragment}`);
+  const { href, via } = splitVia(`https://link.sable.moe/#/${encodedFragment}`);
   const link = parseMatrixLink(href);
   if (link === null) return null;
   if (link.kind === 'user') return { kind: 'user', userId: link.user_id };

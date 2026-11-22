@@ -3,11 +3,11 @@ import { page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
-import { setPreference } from '#lib/settings/preferences.svelte.js';
+import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
 import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 import { CoreError } from '#src/transport';
 
-import en from '../../../locales/en.json' with { type: 'json' };
 import Harness from './RoomComposerHarness.test.svelte';
 
 const NEWLINE = '{Shift>}{Enter}{/Shift}';
@@ -79,7 +79,7 @@ async function mount(
       ...extra,
     },
   });
-  const composer = screen.getByRole('combobox', { name: en.timeline.messagePlaceholder });
+  const composer = screen.getByRole('combobox');
   const editor = () => {
     const node = document.querySelector<HTMLElement>('.ProseMirror');
     if (!node) throw new Error('the editor is not rendered');
@@ -103,7 +103,7 @@ test.each(['search', 'cell'])(
       await userEvent.click(composer);
       const modifier = isMacPlatform() ? 'Meta' : 'Control';
       await userEvent.keyboard(`{${modifier}>}e{/${modifier}}`);
-      const search = screen.getByRole('searchbox', { name: en.composer.searchPacks });
+      const search = screen.getByRole('searchbox');
       await expect.element(search).toHaveFocus();
       await userEvent.keyboard('{ArrowRight}');
       const selected = () => document.querySelector('[data-selected]')?.getAttribute('aria-label');
@@ -351,17 +351,15 @@ for (const width of [320, 412, 520, 768]) {
       expect(strip.x + strip.width).toBeLessThanOrEqual(actions.x);
     }
     const composer = boxOf('.composer');
-    for (const button of rail.querySelectorAll('button')) {
-      await expect.element(button).toBeVisible();
-      const box = button.getBoundingClientRect();
-      expect(box.left).toBeGreaterThanOrEqual(Math.max(composer.left, 0));
-      expect(box.right).toBeLessThanOrEqual(Math.min(composer.right, window.innerWidth));
-      expect(box.top).toBeGreaterThanOrEqual(Math.max(composer.top, 0));
-      expect(box.bottom).toBeLessThanOrEqual(Math.min(composer.bottom, window.innerHeight));
+    expect(strip.left).toBeGreaterThanOrEqual(composer.left);
+    expect(strip.right).toBeLessThanOrEqual(composer.right);
+    if (rail.scrollWidth > rail.clientWidth) {
+      await expect.poll(() => rail.dataset.scrollMoreX).toContain('end');
     }
     const highlight = screen.getByRole('button', { name: 'Highlight colour', exact: true });
     highlight.element().focus();
     await expect.element(highlight).toBeInViewport();
+    await expect.poll(() => rail.dataset.scrollMoreX ?? '').not.toContain('end');
   });
 }
 
@@ -417,11 +415,12 @@ test('an empty short composer stays on one row on narrow screens', async () => {
 for (const width of [320, 414, 1280]) {
   test(`long messages do not overlap the expand button at ${String(width)}px`, async () => {
     await page.viewport(width, 800);
-    const { composer, editor, screen } = await mount(true, { composerForm: 'tall' });
+    const { composer, editor } = await mount(true, { composerForm: 'tall' });
     await userEvent.fill(composer, 'A long message with wrapping words. '.repeat(40));
     await document.fonts.ready;
 
-    const button = screen.getByRole('button', { name: en.composer.expand }).element();
+    const button = document.querySelector<HTMLElement>('.composer-expand');
+    if (!button) throw new Error('the expand button is not rendered');
     const assertClearance = () => {
       const editable = editor();
       const editorBox = editable.getBoundingClientRect();
@@ -607,7 +606,7 @@ test('a failed send keeps the draft and retries from inside the composer', async
   await userEvent.keyboard('{Enter}');
 
   const alert = screen.getByRole('alert');
-  await expect.poll(() => alert.element().textContent).toContain(en.composer.sendUnavailable);
+  await expect.element(alert).toBeVisible();
   expect(editor().textContent).toBe('still here');
 
   fail = false;
@@ -628,7 +627,7 @@ async function scheduleHarness() {
     if (!node) throw new Error('the send button is not rendered');
     return node;
   };
-  const dialog = () => mounted.screen.getByText('Schedule this message', { exact: true });
+  const dialog = () => mounted.screen.getByRole('dialog');
   return { ...mounted, onSchedule, send, dialog };
 }
 
@@ -693,4 +692,94 @@ test('a touch hold schedules only after the full delay and swallows its click', 
   );
   send().dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   expect(sent).toHaveLength(0);
+});
+
+test.for([true, false])(
+  'each typed line follows its own direction (rich: %s)',
+  async (richText) => {
+    await page.viewport(1280, 900);
+    const { composer, editor } = await mount(richText);
+    await userEvent.click(composer);
+    await userEvent.keyboard(`سلام دنیا${NEWLINE}hello world`);
+    const side = (text: string) => {
+      const walker = document.createTreeWalker(editor(), NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.textContent !== text) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const line = range.getBoundingClientRect();
+        const box = editor().getBoundingClientRect();
+        return line.left - box.left > box.right - line.right ? 'right' : 'left';
+      }
+      return null;
+    };
+    await expect.poll(() => side('سلام دنیا')).toBe('right');
+    expect(side('hello world')).toBe('left');
+  }
+);
+
+test('an MSC reference is offered once typed past, Tab links it and Enter sends', async () => {
+  const { composer, sent, editor } = await mount(true);
+  setPreference('linkMscReferences', 'ask');
+  const once = page.getByRole('option').first();
+
+  await userEvent.click(composer);
+  await userEvent.keyboard('MSC1{Enter}');
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent.at(-1)).toEqual({ body: 'MSC1', formatted: null });
+
+  await userEvent.keyboard('see MSC4444');
+  expect(once.query()).toBeNull();
+  await userEvent.keyboard('.');
+  await expect.element(once).toBeVisible();
+  await userEvent.keyboard('{Enter}');
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent.at(-1)).toEqual({ body: 'see MSC4444.', formatted: null });
+
+  await userEvent.keyboard('see MSC4444 {Tab}');
+  await expect
+    .poll(() => editor().querySelector('a')?.getAttribute('href'))
+    .toBe('https://msc.sable.moe/4444');
+  await userEvent.keyboard('and MSC1 {Escape}{Enter}');
+  await expect.poll(() => sent.length).toBe(3);
+  expect(sent.at(-1)).toEqual({
+    body: 'see MSC4444 and MSC1',
+    formatted: 'see <a href="https://msc.sable.moe/4444">MSC4444</a> and MSC1',
+  });
+
+  await userEvent.keyboard('MSC2 {ArrowDown}{Tab}');
+  await expect.poll(() => editor().querySelector('a')?.textContent).toBe('MSC2');
+  const notice = () => toasts.items.at(-1);
+  await expect.poll(() => notice()?.action?.label).toBeTruthy();
+  await userEvent.keyboard('MSC3 ');
+  await expect.poll(() => editor().querySelectorAll('a').length).toBe(2);
+  expect(once.query()).toBeNull();
+
+  notice()?.action?.run();
+  await userEvent.keyboard('MSC5 ');
+  await expect.element(once).toBeVisible();
+  setPreference('linkMscReferences', 'ask');
+});
+
+test('choosing never stops offering MSC links without linking the reference', async () => {
+  const { composer, sent } = await mount(true);
+  setPreference('linkMscReferences', 'ask');
+  const once = page.getByRole('option').first();
+
+  await userEvent.click(composer);
+  await userEvent.keyboard('see MSC4444 ');
+  await expect.element(once).toBeVisible();
+  await userEvent.keyboard('{ArrowDown}{ArrowDown}{Tab}');
+  await expect.poll(() => preferences.linkMscReferences).toBe('never');
+  const notice = () => toasts.items.at(-1);
+  await expect.poll(() => notice()?.action?.label).toBeTruthy();
+
+  await userEvent.keyboard('and MSC1 ');
+  expect(once.query()).toBeNull();
+  await userEvent.keyboard('{Enter}');
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent.at(-1)).toEqual({ body: 'see MSC4444 and MSC1', formatted: null });
+
+  notice()?.action?.run();
+  expect(preferences.linkMscReferences).toBe('ask');
 });

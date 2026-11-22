@@ -120,7 +120,7 @@ pub(crate) struct RelationsFilter<'a> {
     pub direction: Option<PaginationDirection>,
 }
 
-fn with_room_id(mut event: Value, room_id: &matrix_sdk::ruma::RoomId) -> Value {
+fn with_room_id(mut event: Value, room_id: &ruma::RoomId) -> Value {
     if let Some(object) = event.as_object_mut() {
         object
             .entry("room_id")
@@ -237,7 +237,7 @@ fn managers_from_account_data(widgets: &Value, known: &mut Vec<IntegrationManage
 fn integration_manager_page(
     ui_url: &str,
     scalar_token: Option<&str>,
-    room_id: &matrix_sdk::ruma::RoomId,
+    room_id: &ruma::RoomId,
 ) -> Option<String> {
     let mut url = url::Url::parse(ui_url).ok()?;
     url.set_path("/index.html");
@@ -295,6 +295,19 @@ struct ScalarRegisterOut {
     expires_in: u64,
 }
 
+fn accepted_urls(content: Option<Value>) -> Vec<String> {
+    content
+        .and_then(|content| {
+            content.get("accepted")?.as_array().map(|urls| {
+                urls.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
 impl Core {
     pub(crate) async fn room_timeline_events(
         &self,
@@ -304,7 +317,7 @@ impl Core {
         state_key: Option<&str>,
         limit: u32,
         since: Option<&OwnedEventId>,
-    ) -> Result<Vec<serde_json::Value>, RpcError> {
+    ) -> Result<Vec<Value>, RpcError> {
         let client = self.client().await?;
         let Some(event_cache) = client.event_cache() else {
             return Ok(Vec::new());
@@ -324,31 +337,30 @@ impl Core {
 
         let mut collected = Vec::new();
         for event in events.iter().rev() {
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get())
-            else {
+            let Ok(json) = serde_json::from_str::<Value>(event.raw().json().get()) else {
                 continue;
             };
 
-            if state_key.is_some_and(|wanted| {
-                json.get("state_key").and_then(serde_json::Value::as_str) != Some(wanted)
-            }) {
+            if state_key
+                .is_some_and(|wanted| json.get("state_key").and_then(Value::as_str) != Some(wanted))
+            {
                 continue;
             }
-            if json.get("type").and_then(serde_json::Value::as_str) != Some(event_type) {
+            if json.get("type").and_then(Value::as_str) != Some(event_type) {
                 continue;
             }
             if let Some(msgtype) = msgtype
                 && json
                     .get("content")
                     .and_then(|content| content.get("msgtype"))
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(Value::as_str)
                     != Some(msgtype)
             {
                 continue;
             }
 
             if since.is_some_and(|since| {
-                json.get("event_id").and_then(serde_json::Value::as_str) == Some(since.as_str())
+                json.get("event_id").and_then(Value::as_str) == Some(since.as_str())
             }) {
                 break;
             }
@@ -367,7 +379,7 @@ impl Core {
         room_id: &OwnedRoomId,
         event_type: &str,
         state_key: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, RpcError> {
+    ) -> Result<Vec<Value>, RpcError> {
         let room = self.room(room_id).await?;
         let events = self
             .with_open_stores(async || room.get_state_events(event_type.into()).await)
@@ -381,11 +393,11 @@ impl Core {
                     RawAnySyncOrStrippedState::Sync(raw) => raw.json(),
                     RawAnySyncOrStrippedState::Stripped(raw) => raw.json(),
                 };
-                serde_json::from_str::<serde_json::Value>(raw.get()).ok()
+                serde_json::from_str::<Value>(raw.get()).ok()
             })
             .filter(|json| {
                 state_key.is_none_or(|wanted| {
-                    json.get("state_key").and_then(serde_json::Value::as_str) == Some(wanted)
+                    json.get("state_key").and_then(Value::as_str) == Some(wanted)
                 })
             })
             .map(|json| with_room_id(json, room_id))
@@ -901,37 +913,34 @@ impl Core {
             .and_then(reqwest::Response::error_for_status)
             .or_failed(self, LABEL)?;
 
-        let mut accepted = self.accepted_terms(LABEL).await?;
-        for url in urls {
-            if !accepted.contains(&url) {
-                accepted.push(url);
+        self.update_account_data(&["m.accepted_terms"], LABEL, async |current| {
+            let mut accepted = accepted_urls(current);
+            for url in urls {
+                if !accepted.contains(&url) {
+                    accepted.push(url);
+                }
             }
-        }
-        self.put_global_account_data(
-            GlobalAccountDataEventType::from("m.accepted_terms"),
-            &serde_json::json!({ "accepted": accepted }),
-            LABEL,
-        )
-        .await
+            Ok(Some(serde_json::json!({ "accepted": accepted })))
+        })
+        .await?;
+        Ok(())
     }
 
     async fn accepted_terms(&self, label: &str) -> Result<Vec<String>, RpcError> {
-        Ok(self
-            .global_account_data(GlobalAccountDataEventType::from("m.accepted_terms"), label)
-            .await?
-            .and_then(|raw| serde_json::from_str::<Value>(raw.json().get()).ok())
-            .and_then(|content| {
-                content.get("accepted")?.as_array().map(|urls| {
-                    urls.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-            })
-            .unwrap_or_default())
+        Ok(accepted_urls(
+            self.global_account_data(GlobalAccountDataEventType::from("m.accepted_terms"), label)
+                .await?
+                .and_then(|raw| serde_json::from_str::<Value>(raw.json().get()).ok()),
+        ))
     }
 
+    /// The manager records signed terms per token, so a fresh one opens the page unsigned.
     async fn scalar_token(&self, api_url: &str) -> Option<String> {
+        let user = self.client().await.ok()?.user_id()?.to_owned();
+        let key = (user, api_url.to_owned());
+        if let Some(token) = self.scalar_tokens.lock().get(&key) {
+            return Some(token.clone());
+        }
         let token = self.openid_token().await.ok()?;
         let response = self
             .client()
@@ -955,11 +964,13 @@ impl Core {
         if !response.status().is_success() {
             return None;
         }
-        serde_json::from_str::<Value>(&response.text().await.ok()?)
+        let token = serde_json::from_str::<Value>(&response.text().await.ok()?)
             .ok()?
             .get("scalar_token")?
-            .as_str()
-            .map(str::to_owned)
+            .as_str()?
+            .to_owned();
+        self.scalar_tokens.lock().insert(key, token.clone());
+        Some(token)
     }
 
     pub(crate) async fn known_room_ids(&self) -> Result<Vec<OwnedRoomId>, RpcError> {
@@ -1185,9 +1196,7 @@ mod tests {
         assert!(matches!(
             core.schedule_message(
                 &room_id.to_owned(),
-                matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                    "later"
-                ),
+                ruma::events::room::message::RoomMessageEventContent::text_plain("later"),
                 5000,
                 None,
             )
@@ -1568,11 +1577,12 @@ mod tests {
         let room_id = room_id!("!stickyread:example.org");
         server.sync_joined_room(&client, room_id).await;
         let now = crate::now_ms();
-        let mut response = ruma::api::client::sync::sync_events::v5::Response::new("1".to_owned());
+        let mut response =
+            ruma::api::client::sync::sync_events::msc4186::Response::new("1".to_owned());
         let mut sticky_room =
-            ruma::api::client::sync::sync_events::v5::response::StickyEventsRoom::default();
+            ruma::api::client::sync::sync_events::msc4186::response::StickyEventsRoom::default();
         sticky_room.events.push(
-            matrix_sdk::ruma::serde::Raw::new(&json!({
+            ruma::serde::Raw::new(&json!({
                 "type": "com.example.presence", "event_id": "$sticky", "sender": "@a:example.org",
                 "origin_server_ts": now, "msc4354_sticky": {"duration_ms": 600_000},
                 "content": {"msc4354_sticky_key": "slot", "status": "here"}
@@ -1609,12 +1619,12 @@ mod tests {
         core.watch_widget_feed(&client, 1);
         let room_id = room_id!("!feed:example.org");
         let event = |id: &str| {
-            matrix_sdk::ruma::serde::Raw::new(&json!({
+            ruma::serde::Raw::new(&json!({
                 "type": "com.example.thing", "event_id": id, "sender": "@a:example.org",
                 "origin_server_ts": 1, "content": {}
             }))
             .unwrap()
-            .cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>()
+            .cast_unchecked::<ruma::events::AnySyncTimelineEvent>()
         };
 
         server
@@ -1659,7 +1669,7 @@ mod tests {
             .sync_room(
                 &client,
                 JoinedRoomBuilder::new(room_id).add_state_event(
-                    matrix_sdk::ruma::serde::Raw::new(&json!({
+                    ruma::serde::Raw::new(&json!({
                         "type": "im.vector.modular.widgets", "state_key": "doom",
                         "event_id": "$widget", "sender": "@a:example.org", "origin_server_ts": 1,
                         "content": {"type": "m.custom", "url": "https://doom.example/", "name": "Doom"}
@@ -1868,6 +1878,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/scalar/api/register"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"scalar_token": "s3"})))
+            .expect(1)
             .mount(server.server())
             .await;
         Mock::given(method("GET"))
@@ -1889,6 +1900,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/scalar/api/_matrix/integrations/v1/terms"))
+            .and(header("Authorization", "Bearer s3"))
             .and(body_json(json!({"user_accepts": ["https://im/tos"]})))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .expect(1)
@@ -1906,17 +1918,22 @@ mod tests {
         let pending = core.integration_manager_terms().await.unwrap();
 
         assert_eq!(pending, Vec::new());
+        let url = core
+            .integration_manager_url(&room_id!("!room:example.org").to_owned())
+            .await
+            .unwrap();
+        assert!(url.contains("scalar_token=s3"));
     }
 
     #[test]
     fn integration_managers_come_from_well_known_then_account_data_without_duplicates() {
-        let mut managers = super::managers_from_well_known(&json!({
+        let mut managers = managers_from_well_known(&json!({
             "m.integrations": {"managers": [
                 {"api_url": "https://a/api", "ui_url": "https://a"},
                 {"api_url": "https://broken"}
             ]}
         }));
-        super::managers_from_account_data(
+        managers_from_account_data(
             &json!({
                 "one": {"type": "m.integration_manager", "url": "https://a"},
                 "two": {"type": "m.integration_manager", "url": "https://b", "data": {"api_url": "https://b/api"}},

@@ -6,13 +6,13 @@ import type {
   SlashInvocation,
   Rpc,
 } from '#src/generated/protocol';
-import { CoreError } from '#src/transport';
+import { isCoreError } from '#src/transport';
 
 import { knockRoom, openDirectMessage } from '#lib/core/api/rooms.js';
 import type { E2eePolicy } from '#lib/deployment/e2ee-policy.js';
 import { setMemberLook } from '#lib/core/api/members.js';
 import { joinOrOfferKnock } from '#lib/rooms/join-or-knock.js';
-import { parseSlash } from '#lib/model/model.js';
+import { parseMatrixLink, parseSlash } from '#lib/model/model.js';
 import { currentFix } from '#lib/platform/geolocation.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 
@@ -61,7 +61,7 @@ export type SlashOutcome =
   | { kind: 'gifSearch'; query: string }
   | { kind: 'bugReport' }
   | { kind: 'knock'; address: string; via: string[] }
-  | { kind: 'done' }
+  | { kind: 'done'; notice?: { key: string; values?: Record<string, string> } }
   | { kind: 'error'; key: string; values?: Record<string, string> };
 
 export type SlashResult = Exclude<SlashOutcome, { kind: 'error' }>;
@@ -219,7 +219,7 @@ async function addWidget(
   try {
     await rpc.room_state.addWidget({ room_id: roomId, name: widget.name, url: widget.url });
   } catch (error) {
-    if (error instanceof CoreError && error.detail.code === 'invalid_url') {
+    if (isCoreError(error, 'invalid_url')) {
       return usageError(name);
     }
     throw error;
@@ -368,17 +368,24 @@ async function run(
     case 'leave':
       await rpc.rooms.leave({ room_id: roomId });
       return DONE;
-    case 'invite':
-      await rpc.rooms.invite({ room_id: roomId, user_id: invocation.user_id });
-      return DONE;
+    case 'invite': {
+      const history = await rpc.rooms.invite({ room_id: roomId, user_id: invocation.user_id });
+      return history === 'failed'
+        ? {
+            kind: 'done',
+            notice: { key: 'room.inviteSentHistoryFailed', values: { user: invocation.user_id } },
+          }
+        : DONE;
+    }
     case 'share_history': {
       const outcome = await rpc.encryption.shareHistory({
         room_id: roomId,
         user_id: invocation.user_id,
       });
+      const values = { user: invocation.user_id };
       return outcome === 'shared'
-        ? DONE
-        : { kind: 'error', key: `composer.slashShareHistory.${outcome}` };
+        ? { kind: 'done', notice: { key: 'composer.slashShareHistory.shared', values } }
+        : { kind: 'error', key: `composer.slashShareHistory.${outcome}`, values };
     }
     case 'kick':
       return moderate(name, invocation, 'kick', true, context);
@@ -555,17 +562,15 @@ function plainTextFrom(html: string): string {
   return textFrom(new DOMParser().parseFromString(html, 'text/html').body).trim();
 }
 
-const MENTION_USER_ID = /#\/(@[^?]+)/;
-
 /** A mention pill reads as its display name in the body; commands take the id. */
 function spellMentions(body: string, formatted: string | null | undefined): string {
   if (!formatted) return body;
   const links = new DOMParser().parseFromString(formatted, 'text/html').querySelectorAll('a[href]');
   let spelled = body;
   for (const link of links) {
-    const userId = MENTION_USER_ID.exec(link.getAttribute('href') ?? '')?.[1];
+    const target = parseMatrixLink(link.getAttribute('href') ?? '');
     const label = link.textContent;
-    if (userId && label) spelled = spelled.replace(label, () => decodeURIComponent(userId));
+    if (target?.kind === 'user' && label) spelled = spelled.replace(label, () => target.user_id);
   }
   return spelled;
 }

@@ -75,7 +75,7 @@ test('lists a peer subscribed on several backends once, on the backend it publis
   ]);
 });
 
-test('starts the publisher and healthy subscribers while another subscriber is blocked', async () => {
+test('finishes connecting once the publisher is up while a subscriber is still blocked', async () => {
   let releaseBlocked!: () => void;
   const blocked = new Promise<void>((resolve) => {
     releaseBlocked = resolve;
@@ -92,33 +92,25 @@ test('starts the publisher and healthy subscribers while another subscriber is b
       return next;
     },
   });
-  let completed = false;
-  const connecting = transport
-    .connect({
-      url: '',
-      token: '',
-      microphoneEnabled: false,
-      cameraEnabled: false,
-      publisherId: 'publish',
-      backends: [
-        { id: 'blocked', url: 'wss://blocked', jwt: 'blocked', identity: 'blocked' },
-        { id: 'publish', url: 'wss://publish', jwt: 'publish', identity: 'me' },
-        { id: 'healthy', url: 'wss://healthy', jwt: 'healthy', identity: 'healthy' },
-      ],
-      encryptionKeys: [],
-    })
-    .then(() => {
-      completed = true;
-    });
-
-  await vi.waitFor(() => {
-    expect(created).toHaveLength(3);
+  await transport.connect({
+    url: '',
+    token: '',
+    microphoneEnabled: false,
+    cameraEnabled: false,
+    publisherId: 'publish',
+    backends: [
+      { id: 'blocked', url: 'wss://blocked', jwt: 'blocked', identity: 'blocked' },
+      { id: 'publish', url: 'wss://publish', jwt: 'publish', identity: 'me' },
+      { id: 'healthy', url: 'wss://healthy', jwt: 'healthy', identity: 'healthy' },
+    ],
+    encryptionKeys: [],
   });
+
+  expect(created).toHaveLength(3);
   expect(created[0].getState().connection).toBe('connected');
   expect(created[2].getState().connection).toBe('connected');
-  expect(completed).toBe(false);
+  expect(transport.getState().connection).toBe('connected');
   releaseBlocked();
-  await connecting;
 });
 
 test('delivers a remote key while that subscriber is still connecting', async () => {
@@ -215,6 +207,83 @@ test('retries a failed subscriber on the next backend snapshot', async () => {
   });
   await transport.reconcileBackends?.(backends);
   expect(remoteAttempts).toBe(2);
+});
+
+test('reports a failed subscriber as unreachable and retries it without a new snapshot', async () => {
+  vi.useFakeTimers();
+  try {
+    let remoteAttempts = 0;
+    const transport = createMultiSfuTransport(false, undefined, {
+      createTransport: (options) => {
+        const next = fakeTransport();
+        if (options.publishMedia === false) {
+          next.connect = vi.fn(() => {
+            remoteAttempts += 1;
+            if (remoteAttempts === 1) return Promise.reject(new Error('ConnectionError'));
+            next.emitConnection('connected');
+            return Promise.resolve();
+          });
+        }
+        return next;
+      },
+    });
+    await transport.connect({
+      url: '',
+      token: '',
+      microphoneEnabled: false,
+      cameraEnabled: false,
+      publisherId: 'publish',
+      backends: [
+        { id: 'publish', url: 'wss://one', jwt: 'one', identity: 'me' },
+        { id: 'remote', url: 'wss://two', jwt: 'two', identity: 'other' },
+      ],
+      encryptionKeys: [],
+    });
+    await vi.waitFor(() => {
+      expect(transport.getState().unreachableBackends).toEqual(['remote']);
+    });
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(remoteAttempts).toBe(2);
+    expect(transport.getState().unreachableBackends).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('retries a subscriber that drops mid-call', async () => {
+  vi.useFakeTimers();
+  try {
+    const created: ReturnType<typeof fakeTransport>[] = [];
+    const transport = createMultiSfuTransport(false, undefined, {
+      createTransport: () => {
+        const next = fakeTransport();
+        created.push(next);
+        return next;
+      },
+    });
+    await transport.connect({
+      url: '',
+      token: '',
+      microphoneEnabled: false,
+      cameraEnabled: false,
+      publisherId: 'publish',
+      backends: [
+        { id: 'publish', url: 'wss://one', jwt: 'one', identity: 'me' },
+        { id: 'remote', url: 'wss://two', jwt: 'two', identity: 'other' },
+      ],
+      encryptionKeys: [],
+    });
+    created[1].emitConnection('disconnected');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.getState().unreachableBackends).toEqual(['remote']);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(created).toHaveLength(3);
+    expect(transport.getState().unreachableBackends).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('retains a backend key when a subscriber connect fails and retries', async () => {

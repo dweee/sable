@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { inlineKey } from '#lib/language.svelte.js';
   import { Dialog } from 'bits-ui';
   import { untrack } from 'svelte';
   import ArrowLeftIcon from 'phosphor-svelte/lib/ArrowLeftIcon';
   import ArrowRightIcon from 'phosphor-svelte/lib/ArrowRightIcon';
+  import CropIcon from 'phosphor-svelte/lib/CropIcon';
   import EyeSlashIcon from 'phosphor-svelte/lib/EyeSlashIcon';
   import ImageBrokenIcon from 'phosphor-svelte/lib/ImageBrokenIcon';
   import SlidersHorizontalIcon from 'phosphor-svelte/lib/SlidersHorizontalIcon';
@@ -14,6 +16,8 @@
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { type ImageMetadata } from '#lib/settings/definitions.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
+  import { isCroppable } from '#lib/ui/image-crop/croppable.js';
+  import { requestCrop } from '#lib/ui/image-crop/crop-request.svelte.js';
   import { mediaEvents } from '#lib/ui/media-events.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -26,6 +30,7 @@
 
   import { objectSource, previewKind, type StagedFile } from '#lib/composer/composer-files.js';
   import StagedImageOptions from './StagedImageOptions.svelte';
+  import StagedVideoOptions from './StagedVideoOptions.svelte';
   import { canStrip } from './strip-metadata';
 
   interface Props {
@@ -35,9 +40,23 @@
     onRemove: (id: number) => void;
     onToggleSpoiler: (id: number) => void;
     onSetMetadata: (id: number, metadata: ImageMetadata) => void;
+    onSetGif: (id: number, gif: boolean | undefined) => void;
+    onReplace: (id: number, file: File) => void;
+    /** What automatic resolves to for a staged video, unknown until it has been read. */
+    autoGif: (file: File) => boolean | undefined;
   }
 
-  let { files, selectedId, onClose, onRemove, onToggleSpoiler, onSetMetadata }: Props = $props();
+  let {
+    files,
+    selectedId,
+    onClose,
+    onRemove,
+    onToggleSpoiler,
+    onSetMetadata,
+    onSetGif,
+    onReplace,
+    autoGif,
+  }: Props = $props();
 
   let currentId = $state(untrack(() => selectedId));
   let index = $derived(
@@ -48,12 +67,27 @@
   );
   let item = $derived<StagedFile | undefined>(files[index]);
   let kind = $derived(item ? previewKind(item.file) : null);
+  let auto = $derived(item ? autoGif(item.file) : undefined);
+  let playsAsGif = $derived((item?.gif ?? auto) === true);
   let failedId = $state<number | null>(null);
   let swipeX = $state(0);
   let swipeY = $state(0);
 
   function markFailed(): void {
     if (item) failedId = item.id;
+  }
+
+  let imageFile = $derived(kind === 'image' ? item?.file : undefined);
+  let croppable = $derived(imageFile ? isCroppable(imageFile) : Promise.resolve(false));
+
+  async function crop(): Promise<void> {
+    if (!item) return;
+    const { id, file } = item;
+    const cropped = await requestCrop(file, 'attachment');
+    if (cropped && cropped !== file) {
+      if (failedId === id) failedId = null;
+      onReplace(id, cropped);
+    }
   }
 
   let swipe: {
@@ -90,8 +124,9 @@
 
   function handleKeydown(event: KeyboardEvent): void {
     if (event.target instanceof HTMLVideoElement) return;
-    if (event.key === 'ArrowLeft') go(-1);
-    else if (event.key === 'ArrowRight') go(1);
+    const key = inlineKey(event.key);
+    if (key === 'ArrowLeft') go(-1);
+    else if (key === 'ArrowRight') go(1);
     else return;
     event.preventDefault();
   }
@@ -193,7 +228,7 @@
               class="staged-viewer-nav staged-viewer-previous"
               label={i18n.t('viewer.previous')}
               size="large"
-              onclick={() => go(-1)}><ArrowLeftIcon /></IconButton
+              onclick={() => go(-1)}><ArrowLeftIcon class="mirror-rtl" /></IconButton
             >
           {/if}
           {#if item.spoiler}
@@ -214,6 +249,8 @@
                 style:translate={`${String(swipeX)}px ${String(swipeY)}px`}
                 controls
                 playsinline
+                loop={playsAsGif}
+                muted={playsAsGif}
                 preload="metadata"
                 aria-label={item.file.name}
                 {@attach objectSource(item.file)}
@@ -235,7 +272,7 @@
               class="staged-viewer-nav staged-viewer-next"
               label={i18n.t('viewer.next')}
               size="large"
-              onclick={() => go(1)}><ArrowRightIcon /></IconButton
+              onclick={() => go(1)}><ArrowRightIcon class="mirror-rtl" /></IconButton
             >
           {/if}
         </div>
@@ -253,6 +290,18 @@
             <EyeSlashIcon aria-hidden="true" />
             {i18n.t('composer.spoiler')}
           </Button>
+          {#await croppable then canCrop}
+            {#if canCrop}
+              <Button
+                variant="ghost"
+                aria-label={i18n.t('composer.cropAttachment', { name: item.file.name })}
+                onclick={() => void crop()}
+              >
+                <CropIcon aria-hidden="true" />
+                {i18n.t('composer.crop')}
+              </Button>
+            {/if}
+          {/await}
           {#if kind === 'image' && canStrip(item.file)}
             <StagedImageOptions {item} {onSetMetadata}>
               {#snippet trigger({ props })}
@@ -269,6 +318,15 @@
                 </Button>
               {/snippet}
             </StagedImageOptions>
+          {:else if kind === 'video'}
+            <StagedVideoOptions {item} {auto} {onSetGif}>
+              {#snippet trigger({ props })}
+                <Button {...props} variant="ghost">
+                  <SlidersHorizontalIcon aria-hidden="true" />
+                  {i18n.t('composer.playAs')}
+                </Button>
+              {/snippet}
+            </StagedVideoOptions>
           {/if}
           <Button
             variant="ghost"
@@ -369,7 +427,8 @@
     font-size: var(--font-size-small);
     gap: var(--space-100);
     inset-block-start: var(--space-200);
-    inset-inline-start: 50%;
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
+    left: 50%;
     padding: var(--space-100) var(--space-250);
     position: absolute;
     translate: -50% 0;

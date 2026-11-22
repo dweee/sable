@@ -1,9 +1,9 @@
 name: Cloudflare Infra
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
+  # quality-checks calls this on main and tauri-build on tags, once the WASM
+  # bindings are cached.
+  workflow_call:
   pull_request:
     paths:
       - 'infra/**'
@@ -16,8 +16,6 @@ on:
         description: 'Git tag to deploy to production (e.g. v1.2.3). Empty = deploy current HEAD as the development build.'
         required: false
         type: string
-
-permissions: {}
 
 concurrency:
   group: cloudflare-web-${{ github.ref }}
@@ -35,10 +33,10 @@ env:
   TF_HTTP_UNLOCK_METHOD: 'DELETE'
   TF_HTTP_RETRY_WAIT_MIN: '5'
   CARGO_INCREMENTAL: 0
-  SCCACHE_BUCKET: sccache
+  SCCACHE_BUCKET: ow-oops-sccache
   SCCACHE_S3_KEY_PREFIX: sable-next
-  SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
-  SCCACHE_REGION: us-east-1
+  SCCACHE_ENDPOINT: https://s3.gra.io.cloud.ovh.net
+  SCCACHE_REGION: gra
   SCCACHE_S3_USE_SSL: 'true'
 
 jobs:
@@ -67,8 +65,6 @@ jobs:
     needs: detect
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
     env:
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
@@ -125,8 +121,6 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
     env:
       TF_HTTP_ADDRESS: ${{ needs.detect.outputs.production == 'true' && secrets.TF_HTTP_ADDRESS_PRODUCTION || secrets.TF_HTTP_ADDRESS }}
       TF_HTTP_LOCK_ADDRESS: ${{ needs.detect.outputs.production == 'true' && secrets.TF_HTTP_LOCK_ADDRESS_PRODUCTION || secrets.TF_HTTP_LOCK_ADDRESS }}
@@ -175,8 +169,6 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
     env:
       TF_HTTP_ADDRESS: ${{ needs.detect.outputs.production == 'true' && secrets.TF_HTTP_ADDRESS_PRODUCTION || secrets.TF_HTTP_ADDRESS }}
       TF_HTTP_LOCK_ADDRESS: ${{ needs.detect.outputs.production == 'true' && secrets.TF_HTTP_LOCK_ADDRESS_PRODUCTION || secrets.TF_HTTP_LOCK_ADDRESS }}

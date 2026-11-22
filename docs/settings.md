@@ -4,16 +4,17 @@
 # Settings reference
 
 These names and values are accepted by `settingsDefaults` and `settingsLocked` in
-[`config.json`](web.md#configuration). Invalid values are ignored, and numbers outside
-their range are clamped.
+[`config.json`](https://docs.sable.moe/installation/self-hosting/#configuration). Invalid
+values are ignored, and numbers outside their range are clamped.
 
-[`/.well-known/sable`](web.md#homeserver-configuration) accepts the same settings
-except those marked deployment only.
+[`/.well-known/sable`](https://docs.sable.moe/installation/homeserver-configuration/)
+accepts the same settings except those marked deployment only.
 
 ## Appearance
 
-- `language` (Language): One of `system`, `ar`, `bg`, `cs`, `de`, `en`, `es`, `fi`, `fr`, `hu`, `it`, `mi`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `th`, `tok`, `tr`, `uk`, `zh-Hans`. Default `system`.
+- `language` (Language): One of `system`, `ar`, `bg`, `ca`, `cs`, `de`, `en`, `es`, `fi`, `fr`, `hu`, `it`, `mi`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `th`, `tok`, `tr`, `uk`, `zh-Hans`. Default `system`.
 - `theme` (Light or dark): One of `system`, `dark`, `light`. Default `system`.
+- `deploymentTheme` (Use this server’s theme): `true` or `false`. Default `true`.
 - `underlineLinks` (Always underline links): `true` or `false`. Default `true`.
 - `renderRoomColors` (Use room colours instead of profile colours): `true` or `false`. Default `true`.
 - `renderProfileColors` (Show profile name colours): `true` or `false`. Default `true`.
@@ -24,10 +25,14 @@ except those marked deployment only.
 - `alwaysShowAltText` (Always show image descriptions): `true` or `false`. Default `false`.
 - `nameColorCorrection` (Improve name colour readability): One of `strong`, `weak`, `off`. Default `strong`.
 - `showRoomIcon` (Room icons): One of `always`, `sometimes`, `collapsed`, `never`. Default `always`.
+- `showEncryptionStatusIcon` (Show encryption status icon): `true` or `false`. Default `true`.
+- `voiceParticipantPlacement` (Voice room participants): One of `both`, `below`, `inline`. Default `both`.
 - `showRoomBanners` (Room banners above the list): `true` or `false`. Default `true`.
+- `bannerFit` (Banner size): One of `fixed`, `image`. Default `fixed`.
 - `showDmTopics` (Show topics in direct messages): `true` or `false`. Default `true`.
+- `messagePreviews` (Message previews): One of `off`, `direct`, `rooms`, `all`. Default `off`.
 - `subspaceHierarchyLimit` (Subspace nesting depth): One of `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`. Default `3`.
-- `showHome` (All rooms in the sidebar): `true` or `false`. Default `false`.
+- `showHome` (Show Home with all rooms): `true` or `false`. Default `false`.
 - `restoreLastRoom` (Restore last viewed room): `true` or `false`. Default `true`.
 - `showUnreadCounts` (Show counts on quiet rooms): `true` or `false`. Default `false`.
 - `badgeCountDMsOnly` (Show counts on quiet direct messages): `true` or `false`. Default `true`.
@@ -67,6 +72,7 @@ except those marked deployment only.
 - `hideProfileChanges` (Hide name and avatar changes): `true` or `false`. Default `true`.
 - `hideTopicChanges` (Hide topic changes): `true` or `false`. Default `false`.
 - `hideMemberInReadOnly` (Hide members in read-only rooms): `true` or `false`. Default `true`.
+- `hideSentBeforeJoined` (Hide messages sent before you joined): `true` or `false`. Default `false`.
 - `showTombstoneEvents` (Show removed-message placeholders): `true` or `false`. Default `true`.
 - `openRoomsAtUnread` (Open rooms at the first unread message): `true` or `false`. Default `true`.
 - `jumpToLatestOnSend` (Jump to your message when you send): `true` or `false`. Default `false`.
@@ -94,10 +100,12 @@ except those marked deployment only.
 - `twitterEmoji` (Twitter emoji): `true` or `false`. Default `true`.
 - `pixelatedImages` (Pixelated image scaling): One of `always`, `smart`, `never`. Default `never`.
 - `gifProvider` (GIF search provider): One of `default`, `klipy`, `tenor`, `giphy`. Default `default`. Deployment only.
+- `reuploadGifs` (Upload picked GIFs to your homeserver): `true` or `false`. Default `false`.
 
 ## Developer
 
 - `coreLogLevel` (Core console log level): One of `default`, `debug`. Default `default`. Deployment only.
+- `showAlertZoo` (Show alert zoo): `true` or `false`. Default `false`. Deployment only.
 - `developerTools` (Enable developer tools): `true` or `false`. Default `false`. Deployment only.
 - `callStatsOverlay` (Show screen share statistics in calls): `true` or `false`. Default `false`. Deployment only.
 - `callDebugOverlay` (Show call debug information in calls): `true` or `false`. Default `true`. Deployment only.
@@ -115,6 +123,7 @@ except those marked deployment only.
 - `alwaysInlineEditor` (Always inline editor): `true` or `false`. Default `false`.
 - `enterForNewline` (Newline on touch screens, send otherwise): One of `adaptive`, `newline`, `send`. Default `adaptive`.
 - `sedEdits` (Edit your last message with s/old/new): `true` or `false`. Default `false`.
+- `linkMscReferences` (Link MSC references): One of `ask`, `always`, `never`. Default `ask`.
 - `inlineEditing` (Edit messages in the timeline): `true` or `false`. Default `false`.
 - `mentionInReplies` (Default reply notifications): `true` or `false`. Default `true`.
 - `formattingToolbar` (Keep formatting toolbar open): `true` or `false`. Default `false`.
@@ -175,6 +184,7 @@ except those marked deployment only.
 ## Notifications
 
 - `systemNotifications` (System alerts): `true` or `false`. Default `true`. Deployment only.
+- `inAppBanners` (In-app banners): `true` or `false`. Default `false`. Deployment only.
 - `notificationSounds` (Play notification sounds): `true` or `false`. Default `true`. Deployment only.
 - `notifyOnce` (One alert per room): `true` or `false`. Default `true`.
 - `pushInactiveTimeout` (Alert other devices after): One of `off`, `1`, `5`, `10`, `15`, `30`. Default `1`. Deployment only.
@@ -184,7 +194,7 @@ except those marked deployment only.
 - `richPushPayloads` (Include message text in push): `true` or `false`. Default `true`. Deployment only.
 - `clearNotificationsOnRead` (Clear alerts when read): `true` or `false`. Default `true`. Deployment only.
 - `highlightMentions` (Highlight mentions): `true` or `false`. Default `true`.
-- `faviconForMentionsOnly` (Tab badge for mentions and keywords): `true` or `false`. Default `false`.
+- `faviconForMentionsOnly` (Tab badge only for mentions and keywords): `true` or `false`. Default `false`.
 
 ## Voice & video
 
@@ -201,13 +211,14 @@ except those marked deployment only.
 - `incomingVoiceIsolation` (Voice isolation for others): `true` or `false`. Default `false`. Deployment only.
 - `echoCancellation` (Remove call echo from the microphone): `true` or `false`. Default `true`. Deployment only.
 - `autoGainControl` (Adjust microphone level automatically): `true` or `false`. Default `true`. Deployment only.
+- `microphoneVolume` (Microphone volume): Number from 0 to 2. Default `1`. Deployment only.
 - `callCameraResolution` (Camera resolution): One of `auto`, `360`, `480`, `720`, `1080`, `1440`, `2160`. Default `auto`. Deployment only.
 - `callCameraBitrate` (Camera maximum bitrate): One of `auto`, `250`, `500`, `1000`, `2000`, `4000`, `8000`, `16000`. Default `auto`. Deployment only.
 - `callCameraCodec` (Camera codec): One of `auto`, `vp8`, `h264`, `vp9`, `av1`. Default `auto`. Deployment only.
-- `callScreenResolution` (Screen sharing resolution): One of `auto`, `360`, `480`, `720`, `1080`, `1440`, `2160`. Default `720`. Deployment only.
+- `callScreenResolution` (Screen sharing resolution): One of `auto`, `360`, `480`, `720`, `1080`, `1440`, `2160`. Default `1080`. Deployment only.
 - `callScreenBitrate` (Screen sharing maximum bitrate): One of `auto`, `250`, `500`, `1000`, `2000`, `4000`, `8000`, `16000`. Default `auto`. Deployment only.
 - `callScreenFramerate` (Screen sharing frame rate): One of `auto`, `15`, `30`, `60`. Default `30`. Deployment only.
-- `callScreenCodec` (Screen sharing codec): One of `auto`, `vp8`, `h264`, `vp9`, `av1`. Default `h264`. Deployment only.
+- `callScreenCodec` (Screen sharing codec): One of `auto`, `vp8`, `h264`, `vp9`, `av1`. Default `vp8`. Deployment only.
 - `callSimulcast` (Use simulcast): `true` or `false`. Default `true`. Deployment only.
 - `webRtcIpPolicy` (Network interfaces for calls): One of `default`, `default_public_and_private_interfaces`, `default_public_interface_only`, `disable_non_proxied_udp`. Default `default`. Deployment only.
 
@@ -239,8 +250,8 @@ except those marked deployment only.
 - `roomBannerHeight`: Number from 56 to 500. Default `190`.
 - `doubleTapReaction`: Text. Default `❤️`.
 - `memberSort`: One of `name-asc`, `name-desc`, `newest`, `oldest`. Default `name-asc`.
-- `roomSort`: One of `recent`, `name-asc`, `name-desc`. Default `recent`.
-- `directSort`: One of `recent`, `name-asc`, `name-desc`. Default `recent`.
+- `roomSort`: One of `recent`, `unread-first`, `name-asc`, `name-desc`. Default `recent`.
+- `directSort`: One of `recent`, `unread-first`, `name-asc`, `name-desc`. Default `recent`.
 - `composerButtonOrder`: List of `gif`, `sticker`, `emoticon`, `persona`, `format`, `separator:0`, `separator:1`, `separator:2`, `separator:3`, `separator:4`, `separator:5`, `separator:6`, `separator:7`, `separator:8`. Default `["gif","sticker","emoticon","separator:0","persona","format"]`.
 - `personaGrid`: `true` or `false`. Default `true`.
 - `personaAlternateAvatar`: `true` or `false`. Default `false`.

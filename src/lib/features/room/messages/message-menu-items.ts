@@ -6,17 +6,21 @@ import CopyIcon from 'phosphor-svelte/lib/CopyIcon';
 import DownloadIcon from 'phosphor-svelte/lib/DownloadSimpleIcon';
 import FavoriteIcon from 'phosphor-svelte/lib/HeartIcon';
 import ForwardIcon from 'phosphor-svelte/lib/ShareFatIcon';
+import GavelIcon from 'phosphor-svelte/lib/GavelIcon';
 import HistoryIcon from 'phosphor-svelte/lib/ClockCounterClockwiseIcon';
 import PinIcon from 'phosphor-svelte/lib/PushPinIcon';
 import ReportIcon from 'phosphor-svelte/lib/FlagIcon';
 import UnpinIcon from 'phosphor-svelte/lib/PushPinSlashIcon';
 import EditIcon from 'phosphor-svelte/lib/PencilSimpleIcon';
+import EyeSlashIcon from 'phosphor-svelte/lib/EyeSlashIcon';
+import EyeIcon from 'phosphor-svelte/lib/EyeIcon';
 import EmojiIcon from 'phosphor-svelte/lib/SmileyIcon';
 import MarkUnreadIcon from 'phosphor-svelte/lib/CircleDashedIcon';
 import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
 import LinkBreakIcon from 'phosphor-svelte/lib/LinkBreakIcon';
 import ReceiptIcon from 'phosphor-svelte/lib/EyeIcon';
 import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpLeftIcon';
+import ShareIcon from 'phosphor-svelte/lib/ShareNetworkIcon';
 import StealIcon from 'phosphor-svelte/lib/StickerIcon';
 import ThreadIcon from 'phosphor-svelte/lib/ChatCircleDotsIcon';
 import TrashIcon from 'phosphor-svelte/lib/TrashIcon';
@@ -39,7 +43,9 @@ export type MessageActions = {
   onCopyText?: () => void;
   copyTextLabel?: string;
   onCopyLink?: () => void;
+  onCopyMatrixLink?: () => void;
   onCopyHref?: () => void;
+  onShareHref?: () => void;
   onPin?: () => void;
   onBookmark?: () => void;
   onForward?: () => void;
@@ -52,7 +58,10 @@ export type MessageActions = {
   onDownloadEmotes?: () => void;
   stealCount?: number;
   onReport?: () => void;
+  onMeowlnirBan?: () => void;
   onViewSource?: () => void;
+  onViewRedacted?: () => void;
+  redactedRevealed?: boolean;
   pinned?: boolean;
   bookmarked?: boolean;
 };
@@ -60,7 +69,8 @@ export type MessageActions = {
 export type MessageMenuRow = {
   key: string;
   label: string;
-  icon: Component;
+  icon: Component<{ class?: string }>;
+  mirrored?: boolean;
   run: () => void;
   destructive?: boolean;
   separated?: boolean;
@@ -69,16 +79,14 @@ export type MessageMenuRow = {
 export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
   const rows: MessageMenuRow[] = [];
 
-  if (actions.onAddReaction) {
-    rows.push({
-      key: 'add-reaction',
-      label: 'timeline.addReaction',
-      icon: EmojiIcon,
-      run: actions.onAddReaction,
-    });
-  }
   if (actions.onReply) {
-    rows.push({ key: 'reply', label: 'timeline.reply', icon: ReplyIcon, run: actions.onReply });
+    rows.push({
+      key: 'reply',
+      label: 'timeline.reply',
+      icon: ReplyIcon,
+      mirrored: true,
+      run: actions.onReply,
+    });
   }
   if (actions.onOpenThread) {
     rows.push({
@@ -115,6 +123,22 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       run: actions.onCopyHref,
     });
   }
+  if (actions.onShareHref) {
+    rows.push({
+      key: 'share-href',
+      label: 'timeline.shareLink',
+      icon: ShareIcon,
+      run: actions.onShareHref,
+    });
+  }
+  if (actions.onCopyMatrixLink) {
+    rows.push({
+      key: 'matrix-link',
+      label: 'timeline.copyMatrixLink',
+      icon: LinkIcon,
+      run: actions.onCopyMatrixLink,
+    });
+  }
   if (actions.onCopyLink) {
     rows.push({
       key: 'link',
@@ -144,6 +168,7 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       key: 'forward',
       label: 'timeline.forwardMessage',
       icon: ForwardIcon,
+      mirrored: true,
       run: actions.onForward,
     });
   }
@@ -236,6 +261,14 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       run: actions.onViewSource,
     });
   }
+  if (actions.onViewRedacted) {
+    rows.push({
+      key: 'view-redacted',
+      label: actions.redactedRevealed ? 'timeline.hideRedacted' : 'timeline.viewRedacted',
+      icon: actions.redactedRevealed ? EyeSlashIcon : EyeIcon,
+      run: actions.onViewRedacted,
+    });
+  }
   if (actions.onReport) {
     rows.push({
       key: 'report',
@@ -243,6 +276,16 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       icon: ReportIcon,
       run: actions.onReport,
       separated: true,
+    });
+  }
+  if (actions.onMeowlnirBan) {
+    rows.push({
+      key: 'meowlnir-ban',
+      label: 'timeline.meowlnirBanSender',
+      icon: GavelIcon,
+      run: actions.onMeowlnirBan,
+      destructive: true,
+      separated: !actions.onReport,
     });
   }
   if (actions.onCancelSend) {

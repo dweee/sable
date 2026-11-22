@@ -64,11 +64,12 @@ test('an image reports the decoded dimensions', async () => {
       width: 1280,
       height: 720,
       duration_ms: null,
-      animated: false,
+      animated: null,
       blurhash: null,
       waveform: null,
       voice: false,
       audio_metadata: null,
+      gif: null,
     },
     thumbnail: null,
   });
@@ -93,18 +94,15 @@ test('a decodable image gets a blurhash', async () => {
   expect(result.info?.blurhash).not.toBeNull();
 });
 
-test('a GIF is animated, and a WebP is left undecided', async () => {
-  vi.stubGlobal(
-    'createImageBitmap',
-    vi.fn(() => Promise.resolve({ width: 8, height: 8, close: () => {} }))
-  );
+test('a file is measured once however many times it is asked for', async () => {
+  const decode = vi.fn(() => Promise.resolve({ width: 8, height: 8, close: () => {} }));
+  vi.stubGlobal('createImageBitmap', decode);
+  const image = file('image/png');
 
-  await expect(measureAttachment(file('image/gif'))).resolves.toMatchObject({
-    info: { animated: true },
-  });
-  await expect(measureAttachment(file('image/webp'))).resolves.toMatchObject({
-    info: { animated: null },
-  });
+  await measureAttachment(image);
+  await measureAttachment(image);
+
+  expect(decode).toHaveBeenCalledTimes(1);
 });
 
 test('an undecodable image measures nothing rather than throwing', async () => {
@@ -132,6 +130,7 @@ test('a video reports dimensions and a duration in milliseconds', async () => {
       waveform: null,
       voice: false,
       audio_metadata: null,
+      gif: null,
     },
     thumbnail: null,
   });
@@ -194,6 +193,7 @@ test('audio reports a duration and no dimensions', async () => {
       waveform: null,
       voice: false,
       audio_metadata: null,
+      gif: null,
     },
     thumbnail: null,
   });
@@ -226,6 +226,7 @@ test('a file marked as a voice recording carries its waveform', async () => {
       waveform: [0, 0.5, 1],
       voice: true,
       audio_metadata: null,
+      gif: null,
     },
     thumbnail: null,
   });

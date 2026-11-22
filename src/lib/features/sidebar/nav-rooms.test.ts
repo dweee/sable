@@ -2,21 +2,12 @@ import { expect, test, vi } from 'vitest';
 
 import type { RoomListItemView, RpcParams, Rpc } from '#src/generated/protocol';
 
+import { roomView } from '#lib/test-support/room-views.js';
+
 import { claimedRoomIds, isActiveSpace, markRoomUnread, markRoomsRead } from './nav-rooms.js';
 
 function room(overrides: Partial<RoomListItemView>): RoomListItemView {
-  return {
-    room_id: '!r',
-    is_direct: false,
-    direct_targets: [],
-    state: 'joined',
-    is_tombstoned: false,
-    space_children: [],
-    unread: 0,
-    highlight: 0,
-    latest_event: null,
-    ...overrides,
-  } as unknown as RoomListItemView;
+  return roomView({ room_id: '!r', ...overrides });
 }
 
 test('only joined spaces claim their children', () => {
@@ -80,6 +71,7 @@ test('marks only rooms that are actually unread', () => {
     [
       room({ room_id: '!unread', unread: 3, latest_event: { event_id: '$a' } as never }),
       room({ room_id: '!highlighted', highlight: 1, latest_event: { event_id: '$b' } as never }),
+      room({ room_id: '!notifying', notifying: 1, latest_event: { event_id: '$d' } as never }),
       room({ room_id: '!read', latest_event: { event_id: '$c' } as never }),
       room({ room_id: '!empty', unread: 2, latest_event: null }),
       null,
@@ -100,6 +92,15 @@ test('marks only rooms that are actually unread', () => {
     [
       {
         room_id: '!highlighted',
+        event_id: null,
+        thread_root: null,
+        subscription: null,
+        fully_read: true,
+      },
+    ],
+    [
+      {
+        room_id: '!notifying',
         event_id: null,
         thread_root: null,
         subscription: null,

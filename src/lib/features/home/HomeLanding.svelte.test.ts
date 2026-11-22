@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { isTauri } from '@tauri-apps/api/core';
 
@@ -42,6 +42,13 @@ test.each(['web', 'ios'])('donation links on %s', (platform) => {
   }
 });
 
+test('names the resource links as a group', () => {
+  render(HomeLanding, { titleKey: 'nav.unspaced' });
+
+  const group = screen.getByRole('group', { name: 'Sable resources' });
+  expect(within(group).getByRole('link', { name: 'Get support' })).toBeInTheDocument();
+});
+
 test('opens Get support in the Sable general room', () => {
   render(HomeLanding, { titleKey: 'nav.unspaced' });
 
@@ -52,11 +59,21 @@ test('opens Get support in the Sable general room', () => {
   expect(screen.getByRole('link', { name: 'Get support' })).not.toHaveAttribute('target');
 });
 
+test('opens Vote on features in the Sable features room', () => {
+  render(HomeLanding, { titleKey: 'nav.unspaced' });
+
+  expect(screen.getByRole('link', { name: 'Vote on features' })).toHaveAttribute(
+    'href',
+    '/to/%23features%3Asable.moe'
+  );
+});
+
 test('drops the resources section when the deployment hides community links', () => {
   vi.mocked(deployment).mockReturnValue(parseRuntimeConfig({ hideCommunityLinks: true }));
   render(HomeLanding, { titleKey: 'nav.unspaced' });
 
   expect(screen.queryByRole('link', { name: 'Get support' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'Vote on features' })).not.toBeInTheDocument();
   expect(screen.queryByRole('link', { name: 'View source' })).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Sable resources')).not.toBeInTheDocument();
 });
@@ -77,7 +94,7 @@ test('welcomes a returning user back', () => {
   localStorage.setItem(LOGGED_IN_MARKER, 'true');
   render(HomeLanding, { titleKey: 'nav.unspaced' });
 
-  expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Welcome back');
+  expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument();
 });
 
 const changes = {

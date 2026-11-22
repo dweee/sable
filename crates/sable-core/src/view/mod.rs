@@ -24,14 +24,19 @@ pub use item::{
     Highlights, LocalContent, aggregation_item, latest_edit_id, standalone_item, timeline_item,
 };
 pub use member::{member_event_view, member_view, room_permissions, room_power_levels};
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use room::room_avatar_url;
+pub(crate) use room::{
+    DIRECT_PARTNER_EVENT, apply_avatar_override, chosen_partner, direct_peer_name, is_one_to_one,
+};
 pub use room::{
     RoomInfo, enrich_room_batch, listless_room_list_item, predecessor, room_counts, room_list_item,
 };
-pub(crate) use room::{apply_avatar_override, direct_peer_name};
 pub use search::prime_display_names;
+pub(crate) use space::space_children;
 pub use space::{hierarchy_child_edges, listing_spaces, restricted_parents, space_hierarchy_room};
 
-pub(crate) use content::{CUTE_EVENT_MSGTYPE, geo_coordinates};
+pub(crate) use content::geo_coordinates;
 pub(crate) use diff::apply_diff;
 pub(crate) use forward::{FAMEDLY_FORWARDED, FORWARDED, SABLE_FORWARDED};
 pub(crate) use media::{
@@ -39,9 +44,9 @@ pub(crate) use media::{
     spoiler_reason, video_thumbnail,
 };
 pub(crate) use member::clamp_power_level;
-pub(crate) use profile::per_message_profile;
+pub(crate) use profile::{authored_body, per_message_profile};
 pub(crate) use raw::ObjectOnly;
-pub(crate) use room::enrich_rooms;
+pub(crate) use room::{enrich_rooms, latest_items};
 pub(crate) use search::search_hit_view;
 pub(crate) use state::{
     CALL_MEMBER_TYPE, CALL_SLOT_ID, CALL_TYPE, FORUM_ROOM_TYPE, FORUM_TITLE, RTC_SLOT_TYPE,

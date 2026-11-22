@@ -6,7 +6,10 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::Duration;
 
-use sable_core::notifications::{ColdPush, PushImage, PushMedia, PushSession, push_sender_name};
+use sable_core::notifications::badge::PushBadge;
+use sable_core::notifications::{
+    ColdPush, PushImage, PushMedia, PushSession, push_preview, push_sender_name,
+};
 use sable_core::protocol::{PushEventView, PushFetchView};
 use sable_core::session::AccountRegistry;
 use sable_core::store::{FileSessionStore, SessionStore};
@@ -19,10 +22,7 @@ const RENDER_TIMEOUT: Duration = Duration::from_secs(20);
 const OPTIONAL_TIMEOUT: Duration = Duration::from_secs(3);
 const FINISH_RESERVE: Duration = Duration::from_secs(1);
 
-async fn optional_work<T: Default>(
-    deadline: Instant,
-    operation: impl std::future::Future<Output = T>,
-) -> T {
+async fn optional_work<T: Default>(deadline: Instant, operation: impl Future<Output = T>) -> T {
     let now = Instant::now();
     if deadline <= now {
         return T::default();
@@ -199,6 +199,8 @@ struct DiscardOut {
     discard: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     read_rooms: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    badge: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -211,12 +213,16 @@ struct ReadOut {
 struct ReadPushOut {
     read: ReadOut,
     user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    badge: Option<u32>,
 }
 
 #[derive(Serialize)]
 struct ReadRoomsOut {
     read_rooms: Vec<String>,
     user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    badge: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -237,6 +243,7 @@ impl Rendered {
                 room_id: room_id.map(str::to_owned),
             },
             user_id,
+            badge: None,
         })
     }
 
@@ -244,6 +251,7 @@ impl Rendered {
         Self::Discard(DiscardOut {
             discard: true,
             read_rooms,
+            badge: None,
         })
     }
 }
@@ -357,7 +365,26 @@ struct PushTarget {
     sender_display_name: Option<String>,
     #[serde_as(deserialize_as = "DefaultOnError")]
     #[serde(default)]
+    sender_avatar_url: Option<String>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default)]
     counts: Option<Counts>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default)]
+    mention: Option<bool>,
+    /// Sygnal's `event_id_only` format moves `counts.unread` here.
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default)]
+    unread_count: Option<u64>,
+}
+
+impl PushTarget {
+    fn unread(&self) -> Option<u64> {
+        self.counts
+            .as_ref()
+            .and_then(|counts| counts.unread)
+            .or(self.unread_count)
+    }
 }
 
 #[serde_as]
@@ -372,17 +399,6 @@ struct Counts {
 struct PayloadUser {
     #[serde(default, deserialize_with = "present")]
     user_id: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct ClearEvent<'a> {
-    #[serde(borrow)]
-    content: ClearContent<'a>,
-}
-
-#[derive(Deserialize)]
-struct ClearContent<'a> {
-    body: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -432,9 +448,8 @@ fn message_text(settings: &Policy, event: Option<&Value>, encrypted: bool) -> St
         return ENCRYPTED_BODY.to_owned();
     }
     event
-        .and_then(|event| ClearEvent::deserialize(event).ok())
-        .map_or(fallback, |event| event.content.body)
-        .to_owned()
+        .and_then(|event| push_preview(event.get("content")?))
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 async fn signed_in(root: &Path, user: &str) -> Option<(String, String)> {
@@ -479,6 +494,7 @@ fn decrypted_event(push: ColdPush) -> Result<Option<Value>, DiscardOut> {
             Err(DiscardOut {
                 discard: true,
                 read_rooms: Vec::new(),
+                badge: None,
             })
         }
         ColdPush::Clear(clear) => Ok(serde_json::from_str(&clear).ok()),
@@ -643,11 +659,36 @@ struct Alert<'a> {
 }
 
 impl Alert<'_> {
-    async fn sender_name(&self, sender_id: Option<&str>) -> String {
+    async fn sender_name(&self, sender_id: Option<&str>, content: Option<&Value>) -> String {
         let display_name = self.target.sender_display_name.as_deref();
         match &self.session {
-            Some(session) => session.sender_name(sender_id, display_name).await,
-            None => push_sender_name(sender_id, display_name),
+            Some(session) => session.sender_name(sender_id, display_name, content).await,
+            None => push_sender_name(sender_id, display_name, content),
+        }
+    }
+
+    async fn media(
+        &self,
+        session: Option<&PushSession>,
+        sender_id: Option<&str>,
+        content: Option<&Value>,
+        invite: bool,
+    ) -> PushMedia {
+        match (sender_id, session) {
+            (Some(sender), Some(session)) if !invite => {
+                self.stage.set("media");
+                optional_work(
+                    self.optional_deadline,
+                    Box::pin(session.media(
+                        Some(sender),
+                        self.target.sender_display_name.as_deref(),
+                        self.target.sender_avatar_url.as_deref(),
+                        content,
+                    )),
+                )
+                .await
+            }
+            _ => PushMedia::default(),
         }
     }
 
@@ -704,7 +745,7 @@ impl Alert<'_> {
             .take()
             .filter(|sender| !sender.is_empty());
         self.stage.set("sender_name");
-        let sender = self.sender_name(sender_id.as_deref()).await;
+        let sender = self.sender_name(sender_id.as_deref(), None).await;
         if let Some(ring) = self.ring_payload(&sender) {
             return finish(Rendered::Ring(RingPushOut {
                 ring,
@@ -719,36 +760,30 @@ impl Alert<'_> {
         if !current.enabled {
             return Flow::Break((None, None));
         }
-        let message = self.message(&current, &sender, &room_name);
         let previews = current.content && (!self.encrypted || current.encrypted_content);
         let content = self
             .event
             .as_ref()
             .and_then(|event| event.get("content"))
             .filter(|_| previews);
+        let sender = match content {
+            Some(_) => self.sender_name(sender_id.as_deref(), content).await,
+            None => sender,
+        };
+        let invite = self.event.as_ref().is_some_and(is_invite);
         let session = self.session.take();
         let active_elsewhere = match &session {
-            Some(session) if !message.invite && current.quiet_when_active_elsewhere => {
+            Some(session) if !invite && current.quiet_when_active_elsewhere => {
                 self.stage.set("active_elsewhere");
                 optional_work(self.optional_deadline, Box::pin(session.active_elsewhere())).await
             }
             _ => false,
         };
-        let media = match (sender_id.as_deref(), &session) {
-            (Some(sender), Some(session)) if !message.invite => {
-                self.stage.set("media");
-                optional_work(
-                    self.optional_deadline,
-                    Box::pin(session.media(
-                        Some(sender),
-                        self.target.sender_display_name.as_deref(),
-                        content,
-                    )),
-                )
-                .await
-            }
-            _ => PushMedia::default(),
-        };
+        let media = self
+            .media(session.as_ref(), sender_id.as_deref(), content, invite)
+            .await;
+        let room_name = media.room_name.unwrap_or(room_name);
+        let message = self.message(&current, &sender, &room_name);
         let members = session.as_ref().and_then(PushSession::joined_members);
         drop(session);
         let Account {
@@ -774,13 +809,13 @@ impl Alert<'_> {
             text: message.text,
             sender,
             sender_id,
+            unread: self.target.unread(),
             event_id: self.target.event_id.filter(|event| !event.is_empty()),
             room_id: self.room_id.to_owned(),
             user_id: user,
             sounds: current.sounds,
             noisy,
-            highlight: highlighted(self.notification),
-            unread: self.target.counts.as_ref().and_then(|counts| counts.unread),
+            highlight: highlighted(self.notification) || self.target.mention == Some(true),
             invite: message.invite,
             active_elsewhere,
             group: !room_name.is_empty(),
@@ -800,9 +835,57 @@ async fn render(root: &Path, payload: &Value, stage: &Cell<&'static str>) -> Out
     if !settings.enabled {
         return (None, None);
     }
-    let (Flow::Break(outcome) | Flow::Continue(outcome)) =
+    let (Flow::Break(mut outcome) | Flow::Continue(mut outcome)) =
         render_enabled(root, payload, &settings, optional_deadline, stage).await;
+    if let Some(rendered) = &mut outcome.0
+        && let Flow::Continue((_, user)) = parse_target(payload, notification(payload))
+    {
+        settle_badge(root, &user, rendered);
+    }
     outcome
+}
+
+/// Clears the rooms a push says were read and counts an alert it shows, then reports the
+/// badge the app would show, when the app has left one for this account.
+fn settle_badge(root: &Path, user: &str, rendered: &mut Rendered) {
+    let Some(mut badge) = PushBadge::load(root, user) else {
+        return;
+    };
+    let read_rooms = match rendered {
+        Rendered::Read(_) => &[][..],
+        Rendered::ReadRooms(out) => &out.read_rooms[..],
+        Rendered::Discard(out) => &out.read_rooms[..],
+        Rendered::Ring(out) => &out.read_rooms[..],
+        Rendered::Content(out) => &out.read_rooms[..],
+    };
+    let read_rooms: Vec<&str> = read_rooms.iter().map(String::as_str).collect();
+    let mut changed = badge.clear(Some(&read_rooms));
+    match rendered {
+        Rendered::Read(out) => {
+            let read_room = out.read.room_id.as_deref();
+            changed |= badge.clear(read_room.as_ref().map(std::slice::from_ref));
+        }
+        Rendered::Content(out) if !out.invite => {
+            if let Some(event_id) = &out.event_id {
+                // A room the app has not listed yet goes by its size.
+                let direct = out.members.is_some_and(|members| members <= 2);
+                changed |= badge.count(&out.room_id, event_id, out.highlight, direct);
+            }
+        }
+        _ => {}
+    }
+    // A failed write leaves the badge where the app last put it.
+    if changed {
+        let _ = badge.write(root);
+    }
+    let total = Some(badge.total());
+    match rendered {
+        Rendered::Read(out) => out.badge = total,
+        Rendered::ReadRooms(out) => out.badge = total,
+        Rendered::Discard(out) => out.badge = total,
+        Rendered::Content(out) => out.unread = total.map(u64::from),
+        Rendered::Ring(_) => {}
+    }
 }
 
 async fn render_enabled(
@@ -819,7 +902,7 @@ async fn render_enabled(
     let Some((account_id, device_id)) = signed_in(root, &user).await else {
         return stop(Issue::NoAccount);
     };
-    let zero_unread = target.counts.as_ref().and_then(|counts| counts.unread) == Some(0);
+    let zero_unread = target.unread() == Some(0);
     if zero_unread && target.event_id.as_deref().is_none_or(str::is_empty) {
         return finish(Rendered::read(settings.clear_on_read, room_id, user));
     }
@@ -847,6 +930,7 @@ async fn render_enabled(
             finish(Rendered::ReadRooms(ReadRoomsOut {
                 read_rooms,
                 user_id: account.user,
+                badge: None,
             }))
         };
     };
@@ -974,8 +1058,7 @@ fn render_response(
     if let Some(issue) = issue {
         let response = response.get_or_insert_with(|| serde_json::json!({}));
         let object = response.as_object_mut()?;
-        let mut diagnostic =
-            serde_json::Map::from_iter([("issue".to_owned(), issue.as_str().into())]);
+        let mut diagnostic = Map::from_iter([("issue".to_owned(), issue.as_str().into())]);
         diagnostic.insert("reporting".to_owned(), reporting.into());
         if let Issue::Timeout(stage) = issue {
             diagnostic.insert("stage".to_owned(), stage.into());
@@ -1292,7 +1375,7 @@ mod tests {
         assert_eq!(
             ring(
                 &event("m.rtc.notification", "ring"),
-                &push_sender_name(Some("@bob:example.org"), Some("\u{200b}\u{2800}"))
+                &push_sender_name(Some("@bob:example.org"), Some("\u{200b}\u{2800}"), None)
             ),
             Some(json!({ "caller_name": "@bob:example.org", "expires_at": 32.0 }))
         );
@@ -1326,10 +1409,12 @@ mod tests {
             content: json!({"notification_type":"ring","sender_ts":1_000}),
             sender: "@bob:example.org".to_owned(),
             sender_display_name: Some("Bob".to_owned()),
+            sender_avatar_url: None,
             room_name: "Lounge".to_owned(),
             room_avatar_url: None,
             encrypted: true,
             noisy: false,
+            mention: false,
         };
 
         let completed = complete(&push, &event).unwrap();
@@ -1378,6 +1463,15 @@ mod tests {
                 .and_then(|value| value.get("body").cloned())
         };
         assert_eq!(body(&payload).await, Some(json!("private")));
+        let profiled = json!({"user_id":"@alice:example.org","notification":{
+            "room_id":"!room:example.org","type":"m.room.message","sender":"@bob:example.org",
+            "content":{"body":"Cat: hi","com.beeper.per_message_profile":{
+                "id":"cat","displayname":"Cat","has_fallback":true}}
+        }});
+        let shown = rendered(&root, &profiled).await.unwrap();
+        assert_eq!(shown["sender"], "Cat");
+        assert_eq!(shown["text"], "hi");
+        assert_eq!(shown["body"], "Cat: hi");
         let unfetchable =
             json!({"user_id":"@alice:example.org","room_id":"!room:example.org","event_id":"$e"});
         assert_eq!(body(&unfetchable).await, Some(json!("New message")));
@@ -1473,7 +1567,7 @@ mod tests {
     }
 
     fn shape_push(notification: Value) -> Value {
-        Value::Object(serde_json::Map::from_iter([
+        Value::Object(Map::from_iter([
             ("user_id".to_owned(), "@alice:example.org".into()),
             ("notification".to_owned(), notification),
         ]))
@@ -1529,6 +1623,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_badge_counts_on_from_what_the_app_left() {
+        let root = shape_root("badge").await;
+        let entry = |count, every| sable_core::notifications::badge::PushBadgeRoom { count, every };
+        PushBadge {
+            user_id: "@alice:example.org".to_owned(),
+            rooms: [
+                ("!room:example.org".to_owned(), entry(1, true)),
+                ("!quiet:example.org".to_owned(), entry(2, false)),
+            ]
+            .into(),
+            direct_every: true,
+            group_every: false,
+            counted: std::collections::VecDeque::new(),
+        }
+        .write(&root)
+        .unwrap();
+        let message = shape_push(json!({
+            "room_id":"!room:example.org","type":"m.room.message","event_id":"$e",
+            "sender":"@bob:example.org","content":{"body":"hi"},"counts":{"unread":40}
+        }));
+
+        assert_eq!(rendered(&root, &message).await.unwrap()["unread"], 4);
+        assert_eq!(rendered(&root, &message).await.unwrap()["unread"], 4);
+        let quiet = shape_push(json!({
+            "room_id":"!quiet:example.org","type":"m.room.message","event_id":"$q",
+            "sender":"@bob:example.org","content":{"body":"hi"}
+        }));
+        assert_eq!(rendered(&root, &quiet).await.unwrap()["unread"], 4);
+        let read = rendered(
+            &root,
+            &shape_push(json!({"room_id":"!room:example.org","counts":{"unread":0}})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["badge"], 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn read_pushes_follow_the_android_alerts() {
         let root = shape_root("reads").await;
         let policy = |clear_on_read: bool| json!({"enabled":true,"content":true,"encrypted_content":false,"sounds":true,"clear_on_read":clear_on_read});
@@ -1567,6 +1700,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(account_read["read"], json!({"clear":true,"room_id":null}));
+        let sygnal_read = rendered(
+            &root,
+            &json!({"user_id":"@alice:example.org","room_id":"!room:example.org","unread_count":0}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sygnal_read["read"]["clear"], true);
+        let sygnal_message = rendered(
+            &root,
+            &shape_push(json!({
+                "room_id":"!room:example.org","type":"m.room.message","event_id":"$e",
+                "unread_count":3,"content":{"body":"hi"}
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sygnal_message["unread"], 3);
         std::fs::write(
             root.join("push-policy.json"),
             r#"{"enabled":true,"content":true,"encrypted_content":false,"sounds":true}"#,
@@ -1738,14 +1888,16 @@ mod tests {
         assert_eq!(
             wire(&DiscardOut {
                 discard: true,
-                read_rooms: rooms.clone()
+                read_rooms: rooms.clone(),
+                badge: None,
             }),
             json!({"discard": true, "read_rooms": ["!a:example.org"]}).to_string()
         );
         assert_eq!(
             wire(&ReadRoomsOut {
                 read_rooms: rooms.clone(),
-                user_id: "@alice:example.org".to_owned()
+                user_id: "@alice:example.org".to_owned(),
+                badge: None,
             }),
             json!({"read_rooms": ["!a:example.org"], "user_id": "@alice:example.org"}).to_string()
         );

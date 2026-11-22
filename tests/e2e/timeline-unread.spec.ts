@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 const room = '!room:example.test';
-const notified = `/to/${encodeURIComponent(room)}?notified=${encodeURIComponent('$general-15:example.test')}`;
+const notified = `/to/${encodeURIComponent(room)}?notified=${encodeURIComponent('$general-12:example.test')}`;
 
 test('the reveal starts at unread on room entry', async ({
   app,
@@ -36,7 +36,7 @@ test('the reveal from notifications preserves unread until jumping', async ({
   const jump = page.getByRole('button', { name: 'Jump to unread' });
   await expect(jump).toBeVisible();
   await expect(jump).toContainText('15 new messages');
-  await expect(timeline.message('General message 15')).toBeInViewport();
+  await expect(timeline.message('General message 12')).toBeInViewport();
   await expect(timeline.message('General message 5')).not.toBeInViewport();
   // Wait past the receipt coalescing window so an accidental read cannot pass.
   await quietFor(page, RECEIPT_COALESCE_MS);
@@ -76,7 +76,7 @@ test('the reveal offers mark as read', async ({ page, timeline, core, installRoo
   await timeline.expectRevealed();
   await page.locator('.unread-bar').getByRole('button', { name: 'Mark as read' }).click();
   await expect(page.locator('.unread-bar')).toHaveCount(0);
-  await expect(timeline.message('General message 15')).toBeInViewport();
+  await expect(timeline.message('General message 12')).toBeInViewport();
   await expect.poll(() => core.commands()).toContain('timeline.mark_read');
 });
 
@@ -174,10 +174,12 @@ test('the reveal keeps the unread context while the reader is above the bottom',
   await timeline.expectRevealed();
   await expect(timeline.message('General message 5')).toBeInViewport();
   const subscriptions = await core.subscribeCount();
+  // Stops a screen above the loaded end each time: reaching it would hand over to live.
   for (const body of ['General message 40', 'General message 60']) {
     await expect
       .poll(async () => {
-        await timeline.wheelDown(400);
+        const height = await timeline.viewport.evaluate((node) => node.clientHeight);
+        await timeline.scrollAboveBottomAndNotify(height);
         return timeline.message(body).count();
       })
       .toBeGreaterThan(0);

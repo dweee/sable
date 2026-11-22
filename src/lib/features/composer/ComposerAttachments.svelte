@@ -6,6 +6,7 @@
   import SubtitlesSlashIcon from 'phosphor-svelte/lib/SubtitlesSlashIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
   import { cubicOut } from 'svelte/easing';
+  import { SvelteMap } from 'svelte/reactivity';
   import { scale, slide } from 'svelte/transition';
 
   import { i18n } from '#lib/i18n.js';
@@ -17,10 +18,12 @@
   import Button from '#lib/ui/primitives/Button.svelte';
 
   import { previewKind, type StagedFile } from '#lib/composer/composer-files.js';
+  import { clipPlaysAsGif } from '#lib/composer/gif-outcome.js';
   import StagedImageOptions from './StagedImageOptions.svelte';
   import { canStrip } from './strip-metadata';
   import StagedMediaViewer from './StagedMediaViewer.svelte';
   import StagedThumbnail from './StagedThumbnail.svelte';
+  import StagedVideoOptions from './StagedVideoOptions.svelte';
 
   interface Props {
     files: readonly StagedFile[];
@@ -28,11 +31,38 @@
     onRemove: (id: number) => void;
     onToggleSpoiler: (id: number) => void;
     onSetMetadata: (id: number, metadata: ImageMetadata) => void;
+    onSetGif: (id: number, gif: boolean | undefined) => void;
+    onReplace: (id: number, file: File) => void;
   }
 
-  let { files, disabled = false, onRemove, onToggleSpoiler, onSetMetadata }: Props = $props();
+  let {
+    files,
+    disabled = false,
+    onRemove,
+    onToggleSpoiler,
+    onSetMetadata,
+    onSetGif,
+    onReplace,
+  }: Props = $props();
 
   let viewing = $state<number | null>(null);
+  const gifOutcomes = new SvelteMap<File, boolean>();
+  const checked = new WeakSet<File>();
+
+  $effect(() => {
+    for (const { file } of files) {
+      if (previewKind(file) !== 'video' || checked.has(file)) continue;
+      checked.add(file);
+      clipPlaysAsGif(file).then(
+        (gif) => {
+          gifOutcomes.set(file, gif);
+        },
+        (error: unknown) => {
+          console.debug('[sable composer] the clip could not be checked for GIF playback', error);
+        }
+      );
+    }
+  });
   let media = $derived(files.filter((item) => previewKind(item.file) !== null));
 </script>
 
@@ -40,6 +70,7 @@
   <ul class="staged" aria-label={i18n.t('composer.stagedFiles')}>
     {#each files as item (item.id)}
       {@const kind = previewKind(item.file)}
+      {@const auto = gifOutcomes.get(item.file)}
       <li
         class={['staged-item', kind ? 'staged-media' : 'staged-file']}
         in:scale={{ start: 0.9, duration: motionMs(MOTION_MS.quick), easing: cubicOut }}
@@ -49,11 +80,12 @@
             file={item.file}
             {kind}
             spoiler={item.spoiler}
+            gif={(item.gif ?? auto) === true}
             onOpen={() => {
               viewing = item.id;
             }}
           />
-          <span class="staged-name">{item.file.name}</span>
+          <span class="staged-name screen-reader-only">{item.file.name}</span>
           <IconButton
             variant="ghost"
             size="small"
@@ -85,6 +117,21 @@
                 </IconButton>
               {/snippet}
             </StagedImageOptions>
+          {:else if kind === 'video'}
+            <StagedVideoOptions {item} {auto} {onSetGif}>
+              {#snippet trigger({ props })}
+                <IconButton
+                  {...props}
+                  variant="ghost"
+                  size="small"
+                  class="staged-control staged-options"
+                  {disabled}
+                  label={i18n.t('composer.playbackOptions', { name: item.file.name })}
+                >
+                  <SlidersHorizontalIcon />
+                </IconButton>
+              {/snippet}
+            </StagedVideoOptions>
           {/if}
         {:else}
           <span class="staged-icon" aria-hidden="true"><FileIcon /></span>
@@ -99,6 +146,9 @@
           class="staged-control staged-remove"
           {disabled}
           label={i18n.t('composer.removeAttachment', { name: item.file.name })}
+          onmousedown={(event: MouseEvent) => {
+            event.preventDefault();
+          }}
           onclick={() => {
             onRemove(item.id);
           }}
@@ -139,6 +189,9 @@
     {onRemove}
     {onToggleSpoiler}
     {onSetMetadata}
+    {onSetGif}
+    {onReplace}
+    autoGif={(file) => gifOutcomes.get(file)}
   />
 {/if}
 
@@ -188,15 +241,6 @@
   .staged-media {
     overflow: hidden;
     width: 5.5rem;
-  }
-
-  .staged-media .staged-name {
-    clip-path: inset(50%);
-    height: 1px;
-    overflow: hidden;
-    position: absolute;
-    white-space: nowrap;
-    width: 1px;
   }
 
   .staged-file {
@@ -265,8 +309,8 @@
   }
 
   .staged-item :global(.staged-options) {
-    inset-block-start: var(--radius-padding);
-    inset-inline-start: var(--radius-padding);
+    inset-block-end: var(--radius-padding);
+    inset-inline-end: var(--radius-padding);
   }
 
   .staged-media :global(.staged-control) {

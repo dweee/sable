@@ -17,6 +17,7 @@ use crate::{Core, ResultExt};
 domain! {
     set_read_receipts,
     user_profile,
+    user_profile_source,
     user_relations,
     well_known,
     data_types,
@@ -35,6 +36,8 @@ domain! {
     unignore_user,
     report_user,
     deactivate_account,
+    change_password,
+    password_change_enabled,
     set_presence,
     set_device_activity,
     fetch_presence,
@@ -71,6 +74,34 @@ impl Handler for DeactivateAccountParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<Option<String>, RpcError> {
         core.deactivate_account(self.password).await
+    }
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct ChangePasswordParams {
+    pub current_password: String,
+    pub new_password: String,
+    pub logout_devices: bool,
+}
+
+impl Handler for ChangePasswordParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.change_password(self).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PasswordChangeEnabledParams {}
+
+impl Handler for PasswordChangeEnabledParams {
+    type Ok = bool;
+
+    async fn run(self, core: &Arc<Core>) -> Result<bool, RpcError> {
+        core.password_change_enabled().await
     }
 }
 
@@ -125,6 +156,32 @@ impl Handler for UserProfileParams {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct UserProfileSourceParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub user_id: OwnedUserId,
+}
+
+impl Handler for UserProfileSourceParams {
+    type Ok = String;
+
+    async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
+        let response = core
+            .client()
+            .await?
+            .account()
+            .fetch_user_profile_of(&self.user_id)
+            .await
+            .map_err(|error| core.profile_error(&error))?;
+        let fields = response
+            .iter()
+            .map(|(field, value)| (field.as_str().to_owned(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::to_string_pretty(&fields).or_failed(core, "user_profile_source")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct UserRelationsParams {
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub user_id: OwnedUserId,
@@ -169,7 +226,7 @@ async fn fetch_mutual_rooms(
         let response = match client.send(request).await {
             Ok(response) => response,
             Err(matrix_sdk::HttpError::IntoHttp(
-                matrix_sdk::ruma::api::error::IntoHttpError::NoUnstablePath,
+                ruma::api::error::IntoHttpError::NoUnstablePath,
             )) => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
@@ -252,6 +309,7 @@ impl Handler for SetDataParams {
         if matches!(self.event_type.as_str(), "m.push_rules" | "m.fully_read") {
             return Err(RpcCode::Unsupported.into());
         }
+        let _guard = core.account_data_lock.lock().await;
         core.set_account_data(&self.event_type, &self.content).await
     }
 }
@@ -309,7 +367,7 @@ impl Handler for SetDisplayNameParams {
             .unstable_features()
             .await
             .or_failed(core, "set_display_name")?
-            .contains(&matrix_sdk::ruma::api::FeatureFlag::from(
+            .contains(&ruma::api::FeatureFlag::from(
                 "computer.gingershaped.msc4466",
             ))
         {
@@ -362,7 +420,7 @@ impl Handler for SetAvatarUrlParams {
             .unstable_features()
             .await
             .or_failed(core, "set_avatar_url")?
-            .contains(&matrix_sdk::ruma::api::FeatureFlag::from(
+            .contains(&ruma::api::FeatureFlag::from(
                 "computer.gingershaped.msc4466",
             ))
         {
@@ -532,15 +590,11 @@ async fn edit_ignored_users(
     if ignore && core.client().await?.user_id() == Some(user_id) {
         return Err(core.failed(label, "a user cannot ignore themselves"));
     }
-    let current = core
-        .global_account_data(IGNORED_USER_LIST.into(), label)
-        .await?
-        .and_then(|raw| raw.deserialize_as::<serde_json::Value>().ok());
-    let Some(content) = with_ignored_user(current, user_id.as_str(), ignore) else {
-        return Ok(());
-    };
-    core.put_global_account_data(IGNORED_USER_LIST.into(), &content, label)
-        .await
+    core.update_account_data(&[IGNORED_USER_LIST], label, async |current| {
+        Ok(with_ignored_user(current, user_id.as_str(), ignore))
+    })
+    .await?;
+    Ok(())
 }
 
 /// Read from the account data, since the SDK's observable only fills once a sync changes the list.
@@ -642,10 +696,8 @@ impl Handler for SetPresenceParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         core.set_desired_presence(self.presence);
 
-        let presence = core.sync_presence().await;
         let client = core.client().await?;
-        client
-            .set_presence(presence, self.status_message, true)
+        core.publish_presence(&client, self.status_message)
             .await
             .or_failed(core, "set_presence")?;
 

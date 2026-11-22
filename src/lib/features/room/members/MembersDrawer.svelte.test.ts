@@ -6,6 +6,7 @@ import { tick, type ComponentProps } from 'svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import type { MemberView } from '#src/generated/protocol';
 import { core } from '#lib/core/__mocks__/context.js';
+import { memberView } from '#lib/test-support/room-views.js';
 import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
 
 vi.mock('#lib/core/context.js');
@@ -73,18 +74,12 @@ function renderDrawer(props: Partial<ComponentProps<typeof MembersDrawer>> = {})
 }
 
 function member(name: string, level = 0): MemberView {
-  return {
+  return memberView({
     user_id: `@${name.toLowerCase().replaceAll(' ', '')}:example.org`,
     display_name: name,
     real_name: name,
-    avatar_url: null,
-    real_avatar_url: null,
     power_level: level,
-    membership: 'join',
-    member_ts: null,
-    kicked: false,
-    service: false,
-  };
+  });
 }
 
 async function renderPreview(props: Partial<ComponentProps<typeof MembersDrawer>> = {}) {
@@ -122,6 +117,28 @@ test('shows a room preview while members and roles reload', async () => {
   await rerender({ ...props, loading: false, members: [member('Renamed', 50)] });
   expect(memberNames()).toEqual(['Renamed']);
   expect(screen.getByText('1 member')).toBeInTheDocument();
+});
+
+test('desktop footer reports search results and filters separately from the room total', async () => {
+  const loadMembership = vi.fn(() =>
+    Promise.resolve([{ ...member('Bob'), membership: 'leave' as const }])
+  );
+  renderDrawer({ members: [member('Amy'), member('Bob')], loadMembership });
+  await tick();
+
+  const search = screen.getByRole('textbox', { name: 'Search members' });
+  await user.type(search, 'Amy');
+  expect(screen.getByText('2 members')).toBeInTheDocument();
+  expect(await screen.findByText('1 result')).toBeInTheDocument();
+
+  await user.clear(search);
+  expect(screen.queryByText('1 result')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: 'Filter members: Joined' }));
+  await user.click(screen.getByRole('menuitemradio', { name: /Left/ }));
+
+  expect(await screen.findByText('Left · 1')).toBeInTheDocument();
+  expect(screen.getByText('2 members')).toBeInTheDocument();
 });
 
 test('waits for full data when searching or filtering a preview', async () => {

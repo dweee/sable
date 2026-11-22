@@ -49,7 +49,7 @@ pub async fn restricted_parents(client: &Client, room: &Room) -> Vec<OwnedRoomId
 pub async fn listing_spaces(
     core: Option<&crate::Core>,
     client: &Client,
-    room_id: &matrix_sdk::ruma::RoomId,
+    room_id: &RoomId,
 ) -> Vec<OwnedRoomId> {
     let mut spaces = Vec::new();
     for space in client.joined_space_rooms() {
@@ -101,7 +101,7 @@ pub fn space_hierarchy_room(
 
 #[must_use]
 pub fn hierarchy_child_edges(
-    events: &[matrix_sdk::ruma::serde::Raw<HierarchySpaceChildEvent>],
+    events: &[ruma::serde::Raw<HierarchySpaceChildEvent>],
 ) -> Vec<SpaceChildEdge> {
     let mut events: Vec<_> = events
         .iter()
@@ -146,7 +146,7 @@ pub(super) fn kept_children(
     }
 }
 
-pub(super) async fn space_children(room: &Room) -> Result<Vec<SpaceChildEdge>, matrix_sdk::Error> {
+pub(crate) async fn space_children(room: &Room) -> Result<Vec<SpaceChildEdge>, matrix_sdk::Error> {
     let events = room
         .get_state_events_static::<SpaceChildEventContent>()
         .await?;

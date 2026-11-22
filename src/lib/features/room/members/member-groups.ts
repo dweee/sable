@@ -1,6 +1,7 @@
 import type { MembershipChangeView, TimelineItemView } from '#src/generated/protocol';
 
 import type { Translate } from '../timeline/state-event-text';
+import { isSentBeforeJoined } from '../timeline/timeline-format';
 
 export type MemberGroupCategory =
   | 'joined'
@@ -41,23 +42,41 @@ export function memberGroupCategory(item: TimelineItemView): MemberGroupCategory
   return null;
 }
 
+export type TimelineGroupKind = 'members' | 'before_join';
+
 export interface TimelineUnit {
   item: TimelineItemView;
   index: number;
   group: readonly TimelineItemView[] | null;
+  kind: TimelineGroupKind | null;
 }
 
-export function groupMemberEvents(items: readonly TimelineItemView[]): TimelineUnit[] {
+function foldsBeforeJoin(item: TimelineItemView): boolean {
+  return (
+    item.reactions.length === 0 &&
+    item.thread_summary === null &&
+    item.thread_root === null &&
+    isSentBeforeJoined(item)
+  );
+}
+
+function groupKind(item: TimelineItemView): TimelineGroupKind | null {
+  if (memberGroupCategory(item) !== null) return 'members';
+  return foldsBeforeJoin(item) ? 'before_join' : null;
+}
+
+export function groupTimelineRuns(items: readonly TimelineItemView[]): TimelineUnit[] {
   const units: TimelineUnit[] = [];
   let start = 0;
   while (start < items.length) {
+    const kind = groupKind(items[start]);
     let end = start;
-    while (end < items.length && memberGroupCategory(items[end]) !== null) end += 1;
-    if (end - start >= 2) {
-      units.push({ item: items[end - 1], index: end - 1, group: items.slice(start, end) });
+    if (kind !== null) while (end < items.length && groupKind(items[end]) === kind) end += 1;
+    if (kind !== null && end - start >= 2) {
+      units.push({ item: items[end - 1], index: end - 1, group: items.slice(start, end), kind });
       start = end;
     } else {
-      units.push({ item: items[start], index: start, group: null });
+      units.push({ item: items[start], index: start, group: null, kind: null });
       start += 1;
     }
   }
@@ -108,6 +127,7 @@ function groupUser(item: TimelineItemView): MemberGroupUser | null {
   if (content.kind === 'profile_change') {
     return {
       userId: content.user_id,
+      // eslint-disable-next-line no-restricted-properties -- the account name
       name: item.sender_name ?? content.user_id,
     };
   }
@@ -158,7 +178,10 @@ function segmentTokens(
   if (shown.length < users.length) {
     names.push([{ kind: 'others', count: users.length - shown.length, segment: index }]);
   }
-  const sentence = t(`timeline.memberGroup.${segment.category}`, { users: MARK });
+  const sentence = t(`timeline.memberGroup.${segment.category}`, {
+    users: MARK,
+    count: users.length,
+  });
   const at = sentence.indexOf(MARK);
   if (at === -1) return [{ kind: 'text', text: sentence }];
   return [

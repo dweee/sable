@@ -182,37 +182,40 @@ impl Core {
         bookmarked: bool,
         now_ms: u64,
     ) -> Result<bool, RpcError> {
-        let _guard = self.account_data_lock.lock().await;
         let id = bookmark_id(room_id.as_str(), event_id.as_str());
-        let index = self.bookmark_index().await?;
-        let revision = index.revision.unwrap_or(0);
-        let mut ids = unique_ids(index.bookmark_ids);
-        let held = ids.iter().any(|candidate| candidate == &id);
+        self.update_account_data(&[INDEX_EVENT], "bookmarks", async |current| {
+            let index = current
+                .map(IndexIn::deserialize)
+                .transpose()
+                .or_failed(self, "bookmarks")?
+                .unwrap_or_default();
+            let revision = index.revision.unwrap_or(0);
+            let mut ids = unique_ids(index.bookmark_ids);
+            let held = ids.iter().any(|candidate| candidate == &id);
 
-        if bookmarked == held {
-            return Ok(held);
-        }
+            if bookmarked == held {
+                return Ok(None);
+            }
 
-        if bookmarked {
-            self.write_bookmark_item(&id, room_id, event_id, now_ms)
-                .await?;
-            ids.push(id);
-        } else {
-            self.put_global_account_data(item_event(&id), &EmptyContent {}, "bookmarks")
-                .await?;
-            ids.retain(|candidate| candidate != &id);
-        }
+            if bookmarked {
+                self.write_bookmark_item(&id, room_id, event_id, now_ms)
+                    .await?;
+                ids.push(id.clone());
+            } else {
+                self.put_global_account_data(item_event(&id), &EmptyContent {}, "bookmarks")
+                    .await?;
+                ids.retain(|candidate| candidate != &id);
+            }
 
-        self.put_global_account_data(
-            GlobalAccountDataEventType::from(INDEX_EVENT),
-            &IndexOut {
+            serde_json::to_value(IndexOut {
                 version: 1,
                 revision: revision.saturating_add(1),
                 updated_ts: now_ms,
                 bookmark_ids: ids,
-            },
-            "bookmarks",
-        )
+            })
+            .map(Some)
+            .or_failed(self, "bookmarks")
+        })
         .await?;
 
         Ok(bookmarked)
@@ -325,7 +328,7 @@ mod tests {
         assert_eq!(index.bookmark_ids, ["a", "b"]);
         assert_eq!(index.revision, None);
         let index: IndexIn = serde_json::from_value(json!({ "bookmark_ids": "a" })).unwrap();
-        assert_eq!(index.bookmark_ids, [] as [String; 0]);
+        assert_eq!(index.bookmark_ids, Vec::<String>::new());
 
         let item: ItemIn = serde_json::from_value(
             json!({ "room_id": "!r:x", "event_id": 4, "event_ts": 2, "sender": null }),

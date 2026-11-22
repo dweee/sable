@@ -114,6 +114,8 @@ for (const reading of [false, true]) {
     }
     await timeline.waitForScrollSettled();
     const anchor = reading ? await timeline.fullyVisibleAnchor() : null;
+    const viewportTop = async () => (await timeline.viewport.boundingBox())?.y ?? 0;
+    const initialTop = await viewportTop();
     const size = page.viewportSize();
     if (!size) throw new Error('missing viewport size');
     const subscription = await core.subscription();
@@ -136,7 +138,9 @@ for (const reading of [false, true]) {
       expect(growth).toBeGreaterThan(0);
       await timeline.waitForScrollSettled();
       if (anchor) {
-        await timeline.expectAnchorHeld(anchor, { tolerance: 2 });
+        // A short touch viewport switches to the phone layout, which moves the timeline itself.
+        const shift = (await viewportTop()) - initialTop;
+        await timeline.expectAnchorHeld({ ...anchor, y: anchor.y + shift }, { tolerance: 2 });
         await expect(timeline.jumpToLatest).toBeVisible();
       } else {
         await expect.poll(() => timeline.distanceFromBottom()).toBeLessThanOrEqual(1);
@@ -1301,7 +1305,8 @@ test('a message the reader sends from the bottom is followed on every frame', as
     {
       id: 'sent-from-bottom-tall',
       body: Array.from(
-        { length: 8 },
+        // Taller than the viewport in every layout, so its top may sit above the fold.
+        { length: 14 },
         (_, index) => `Wrapped line ${index} ${'with text '.repeat(12)}`
       ).join('\n'),
       method: 'button',
@@ -1718,6 +1723,7 @@ test('a reply target can be jumped to again after scrolling away', async ({
           sender_name: 'Bob',
           body: 'Mobile history 4',
           fallback: null,
+          emotes: [],
         },
       },
     },
@@ -1743,4 +1749,107 @@ test('a reply target can be jumped to again after scrolling away', async ({
   await replyChip.click();
   await timeline.waitForScrollSettled();
   await expect(timeline.itemByEventId(target)).toBeInViewport();
+});
+
+test('a reply jump from a permalink context stays on its loaded target', async ({
+  page,
+  timeline,
+  core,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await page.goto(
+    `/rooms/${encodeURIComponent('!room:example.test')}?event=${encodeURIComponent('$general-2:example.test')}`
+  );
+  await timeline.expectRevealed({ timeout: 15_000 });
+  await expect(page.locator('.message.highlighted')).toContainText('General message 2');
+
+  const target = '$general-3:example.test';
+  await core.emitTimelineDiff(await core.subscription(), [
+    {
+      op: 'push_back',
+      value: {
+        ...timelineItem('context-answer', 'Answering from a context'),
+        in_reply_to: {
+          event_id: target,
+          sender: '@bob:example.test',
+          sender_mentioned: false,
+          sender_name: 'Bob',
+          body: 'General message 3',
+          fallback: null,
+          emotes: [],
+        },
+      },
+    },
+  ]);
+  await timeline.scrollToBottomAndNotify();
+  await timeline.waitForScrollSettled();
+
+  await timeline.container
+    .locator('.item')
+    .filter({ hasText: 'Answering from a context' })
+    .locator('.reply-preview')
+    .click();
+
+  await expect.poll(() => new URL(page.url()).searchParams.get('event')).toBe(target);
+  await timeline.waitForScrollSettled();
+  await expect(page.locator('.message.highlighted')).toContainText('General message 3');
+  await expect(timeline.itemByEventId(target)).toBeInViewport();
+  expect(await core.subscribeCount()).toBe(1);
+});
+
+test('returning to the latest message drops the jump target from the address', async ({
+  page,
+  app,
+  timeline,
+  core,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await app.openRoom('!room:example.test');
+  await timeline.expectAtLatest('General message 19');
+  const replyTo = (id: string, body: string, target: string) => ({
+    ...timelineItem(id, body),
+    in_reply_to: {
+      event_id: target,
+      sender: '@bob:example.test',
+      sender_mentioned: false,
+      sender_name: 'Bob',
+      body: 'Quoted',
+      fallback: null,
+      emotes: [],
+    },
+  });
+  const subscription = await core.subscription();
+  await core.emitTimelineDiff(subscription, [
+    {
+      op: 'push_back',
+      value: replyTo('near-answer', 'Answering near', '$general-19:example.test'),
+    },
+  ]);
+  await timeline.expectAtLatest('Answering near');
+  const chip = (body: string) =>
+    timeline.container.locator('.item').filter({ hasText: body }).locator('.reply-preview');
+  const target = () => new URL(page.url()).searchParams.get('event');
+
+  await chip('Answering near').click();
+  await expect.poll(target).toBe('$general-19:example.test');
+  await core.emitTimelineDiff(subscription, [
+    { op: 'push_back', value: replyTo('far-answer', 'Answering far', '$general-3:example.test') },
+  ]);
+  await timeline.expectAtLatest('Answering far');
+  expect(target()).toBe('$general-19:example.test');
+  await expect(page.locator('.message.highlighted')).toContainText('General message 19');
+
+  await chip('Answering far').click();
+  await expect.poll(target).toBe('$general-3:example.test');
+  await timeline.waitForScrollSettled();
+  await expect(timeline.itemByEventId('$general-3:example.test')).toBeInViewport();
+
+  await timeline.scrollToBottomAndNotify();
+  await expect.poll(target).toBeNull();
+  await expect(page.locator('.message.highlighted')).toHaveCount(0);
+  await timeline.expectAtLatest('Answering far');
 });

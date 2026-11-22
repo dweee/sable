@@ -10,7 +10,7 @@ publish.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-global-hotkey = "0.9.0"
+global-hotkey = "0.10.0"
 handy-keys = "0.3.4"
 sable-core = { path = "../sable-core", version = "0.1.0" }
 napi = { version = "3.14.2", default-features = false, features = ["napi4", "tokio_rt"] }
@@ -21,7 +21,11 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+ashpd = { version = "0.14.0", default-features = false, features = [
+  "tokio",
+  "global_shortcuts",
+  "flatpak",
+] }
 futures-util.workspace = true
 
 [target.'cfg(windows)'.dependencies]

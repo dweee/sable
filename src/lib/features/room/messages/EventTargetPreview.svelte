@@ -7,16 +7,14 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { UserProfile } from '#lib/profile/user-profile.svelte.js';
-  import { useRoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
 
   import { readEventSource } from './event-source-cache';
-  import { memberName, senderDisplayColors } from '../members/members.js';
+  import { memberName, useSenderColors } from '../members/members.js';
   import { eventPreview, reactionKey } from '#lib/model/model.js';
   import { fallbackText } from './reply-fallback';
   import { isCustomReaction, reactionText } from './reaction-emote-label.js';
   import { replyPreviewBody } from './reply-preview';
-  import { hasSenderRoles, useSenderRoles } from '../members/sender-roles';
   import SenderName from '../members/SenderName.svelte';
   import { stateEventText, type Translate } from '../timeline/state-event-text';
   import type { TimelineEventIndex } from '../timeline/timeline-event-index';
@@ -45,8 +43,7 @@
     body,
   }: Props = $props();
   const core = useCoreClient();
-  const roomCosmetics = useRoomCosmetics();
-  const senderRoles = hasSenderRoles() ? useSenderRoles() : null;
+  const senderColors = useSenderColors();
 
   interface Preview {
     sender: string | null;
@@ -56,24 +53,23 @@
   let fetched = $state<Preview | null>(null);
   let loaded = $derived(events?.get(eventId) ?? null);
   let preview = $derived(loaded ? previewOf(loaded, i18n.t) : fetched);
+  let persona = $derived(loaded?.per_message_profile ?? null);
   let name = $derived.by(() => {
     if (!preview?.sender) return i18n.t('timeline.unknownSender');
-    return (loaded?.sender_name ?? null) || memberName(members, preview.sender);
+    return (
+      persona?.display_name ||
+      // eslint-disable-next-line no-restricted-properties -- after the profile name
+      (loaded?.sender_name ?? null) ||
+      memberName(members, preview.sender)
+    );
   });
-
-  let persona = $derived(loaded?.per_message_profile ?? null);
-  let cosmetics = $derived(persona ? null : (roomCosmetics?.for(preview?.sender) ?? null));
   let sender = $derived(preview?.sender ?? null);
   const profile = new UserProfile(core, () => sender);
   let colors = $derived(
-    senderDisplayColors(
-      sender ?? '',
-      profile.current,
+    senderColors(sender, profile.current, {
       persona,
-      currentUserId !== null && sender === currentUserId,
-      cosmetics,
-      sender ? (senderRoles?.(sender)?.color ?? null) : null
-    )
+      isOwn: currentUserId !== null && sender === currentUserId,
+    })
   );
   let replyStyle = $derived(reply ? preferences.replyPreviewStyle : null);
 
@@ -125,10 +121,12 @@
     onJump?.(eventId);
   }}
 >
-  {#if replyStyle !== 'connected'}<Icon class="target-icon" />{/if}
+  {#if replyStyle !== 'connected'}<Icon
+      class={['target-icon', { 'mirror-rtl': Icon === ReplyIcon }]}
+    />{/if}
   <span class={['target-copy', { wrap: body !== undefined }]}>
     <SenderName displayName={name} {colors} nameClass="target-name" compact />
-    {#if body}{@render body()}{:else}<span>{preview?.body ?? ''}</span>{/if}
+    {#if body}{@render body()}{:else}<span class="target-body">{preview?.body ?? ''}</span>{/if}
   </span>
 </button>
 
@@ -203,17 +201,22 @@
   }
 
   .target-connected::before {
-    border-left: var(--target-connector-width) solid var(--surface-on-container);
-    border-radius: var(--radius) 0 0;
+    border-inline-start: var(--target-connector-width) solid var(--surface-on-container);
+    border-start-start-radius: var(--radius);
     border-top: var(--target-connector-width) solid var(--surface-on-container);
     content: '';
     height: calc(50% + var(--space-100));
-    left: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
+    inset-inline-start: calc(
+      -1 *
+        (var(--timeline-row-gap) + var(--avatar-size-small) / 2 + var(--target-connector-width) / 2)
+    );
     opacity: var(--opacity-placeholder);
     pointer-events: none;
     position: absolute;
     top: calc(50% - var(--border-width-300));
-    width: calc(var(--timeline-row-gap) / 2 + var(--avatar-size-small) / 2);
+    width: calc(
+      var(--timeline-row-gap) / 2 + var(--avatar-size-small) / 2 + var(--target-connector-width) / 2
+    );
   }
 
   .target-connected:not(:disabled):is(:hover, :focus-visible)::before {
@@ -235,7 +238,7 @@
     background: var(--primary-main);
     bottom: 0;
     content: '';
-    left: 0;
+    inset-inline-start: 0;
     pointer-events: none;
     position: absolute;
     top: 0;
@@ -250,5 +253,15 @@
 
   .target-expanded .target-copy > :not(.target-name) {
     filter: none;
+  }
+
+  .target-expanded .target-body {
+    -webkit-box-orient: vertical;
+    display: -webkit-box;
+    -webkit-line-clamp: 5;
+    line-clamp: 5;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
 </style>

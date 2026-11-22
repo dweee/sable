@@ -123,7 +123,10 @@
               {...props}
               class={['t-avatar', 'overflow', 'selection-open']}
               type="button"
-              aria-label={i18n.t('timeline.seenByNames', { names: overflowNames })}
+              aria-label={i18n.t('timeline.seenByOverflow', {
+                overflow: `+${overflow}`,
+                names: overflowNames,
+              })}
               aria-haspopup="dialog"
               aria-expanded={expanded}
               onmouseenter={() => setShifts(faces.length)}
@@ -195,11 +198,11 @@
   }
 
   .faces {
-    padding-left: var(--space-050);
+    padding-inline-start: var(--space-050);
   }
 
   .faces > :global(* + *) {
-    margin-left: calc(-1 * var(--space-150));
+    margin-inline-start: calc(-1 * var(--space-150));
   }
 
   :global(.read-receipt-stack .t-avatar) {

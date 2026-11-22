@@ -7,12 +7,14 @@ import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 
 import type {
+  LatestEventView,
   NotificationSettingsView,
   RoomListItemView,
   RoomSectionView,
   RoomUnreadView,
 } from '#src/generated/protocol';
 
+import { adoptQuietRooms, setUnreadDot } from '#lib/rooms/quiet-rooms.svelte.js';
 import { roomNotifications, roomUnread } from '#lib/rooms/unread.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
 import { bannerChanged } from '#lib/features/room/room-banner.svelte.js';
@@ -54,7 +56,7 @@ import { visit } from '#lib/test-support/app-state.js';
 vi.mock('#lib/core/context.js');
 
 import { core } from '#lib/core/__mocks__/context.js';
-import { withCounts } from '#lib/rooms/summary-fixtures.js';
+import { roomView } from '#lib/test-support/room-views.js';
 const notificationSettings =
   vi.fn<(params: { room_id: string }) => Promise<NotificationSettingsView>>();
 Object.assign(core.rpc.notifications, { settings: notificationSettings });
@@ -92,33 +94,10 @@ import RoomNavHarness from './RoomNavHarness.test.svelte';
 const realObserver = globalThis.IntersectionObserver;
 
 function makeRoom(overrides: Partial<RoomListItemView>): RoomListItemView {
-  return withCounts({
-    room_id: '!room:example.org',
-    canonical_alias: null,
-    name: null,
-    topic: null,
-    topic_html: null,
-    avatar_url: null,
-    is_direct: false,
-    direct_targets: [],
-    join_rule: 'invite',
-    tags: [],
-    state: 'joined',
-    encrypted: null,
-    is_tombstoned: false,
-    call_participants: [],
-    screen_sharers: [],
-    room_kind: 'text',
+  return roomView({
     supports_knock: true,
     supports_restricted: true,
     supports_knock_restricted: true,
-    space_children: [],
-    bridge: null,
-    unread: 0,
-    notifying: 0,
-    highlight: 0,
-    marked_unread: false,
-    latest_event: null,
     ...overrides,
   });
 }
@@ -181,7 +160,9 @@ afterEach(() => {
   setPreference('roomSort', 'recent');
   setPreference('directSort', 'recent');
   setPreference('showRoomIcon', 'always');
+  setPreference('voiceParticipantPlacement', 'both');
   setPreference('showDmTopics', true);
+  setPreference('messagePreviews', 'off');
   globalThis.IntersectionObserver = realObserver;
 });
 
@@ -247,6 +228,42 @@ test.each([
   });
 });
 
+test('a room that is not a direct chat can be made one from its menu', async () => {
+  roomsFixture.rooms = [makeRoom({ room_id: '!plain:example.org', name: 'Plain' })];
+  core.rpc.account.setDirect.mockReset().mockResolvedValue(null);
+  await mountNav();
+
+  await openMenu('Plain');
+  expect(screen.queryByRole('menuitem', { name: /room\.menuConvertToGroup/ })).toBeNull();
+  await user.click(await screen.findByRole('menuitem', { name: /room\.menuConvertToDirect/ }));
+
+  expect(core.rpc.account.setDirect).toHaveBeenCalledExactlyOnceWith({
+    room_id: '!plain:example.org',
+    direct: true,
+    user_id: null,
+  });
+});
+
+test('the space header menu invites to the space when the user may', async () => {
+  visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!root:example.org', name: 'Root', room_kind: 'space' }),
+  ];
+  listSections(sectionView('!root:example.org', {}));
+  core.rpc.members.permissions.mockResolvedValue({ can_invite: true } as RoomPermissionsView);
+  await mountNav();
+
+  await user.click(screen.getByRole('button', { name: 'nav.listOptions' }));
+  const invite = await screen.findByRole('menuitem', { name: /room\.menuInvite/ });
+  expect(core.rpc.members.permissions).toHaveBeenCalledWith({ room_id: '!root:example.org' });
+  await vi.waitFor(() => {
+    expect(invite).not.toHaveAttribute('data-disabled');
+  });
+  await user.click(invite);
+
+  expect(await screen.findByRole('dialog', { name: 'room.inviteTitle' })).toBeInTheDocument();
+});
+
 test('a subspace context menu opens its lobby', async () => {
   visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
   roomsFixture.rooms = [
@@ -292,6 +309,45 @@ test('a subspace context menu opens its lobby', async () => {
   await user.click(await screen.findByRole('menuitem', { name: /nav\.lobby/ }));
 
   expect(onNavigate).toHaveBeenCalledWith('/space/!nested%3Aexample.org/lobby');
+});
+
+test.each([
+  ['an unpinned subspace offers pinning', false, /nav\.pinToSidebar/],
+  ['a pinned subspace offers unpinning', true, /nav\.unpinFromSidebar/],
+])('%s from its context menu', async (_, pinned, item) => {
+  visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!root:example.org',
+      name: 'Root',
+      room_kind: 'space',
+      space_children: [
+        {
+          room_id: '!nested:example.org',
+          via: [],
+          order: null,
+          origin_server_ts: 1,
+          suggested: false,
+        },
+      ],
+    }),
+    makeRoom({ room_id: '!nested:example.org', name: 'Nested', room_kind: 'space' }),
+  ];
+  listSections(
+    sectionView('!root:example.org', {
+      subspaces: [treeCategory('!nested:example.org', 0, [])],
+    })
+  );
+  const onTogglePin = vi.fn();
+  await mountNav({
+    pinnedSpaceIds: new Set(pinned ? ['!nested:example.org'] : []),
+    onTogglePin,
+  });
+
+  await openMenu('Nested');
+  await user.click(await screen.findByRole('menuitem', { name: item }));
+
+  expect(onTogglePin).toHaveBeenCalledWith('!nested:example.org');
 });
 
 test('nests subspaces with thread lines and links past the depth limit to the lobby', async () => {
@@ -381,47 +437,6 @@ test('each page renders its section in the order the core lists it', async () =>
   visit('/direct');
   await mountNav();
   expect(roomNames()).toEqual(['D', 'C']);
-});
-
-test('rows past the first screens render their details once they come near the viewport', async () => {
-  const callbacks = new Map<Element, IntersectionObserverCallback>();
-  globalThis.IntersectionObserver = class {
-    #callback: IntersectionObserverCallback;
-    disconnect = () => {};
-    unobserve = () => {};
-    takeRecords = () => [];
-    root = null;
-    rootMargin = '';
-    thresholds = [];
-    constructor(callback: IntersectionObserverCallback) {
-      this.#callback = callback;
-    }
-    observe(node: Element) {
-      callbacks.set(node, this.#callback);
-    }
-  } as unknown as typeof IntersectionObserver;
-  const ids = Array.from({ length: 60 }, (_, at) => `!r${String(at)}:example.org`);
-  roomsFixture.rooms = ids.map((roomId, at) =>
-    makeRoom({ room_id: roomId, name: `Room ${String(at)}` })
-  );
-  listSections(sectionView('unspaced', { rooms: ids }));
-  visit('/rooms');
-  await mountNav();
-
-  const near = document.querySelector<HTMLElement>('[data-row-key="!r0:example.org"]');
-  const far = document.querySelector<HTMLElement>('[data-row-key="!r59:example.org"]');
-  if (!near || !far) throw new Error('the rows were not rendered');
-  expect(document.querySelectorAll('[data-row-key] .room-name')).toHaveLength(60);
-  expect(near.querySelector('.room-options-slot')).not.toBeNull();
-  expect(far.querySelector('.room-options-slot')).toBeNull();
-
-  callbacks.get(far)?.(
-    [{ isIntersecting: true, target: far }] as unknown as IntersectionObserverEntry[],
-    null as never
-  );
-  await tick();
-
-  expect(far.querySelector('.room-options-slot')).not.toBeNull();
 });
 
 test('favourites sit in their own section above the rest of the list', async () => {
@@ -588,7 +603,8 @@ test('direct page offers starting a chat and searching instead of creating or br
     Array.from(document.querySelectorAll('.room-nav-actions a')).map((node) =>
       node.getAttribute('href')
     )
-  ).toEqual(['/direct', '/search']);
+  ).toEqual(['/search']);
+  expect(screen.getByRole('button', { name: 'nav.newChat' })).toBeInTheDocument();
   expect(document.querySelector('.rooms-heading-label')?.textContent).toBe('nav.chats');
   expect(document.querySelector('.empty-rooms p')?.textContent).toBe('nav.chatsEmpty');
 });
@@ -609,6 +625,25 @@ test('a row shows the badge the core gives it and none otherwise', async () => {
   expect(row('Quiet').querySelector('.unread-badge-dot')).toBeInTheDocument();
   expect(row('Quiet').querySelector('.unread-badge-count')).not.toBeInTheDocument();
   expect(within(row('Pinged')).getByText('2')).toHaveClass('unread-badge-count');
+});
+
+test('a row marks an unread dot hidden by its own override only', async () => {
+  onTestFinished(() => {
+    adoptQuietRooms([]);
+  });
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!hidden:example.org', name: 'Hidden' }),
+    makeRoom({ room_id: '!shown:example.org', name: 'Shown' }),
+    makeRoom({ room_id: '!plain:example.org', name: 'Plain' }),
+  ];
+  setUnreadDot('!hidden:example.org', 'hide');
+  setUnreadDot('!shown:example.org', 'show');
+
+  await mountNav();
+
+  expect(within(row('Hidden')).getByRole('img', { name: 'room.unreadDotHidden' })).toBeVisible();
+  expect(within(row('Shown')).queryByRole('img', { name: 'room.unreadDotHidden' })).toBeNull();
+  expect(within(row('Plain')).queryByRole('img', { name: 'room.unreadDotHidden' })).toBeNull();
 });
 
 test('message search from a space is scoped to that space', async () => {
@@ -638,8 +673,8 @@ test('a space you cannot add rooms to does not show a create action', async () =
   visit('/space/!space:example.org', { spaceId: '!space:example.org' });
 
   await mountNav();
-  expect(screen.queryByRole('button', { name: 'nav.createRoomInSpace' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('link', { name: 'nav.joinWithAddress' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'nav.newMenu' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'nav.findOrJoin' })).not.toBeInTheDocument();
 
   core.rpc.members.permissions.mockResolvedValue({
     can_invite: false,
@@ -647,7 +682,7 @@ test('a space you cannot add rooms to does not show a create action', async () =
   } as RoomPermissionsView);
   cleanup();
   await mountNav();
-  expect(await screen.findByRole('button', { name: 'nav.createRoomInSpace' })).toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: 'nav.newMenu' })).toBeInTheDocument();
 });
 
 test('a space list header shows the space banner above it', async () => {
@@ -886,7 +921,7 @@ test('direct messages and unspaced rooms without an avatar show their initial', 
   expect(icon?.querySelector('svg')).toBeNull();
 });
 
-test('an active call in a text room shows the live count without the voice icon', async () => {
+test('an active call in a text room shows its participants and count in the room row', async () => {
   roomsFixture.rooms = [
     makeRoom({
       room_id: '!plain:example.org',
@@ -899,16 +934,18 @@ test('an active call in a text room shows the live count without the voice icon'
   expect(document.querySelector('.room-list .room-avatar-icon')?.classList.contains('voice')).toBe(
     false
   );
+  expect(row('Plain').querySelectorAll('.voice-face')).toHaveLength(1);
   expect(document.querySelector('.voice-live .status-badge')?.textContent).toBe('1');
 });
 
-test('a live voice room lists its call members', async () => {
+test('a live voice room shows each participant avatar once in the list beneath it', async () => {
+  setPreference('voiceParticipantPlacement', 'below');
   observeImmediately();
   core.userProfile.mockImplementation((userId: string) =>
     Promise.resolve({
       user_id: userId,
       display_name: userId === '@alice:example.org' ? 'Alice' : 'Bob',
-      avatar_url: null,
+      avatar_url: `blob:avatar-${userId}`,
     })
   );
   roomsFixture.rooms = [
@@ -925,9 +962,49 @@ test('a live voice room lists its call members', async () => {
     expect(document.querySelector('.call-participant-list')?.textContent).toContain('Alice');
   });
 
-  expect(document.querySelectorAll('.call-participant-list .avatar-root')).toHaveLength(2);
-  expect(core.userProfile).toHaveBeenCalledWith('@alice:example.org');
-  expect(core.userProfile).toHaveBeenCalledWith('@bob:example.org');
+  const list = screen.getByRole('list', { name: 'nav.voiceLive:2' });
+  for (const name of ['Alice', 'Bob']) {
+    const avatarUrl = `blob:avatar-@${name.toLowerCase()}:example.org`;
+    const avatar = within(list).getByRole('button', { name }).querySelector('img');
+    expect(avatar).toHaveAttribute('src', avatarUrl);
+    expect(document.querySelectorAll(`img[src="${avatarUrl}"]`)).toHaveLength(1);
+  }
+});
+
+test('switching the voice participant layout moves the avatars and keeps the full count', async () => {
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!voice:example.org',
+      name: 'Voice',
+      room_kind: 'voice',
+      call_participants: [
+        '@alice:example.org',
+        '@bob:example.org',
+        '@cam:example.org',
+        '@dee:example.org',
+      ],
+    }),
+  ];
+  await mountNav();
+
+  const defaultList = screen.getByRole('list', { name: 'nav.voiceLive:4' });
+  expect(within(defaultList).getAllByRole('button')).toHaveLength(4);
+  const defaultSummary = within(row('Voice')).getByRole('img', { name: 'nav.voiceLive:4' });
+  expect(defaultSummary.querySelectorAll('.voice-face')).toHaveLength(3);
+  expect(defaultSummary.querySelector('.status-badge')).toHaveTextContent('4');
+
+  setPreference('voiceParticipantPlacement', 'inline');
+  await tick();
+  expect(screen.queryByRole('list', { name: 'nav.voiceLive:4' })).toBeNull();
+  const summary = within(row('Voice')).getByRole('img', { name: 'nav.voiceLive:4' });
+  expect(summary.querySelectorAll('.voice-face')).toHaveLength(3);
+  expect(summary.querySelector('.status-badge')).toHaveTextContent('4');
+
+  setPreference('voiceParticipantPlacement', 'below');
+  await tick();
+  const list = screen.getByRole('list', { name: 'nav.voiceLive:4' });
+  expect(within(list).getAllByRole('button')).toHaveLength(4);
+  expect(row('Voice').querySelector('.voice-face')).toBeNull();
 });
 
 test('a participant sharing their screen is tagged live to people outside the call', async () => {
@@ -960,7 +1037,7 @@ test('a participant sharing their screen is tagged live to people outside the ca
   });
 });
 
-test('a collapsed live voice room keeps participant avatars labelled', async () => {
+test('a collapsed live voice room keeps participants visible in all layouts', async () => {
   observeImmediately();
   core.userProfile.mockResolvedValue({ display_name: 'Alice', avatar_url: null });
   roomsFixture.rooms = [
@@ -978,6 +1055,18 @@ test('a collapsed live voice room keeps participant avatars labelled', async () 
       document.querySelector('.call-participant-list .avatar-root')?.getAttribute('aria-label')
     ).toBe('Alice');
   });
+  expect(screen.getByRole('treeitem', { name: 'Voice' }).querySelector('.voice-face')).toBeNull();
+
+  setPreference('voiceParticipantPlacement', 'inline');
+  await tick();
+  expect(screen.queryByRole('list', { name: 'nav.voiceLive:1' })).toBeNull();
+  const roomLink = screen.getByRole('treeitem', { name: 'Voice, nav.voiceLive:1' });
+  expect(roomLink.querySelector('.voice-face')).toBeInTheDocument();
+
+  setPreference('voiceParticipantPlacement', 'below');
+  await tick();
+  expect(screen.getByRole('list', { name: 'nav.voiceLive:1' })).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: 'Voice' }).querySelector('.voice-face')).toBeNull();
 });
 
 test('a user in a voice room on two devices is listed once per device', async () => {
@@ -1122,6 +1211,147 @@ test('a DM topic is hidden in favour of the peer status when topics are turned o
   expect(roomTopics()).toEqual(['In a meeting']);
 });
 
+test.each([
+  ['off', []],
+  ['direct', ['See you at noon']],
+  ['rooms', ['Deploy is green']],
+  ['all', ['See you at noon', 'Deploy is green']],
+] as const)(
+  'message previews set to %s show the latest message under the name',
+  async (mode, expected) => {
+    visit('/home');
+    setPreference('showHome', true);
+    setPreference('messagePreviews', mode);
+    roomsFixture.rooms = [
+      makeRoom({
+        room_id: '!dm:example.org',
+        name: 'Bob',
+        is_direct: true,
+        direct_targets: ['@bob:example.org'],
+        latest_event: latest('See you at noon', 2),
+      }),
+      makeRoom({
+        room_id: '!ops:example.org',
+        name: 'Ops',
+        latest_event: latest('Deploy is green', 1),
+      }),
+    ];
+    await mountNav();
+    await tick();
+
+    expect(roomTopics()).toEqual(expected);
+  }
+);
+
+test('a message preview replaces the DM topic', async () => {
+  visit('/direct');
+  setPreference('messagePreviews', 'direct');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!dm:example.org',
+      name: 'Bob',
+      topic: 'Ship logs',
+      is_direct: true,
+      direct_targets: ['@bob:example.org'],
+      latest_event: latest('See you at noon', 1),
+    }),
+  ];
+  await mountNav();
+  await tick();
+
+  expect(roomTopics()).toEqual(['See you at noon']);
+});
+
+function latest(
+  body: string,
+  timestamp: number,
+  overrides: Partial<LatestEventView> = {}
+): LatestEventView {
+  return {
+    sender: '@bob:example.org',
+    own: false,
+    sender_label: null,
+    kind: 'text',
+    body,
+    timestamp,
+    sending: false,
+    event_id: `$${timestamp}`,
+    ...overrides,
+  };
+}
+
+test.each([
+  ['a one-to-one DM does not name the other party', true, { sender_label: null }, 'See you'],
+  ['a group names the sender', false, { sender_label: 'Bob' }, 'nav.previewSender:BobSee you'],
+  [
+    'own messages are prefixed in a DM',
+    true,
+    { own: true },
+    'nav.previewSender:nav.previewYouSee you',
+  ],
+  [
+    'own messages are prefixed in a group',
+    false,
+    { own: true },
+    'nav.previewSender:nav.previewYouSee you',
+  ],
+  ['an image shows its label', false, { kind: 'image', body: '' }, 'nav.previewImage'],
+  [
+    'a captioned image shows label and caption',
+    false,
+    { kind: 'image', body: 'Sunset', sender_label: 'Bob' },
+    'nav.previewSender:Bobnav.previewCaption:nav.previewImage,Sunset',
+  ],
+  ['a voice message is not an audio file', true, { kind: 'voice', body: '' }, 'nav.previewVoice'],
+  [
+    'an own sticker',
+    true,
+    { kind: 'sticker', body: '', own: true },
+    'nav.previewSender:nav.previewYounav.previewSticker',
+  ],
+  [
+    'a poll shows its question',
+    false,
+    { kind: 'poll', body: 'Lunch?' },
+    'nav.previewCaption:nav.previewPoll,Lunch?',
+  ],
+] as const)('%s', async (_name, direct, overrides, expected) => {
+  visit('/home');
+  setPreference('showHome', true);
+  setPreference('messagePreviews', 'all');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!r:example.org',
+      name: 'Room',
+      is_direct: direct,
+      direct_targets: direct ? ['@bob:example.org'] : [],
+      latest_event: latest('See you', 1, overrides),
+    }),
+  ];
+  await mountNav();
+  await tick();
+
+  expect(roomTopics()).toEqual([expected]);
+});
+
+test('the preview sender is set apart from the message', async () => {
+  visit('/home');
+  setPreference('showHome', true);
+  setPreference('messagePreviews', 'all');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!r:example.org',
+      name: 'Room',
+      latest_event: latest('See you', 1, { sender_label: 'Bob' }),
+    }),
+  ];
+  await mountNav();
+  await tick();
+
+  const sender = document.querySelector('.room-row .room-topic strong');
+  expect(sender?.textContent).toBe('nav.previewSender:Bob');
+});
+
 test('hovering a collapsed room row shows its full name in a tooltip', async () => {
   roomsFixture.rooms = [
     makeRoom({ room_id: '!long:example.org', name: 'A very long room name that truncates' }),
@@ -1139,6 +1369,28 @@ test('hovering a collapsed room row shows its full name in a tooltip', async () 
   expect(document.querySelector('.tooltip')?.textContent.trim()).toBe(
     'A very long room name that truncates'
   );
+  vi.useRealTimers();
+});
+
+test('hovering a room row with a published address shows the address in a tooltip', async () => {
+  visit('/rooms');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!lobby:example.org',
+      name: 'Lobby',
+      canonical_alias: '#lobby:example.org',
+    }),
+  ];
+  await mountNav();
+  await tick();
+
+  vi.useFakeTimers();
+  const hover = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
+  await hover.hover(row('Lobby'));
+  await vi.advanceTimersByTimeAsync(400);
+  await tick();
+
+  expect(document.querySelector('.tooltip')?.textContent.trim()).toBe('#lobby:example.org');
   vi.useRealTimers();
 });
 
@@ -1359,4 +1611,44 @@ test('bridge badges leave the room icons when the preference is off', async () =
   expect(screen.getByText('Friend')).toBeInTheDocument();
   expect(screen.queryByRole('img', { name: 'nav.bridgedFrom:Discord' })).toBeNull();
   setPreference('showBridgeBadges', true);
+});
+
+test('a space can hide bridge badges on its rooms for every member', async () => {
+  visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
+  core.rpc.room_state.event.mockImplementation(({ room_id, event_type }) =>
+    Promise.resolve(
+      room_id === '!root:example.org' && event_type === 'moe.sable.space.bridge_badges'
+        ? { hidden: true }
+        : null
+    )
+  );
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!root:example.org',
+      name: 'Root',
+      room_kind: 'space',
+      space_children: [
+        {
+          room_id: '!leaf:example.org',
+          via: [],
+          order: null,
+          origin_server_ts: 1,
+          suggested: false,
+        },
+      ],
+    }),
+    makeRoom({
+      room_id: '!leaf:example.org',
+      name: 'Leaf',
+      bridge: { network: 'Discord', avatar_url: null },
+    }),
+  ];
+  listSections(sectionView('!root:example.org', { rooms: ['!leaf:example.org'] }));
+  await mountNav();
+  await tick();
+
+  expect(screen.getByText('Leaf')).toBeInTheDocument();
+  expect(screen.queryByRole('img', { name: 'nav.bridgedFrom:Discord' })).toBeNull();
+  core.rpc.room_state.event.mockReset();
+  core.rpc.room_state.event.mockResolvedValue(null);
 });

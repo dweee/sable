@@ -4,7 +4,7 @@
 import type { Page } from '@playwright/test';
 
 import { expect, test, SIGNED_OUT } from './fixtures/test';
-import { timelineItem } from './fixtures/timeline-items';
+import { linkPreview, timelineItem } from './fixtures/timeline-items';
 import { quietFor, NEGATIVE_SETTLE_MS } from './fixtures/settle';
 
 test.use({ storageState: SIGNED_OUT, hasTouch: true });
@@ -128,21 +128,14 @@ for (const mobile of [false, true]) {
       ...message,
       content: { ...message.content, html },
       bundled_link_previews: [
-        {
-          video: null,
-          theme_color: null,
-          card: null,
-          author_name: null,
-          post: null,
-          url: 'https://example.org/landscape',
+        linkPreview('https://example.org/landscape', {
           title: 'Landscape',
-          description: null,
           site_name: 'Example',
           image: 'mxc://example.test/spoiler-preview-link',
           image_width: 800,
           image_height: 600,
           image_mime: 'image/png',
-        },
+        }),
       ],
     });
     for (const selector of ['.inline-image', '.link-preview-image']) {
@@ -227,6 +220,30 @@ test('a very tall picture keeps a usable width and a bounded height on mobile', 
   expect(box.width).toBeCloseTo(MEDIA_MIN_PX, 0);
   expect(box.height).toBeLessThanOrEqual(MEDIA_MAX_PX + 1);
   expect(box.sideways).toBe(0);
+});
+
+test('a very tall GIF is scaled to fit rather than cropped on mobile', async ({
+  page,
+  app,
+  timeline,
+  core,
+  installRoomCore,
+}) => {
+  await installRoomCore('delayed_media');
+  await page.setViewportSize(NARROW);
+  await app.openRooms();
+  await app.openRoomFromList('General');
+  await timeline.expectRevealed();
+  const gif = picture(200, 2000);
+  await core.setTimelineItemById(await core.subscription(), 'general-19', {
+    ...gif,
+    content: { ...gif.content, mime: 'image/gif' },
+  });
+  await expect(timeline.image.first()).toBeVisible();
+
+  const box = await mediaBox(page);
+  expect(box.width / box.height).toBeCloseTo(200 / 2000, 2);
+  expect(box.height).toBeLessThanOrEqual(MEDIA_MAX_PX + 1);
 });
 
 test('an ordinary portrait keeps its shape on mobile', async ({
@@ -655,13 +672,7 @@ test('square article previews use thumbnails while landscape previews stay large
     await core.setTimelineItemById(subscription, 'general-19', {
       ...timelineItem('general-19', 'https://example.test/article'),
       bundled_link_previews: [
-        {
-          video: null,
-          theme_color: null,
-          card: null,
-          author_name: null,
-          post: null,
-          url: 'https://example.test/article',
+        linkPreview('https://example.test/article', {
           title: 'Article title',
           description: 'Article description',
           site_name: 'Example',
@@ -669,7 +680,7 @@ test('square article previews use thumbnails while landscape previews stay large
           image_mime: 'image/png',
           image_width: width,
           image_height: height,
-        },
+        }),
       ],
     });
     const image = row.locator('.link-preview-image');

@@ -4,8 +4,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
-permissions: {}
-
 concurrency:
   group: require-changeset-${{ github.ref }}
   cancel-in-progress: true
@@ -16,8 +14,6 @@ jobs:
     if: ${{ github.head_ref != 'release' && !contains(github.event.pull_request.labels.*.name, 'internal') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
     steps:
       - name: Check out repository
         uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

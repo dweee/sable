@@ -36,6 +36,7 @@
   const { shield }: Props = $props();
 
   let detailsOpen = $state(false);
+  const label = $derived(i18n.t(`timeline.shield.title.${KEYS[shield.code]}`));
 </script>
 
 {const Icon = ICONS[shield.code]}
@@ -43,21 +44,18 @@
 <button
   type="button"
   class={['message-crypto-status', { critical: shield.critical }]}
+  aria-label={label}
   onclick={() => {
     detailsOpen = true;
   }}
 >
-  <Icon weight="fill" />
+  <Icon aria-hidden="true" weight="fill" />
 </button>
 
-<ResponsiveInfoDialog
-  bind:open={detailsOpen}
-  label={i18n.t(`timeline.shield.title.${KEYS[shield.code]}`)}
-  closeLabel={i18n.t('common.close')}
->
+<ResponsiveInfoDialog bind:open={detailsOpen} {label} closeLabel={i18n.t('common.close')}>
   {#snippet header()}
     <Icon />
-    <h2>{i18n.t(`timeline.shield.title.${KEYS[shield.code]}`)}</h2>
+    <h2>{label}</h2>
   {/snippet}
 
   {#snippet body()}
@@ -73,7 +71,7 @@
     cursor: pointer;
     font: inherit;
     line-height: 0;
-    margin-left: var(--space-200);
+    margin-inline-start: var(--space-200);
     padding: 0;
 
     :global(svg) {

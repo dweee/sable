@@ -1,3 +1,5 @@
+import { clamp } from '#lib/clamp.js';
+import { afterNextPaint } from '#lib/ui/after-paint.js';
 import {
   baseKeymap,
   chainCommands,
@@ -29,7 +31,7 @@ import 'prosemirror-gapcursor/style/gapcursor.css';
 
 import type { PackImageView } from '#src/generated/protocol';
 
-import { enterInsertsNewline } from '#lib/settings/enter-key.svelte.js';
+import { enterInsertsNewline, noteKeyboardInput } from '#lib/settings/enter-key.svelte.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 import { isNumpadEvent, matchesBinding, toProseMirrorKey } from '#lib/ui/shortcuts/binding.js';
 import { bindingFor } from '#lib/ui/shortcuts/bindings.svelte.js';
@@ -67,6 +69,14 @@ import { filesFromSources, pastedImageSources } from './pasted-images';
 import { mathInputRule } from './math';
 import { mfmTimeInputRule } from './mfm';
 import { traceComposerInput } from './input-trace';
+import {
+  applyOffers,
+  offerKey,
+  offersPlugin,
+  standingOffers,
+  type ComposerOffer,
+  type OfferRule,
+} from './offers';
 import { queryKey, queryPlugin } from './query-plugin';
 import { codeLanguage, composerSchema, parseMatrixHtml } from './schema';
 import {
@@ -427,6 +437,8 @@ function codeLanguageLabels(): Plugin {
   });
 }
 
+const offerAlways = (rule: OfferRule) => preferences[rule.mode] === 'always';
+
 function isTrailingParagraph(doc: ProseMirrorNode): boolean {
   const last = doc.lastChild;
   if (!last || doc.childCount < 2) return false;
@@ -480,7 +492,7 @@ function trailingParagraph(): Plugin {
   });
 }
 
-const URL_ONLY = /^(?:https?:\/\/|mailto:)\S+$/;
+const URL_ONLY = /^(?:https?:\/\/|mailto:|matrix:)\S+$/;
 
 const PILL_SPACE = 'pillSpace';
 
@@ -668,6 +680,8 @@ export interface ComposerEditorOptions {
   onSubmit: () => void;
   onChange: (change: ComposerChange) => void;
   onQuery: (query: AutocompleteQuery | null) => void;
+  offers?: readonly OfferRule[];
+  onOffer?: (offer: ComposerOffer | null) => void;
   onNavigate: (key: NavigationKey) => boolean;
   onFiles: (files: File[]) => void;
   onLinkRequest: () => void;
@@ -706,7 +720,7 @@ export class ComposerEditor {
   private iosEnter: { shift: boolean; handled: boolean } | null = null;
   private shiftHeld = false;
   private keyboardReset: HTMLTextAreaElement | undefined;
-  private keyboardResetFrame: number | undefined;
+  private cancelKeyboardReset: (() => void) | undefined;
 
   constructor(private options: ComposerEditorOptions) {}
 
@@ -796,6 +810,15 @@ export class ComposerEditor {
           ]),
       documentEdgeGuard(),
       queryPlugin(),
+      ...(this.options.offers
+        ? [
+            offersPlugin({
+              rules: this.options.offers,
+              enabled: offerAlways,
+              markdown: () => this.markdownMode(),
+            }),
+          ]
+        : []),
       inputRules({
         rules: [
           shortcodeInputRule(this.options.emotes),
@@ -892,6 +915,7 @@ export class ComposerEditor {
     view.updateState(this.createState(view.state.doc, view.state.selection));
     this.report(view.state, false);
     this.options.onQuery(queryKey.getState(view.state) ?? null);
+    this.options.onOffer?.(offerKey.getState(view.state) ?? null);
   }
 
   reconfigure(): void {
@@ -929,10 +953,8 @@ export class ComposerEditor {
             const end = inputView.state.doc.content.size;
             if (from < 0 || to < from || to > end) {
               if (text === '') return true;
-              const start = Math.max(0, Math.min(from, end));
-              inputView.dispatch(
-                inputView.state.tr.insertText(text, start, Math.max(start, Math.min(to, end)))
-              );
+              const start = clamp(from, 0, end);
+              inputView.dispatch(inputView.state.tr.insertText(text, start, clamp(to, start, end)));
               return true;
             }
             if (text !== ' ' || from !== to || from !== this.pillSpace) return false;
@@ -950,6 +972,7 @@ export class ComposerEditor {
               return false;
             },
             keydown: (_view, event) => {
+              noteKeyboardInput(event);
               if (event.key === 'Escape' && !event.isComposing) {
                 if (this.options.onNavigate('Escape')) event.preventDefault();
                 return true;
@@ -1044,6 +1067,7 @@ export class ComposerEditor {
             view.updateState(next);
             this.report(next, tr.docChanged);
             this.options.onQuery(queryKey.getState(next) ?? null);
+            this.options.onOffer?.(offerKey.getState(next) ?? null);
           },
         })
     );
@@ -1067,8 +1091,8 @@ export class ComposerEditor {
 
     return () => {
       stopTrace();
-      if (this.keyboardResetFrame !== undefined) cancelAnimationFrame(this.keyboardResetFrame);
-      this.keyboardResetFrame = undefined;
+      this.cancelKeyboardReset?.();
+      this.cancelKeyboardReset = undefined;
       this.keyboardReset?.remove();
       this.keyboardReset = undefined;
       view.destroy();
@@ -1159,16 +1183,14 @@ export class ComposerEditor {
 
   private resetKeyboard(view: EditorView, proxy: HTMLTextAreaElement): void {
     proxy.focus({ preventScroll: true });
-    if (this.keyboardResetFrame !== undefined) cancelAnimationFrame(this.keyboardResetFrame);
-    this.keyboardResetFrame = requestAnimationFrame(() => {
-      this.keyboardResetFrame = requestAnimationFrame(() => {
-        this.keyboardResetFrame = undefined;
-        if (this.view !== view || document.activeElement !== proxy) return;
-        const typed = proxy.value;
-        proxy.value = '';
-        view.focus();
-        if (typed) view.dispatch(view.state.tr.insertText(typed));
-      });
+    this.cancelKeyboardReset?.();
+    this.cancelKeyboardReset = afterNextPaint(() => {
+      this.cancelKeyboardReset = undefined;
+      if (this.view !== view || document.activeElement !== proxy) return;
+      const typed = proxy.value;
+      proxy.value = '';
+      view.focus();
+      if (typed) view.dispatch(view.state.tr.insertText(typed));
     });
   }
 
@@ -1294,6 +1316,21 @@ export class ComposerEditor {
     if (!view) return;
     const { from, to } = view.state.selection;
     this.replaceRange(from, to, node);
+  }
+
+  acceptOffer(offer: ComposerOffer): void {
+    const view = this.view;
+    if (!view) return;
+    view.dispatch(applyOffers(view.state, [offer], this.markdownMode()));
+    view.focus();
+  }
+
+  linkStandingOffers(): ProseMirrorNode | undefined {
+    const view = this.view;
+    if (!view) return this.doc();
+    const offers = standingOffers(view.state, this.options.offers ?? [], offerAlways);
+    if (offers.length > 0) view.dispatch(applyOffers(view.state, offers, this.markdownMode()));
+    return view.state.doc;
   }
 
   replaceQuery(query: AutocompleteQuery, node: ProseMirrorNode): void {

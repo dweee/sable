@@ -15,6 +15,7 @@ const { saveBytes } = vi.hoisted(() => ({
 vi.mock('#lib/platform/files.js', async () => ({
   ...(await vi.importActual<typeof import('#lib/platform/files.js')>('#lib/platform/files.js')),
   saveBytes,
+  sharesLinks: () => true,
 }));
 
 vi.mock('#lib/rooms/room-list.svelte.js', () => ({
@@ -298,7 +299,7 @@ test('opens message actions on right click', async () => {
   await tick();
 
   expect(menuLabels()).toContain('Reply');
-  expect(menuLabels()).toContain('Copy link to message');
+  expect(menuLabels()).toContain('Copy external link');
 });
 
 test('picking a quick reaction from the context menu closes it', async () => {
@@ -337,7 +338,7 @@ test('copies a message link when it is right-clicked', async () => {
   await tick();
 
   await openMenu(screen.getByRole('link', { name: 'Link' }));
-  await press(menuItem('Copy link'));
+  await press(menuItem('Copy URL'));
 
   expect(writeText).toHaveBeenCalledWith('https://example.org/');
 });

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { currentDirection } from '#lib/language.svelte.js';
   import { Combobox as BitsCombobox } from 'bits-ui';
   import { i18n } from '#lib/i18n.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
@@ -105,15 +106,19 @@
 
     <BitsCombobox.Trigger aria-label={i18n.t('combobox.showOptions')}>
       {#snippet child({ props })}
-        <button {...props} class="combobox-trigger selection-open">
-          <CaretDownIcon class="combobox-icon" />
+        <button {...props} tabindex="-1" class="combobox-trigger selection-open">
+          <CaretDownIcon class="combobox-icon" aria-hidden="true" />
         </button>
       {/snippet}
     </BitsCombobox.Trigger>
   </div>
 
   <BitsCombobox.Portal>
-    <BitsCombobox.Content sideOffset={4} collisionPadding={collisionPadding()}>
+    <BitsCombobox.Content
+      dir={currentDirection()}
+      sideOffset={4}
+      collisionPadding={collisionPadding()}
+    >
       {#snippet child({ wrapperProps, props, open })}
         {#if open && filteredItems.length > 0}
           <div {...wrapperProps} {...overlayLayer()} class="combobox-positioner">
@@ -153,10 +158,10 @@
     cursor: pointer;
     display: flex;
     height: 100%;
+    inset-inline-end: 0;
     justify-content: center;
     padding: 0;
     position: absolute;
-    right: 0;
     top: 0;
     width: 2.75rem;
   }

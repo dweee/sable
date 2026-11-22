@@ -105,9 +105,13 @@ test('inbox counts follow badge defaults, and a mute silences it at once', async
   };
   emit({
     diffs: [],
-    sections: sectionsUpdate([], { badges: [badgeView('!loud', { unread: 2, notifying: 2 })] }),
+    sections: sectionsUpdate([], {
+      badges: [badgeView('!loud', { unread: 2, notifying: 2 })],
+      app_badge: 2,
+    }),
   });
   expect(countNotifications(roomList.rooms, roomList.badgeUnreadFor)).toBe(2);
+  expect(roomList.appBadge).toBe(2);
   expect(
     notifications(roomList.rooms, 'all', roomList.badgeUnreadFor).map((room) => room.room_id)
   ).toEqual(['!loud']);
@@ -115,9 +119,10 @@ test('inbox counts follow badge defaults, and a mute silences it at once', async
   const muted = withCounts({ ...loud, notification: { room: 'mute', default: 'all' } });
   emit({
     diffs: [{ op: 'set', index: 0, value: muted }],
-    sections: sectionsUpdate([], { badges: [] }),
+    sections: sectionsUpdate([], { badges: [], app_badge: 0 }),
   });
   expect(countNotifications(roomList.rooms, roomList.badgeUnreadFor)).toBe(0);
+  expect(roomList.appBadge).toBe(0);
   roomList.stop();
 });
 
@@ -460,6 +465,7 @@ test('persists the live room list for the next launch', async () => {
   const roomList = new RoomList(core);
 
   await roomList.start();
+  vi.advanceTimersByTime(59_000);
   expect(stored.has('sable.room-list.v2.acct')).toBe(false);
   vi.advanceTimersByTime(1_000);
   expect(JSON.parse(stored.get('sable.room-list.v2.acct') ?? '{}')).toEqual({
@@ -467,13 +473,14 @@ test('persists the live room list for the next launch', async () => {
     sections: [],
     badges: [],
     quiet_rooms: [],
+    app_badge: 0,
   });
 
   roomList.stop();
   vi.useRealTimers();
 });
 
-test('defers room-list snapshot writes until presentation resumes', async () => {
+test('writes the room-list snapshot once when presentation ends, not on every change', async () => {
   vi.useFakeTimers();
   const stored = stubLocalStorage();
   const room = {
@@ -493,23 +500,27 @@ test('defers room-list snapshot writes until presentation resumes', async () => 
   } as unknown as CoreClient;
   const roomList = new RoomList(core);
 
-  roomList.setPresentationActive(false);
   await roomList.start();
   vi.advanceTimersByTime(1_000);
   expect(stored.has('sable.room-list.v2.acct')).toBe(false);
 
-  roomList.setPresentationActive(true);
+  roomList.setPresentationActive(false);
   expect(JSON.parse(stored.get('sable.room-list.v2.acct') ?? '{}')).toEqual({
     rooms: [room],
     sections: [],
     badges: [],
     quiet_rooms: [],
+    app_badge: 0,
   });
+
+  stored.delete('sable.room-list.v2.acct');
+  roomList.setPresentationActive(true);
+  vi.advanceTimersByTime(120_000);
+  expect(stored.has('sable.room-list.v2.acct')).toBe(false);
 
   roomList.stop();
   vi.useRealTimers();
 });
-
 test('looks rooms up by id and labels them by what the core shows', () => {
   const roomList = new RoomList({} as CoreClient);
   roomList.rooms = [

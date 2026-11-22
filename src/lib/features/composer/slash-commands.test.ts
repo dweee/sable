@@ -12,6 +12,7 @@ import type {
   PersonaView,
   RoomPreviewView,
   RpcParams,
+  InviteHistoryView,
   ShareHistoryView,
   Rpc,
 } from '#src/generated/protocol';
@@ -25,11 +26,12 @@ import {
 } from './slash-commands';
 
 import { testPersona } from '#lib/personas/persona.ts';
+import { memberView } from '#lib/test-support/room-views.js';
 
 function fakeCommands() {
   return {
     banUser: vi.fn(() => Promise.resolve()),
-    inviteUser: vi.fn(() => Promise.resolve()),
+    inviteUser: vi.fn(() => Promise.resolve<InviteHistoryView>('not_shared')),
     joinRoom: vi.fn(() => Promise.resolve('!joined:example.org')),
     kickUser: vi.fn(() => Promise.resolve()),
     knockRoom: vi.fn(() => Promise.resolve('!knocked:example.org')),
@@ -246,7 +248,7 @@ test('a mention pill stands in for the user id a command asks for', async () => 
 
   await runSlash('/headpat @Kris', {
     ...context(commands),
-    formatted: '/headpat <a href="https://matrix.to/#/@kris:example.org">@Kris</a>',
+    formatted: '/headpat <a href="matrix:u/kris:example.org">@Kris</a>',
   });
 
   expect(commands.sendGesture).toHaveBeenCalledWith({
@@ -371,7 +373,10 @@ test('/join takes an address and its routing servers', async () => {
   const commands = fakeCommands();
 
   await expect(
-    runSlash('/join https://matrix.to/#/%23room%3Aexample.org?via=other.org', context(commands))
+    runSlash(
+      '/join https://link.sable.moe/#/%23room%3Aexample.org?via=other.org',
+      context(commands)
+    )
   ).resolves.toEqual({ kind: 'done' });
   expect(commands.joinRoom).toHaveBeenCalledWith({
     address: '#room:example.org',
@@ -385,7 +390,10 @@ test('/join hands a knock room over to the ask to join page', async () => {
   commands.previewRoom.mockResolvedValue({ join_rule: 'knock' } as RoomPreviewView);
 
   await expect(
-    runSlash('/join https://matrix.to/#/%23room%3Aexample.org?via=other.org', context(commands))
+    runSlash(
+      '/join https://link.sable.moe/#/%23room%3Aexample.org?via=other.org',
+      context(commands)
+    )
   ).resolves.toEqual({ kind: 'knock', address: '#room:example.org', via: ['other.org'] });
 });
 
@@ -590,14 +598,41 @@ test('/sharehistory shares the room history with one user', async () => {
   });
 });
 
-test('/sharehistory says why nothing was shared', async () => {
+test('/invite says when the invite went out without its history', async () => {
+  const commands = fakeCommands();
+  commands.inviteUser.mockResolvedValue('failed');
+
+  await expect(runSlash('/invite @bob:example.org', context(commands))).resolves.toEqual({
+    kind: 'done',
+    notice: { key: 'room.inviteSentHistoryFailed', values: { user: '@bob:example.org' } },
+  });
+});
+
+test('/sharehistory confirms when the keys went out', async () => {
   const rpc = fakeRpc();
-  rpc.encryption.shareHistory.mockResolvedValue('no_cross_signing');
 
   await expect(
     runSlash('/sharehistory @bob:example.org', context(fakeCommands(), rpc))
-  ).rejects.toMatchObject({ key: 'composer.slashShareHistory.no_cross_signing' });
+  ).resolves.toEqual({
+    kind: 'done',
+    notice: { key: 'composer.slashShareHistory.shared', values: { user: '@bob:example.org' } },
+  });
 });
+
+test.each(['no_cross_signing', 'not_invited', 'no_verified_devices', 'nothing_to_share'] as const)(
+  '/sharehistory says why nothing was shared: %s',
+  async (outcome) => {
+    const rpc = fakeRpc();
+    rpc.encryption.shareHistory.mockResolvedValue(outcome);
+
+    await expect(
+      runSlash('/sharehistory @bob:example.org', context(fakeCommands(), rpc))
+    ).rejects.toMatchObject({
+      key: `composer.slashShareHistory.${outcome}`,
+      values: { user: '@bob:example.org' },
+    });
+  }
+);
 
 test('/acl hands the flags to the core', async () => {
   const rpc = fakeRpc();
@@ -857,18 +892,7 @@ test('/usepmp latches a profile and resets it', async () => {
 });
 
 function member(userId: string, membership: MemberView['membership'] = 'join'): MemberView {
-  return {
-    user_id: userId,
-    display_name: null,
-    real_name: null,
-    real_avatar_url: null,
-    avatar_url: null,
-    power_level: 0,
-    membership,
-    member_ts: null,
-    kicked: false,
-    service: false,
-  };
+  return memberView({ user_id: userId, membership });
 }
 
 test('/pronoun sets and resets your room pronouns', async () => {

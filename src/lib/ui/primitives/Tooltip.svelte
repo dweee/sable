@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { currentDirection, inlineSide } from '#lib/language.svelte.js';
   import { Tooltip as BitsTooltip } from 'bits-ui';
   import type { ClassValue } from 'svelte/elements';
   import type { Snippet } from 'svelte';
+  import IconContext from 'phosphor-svelte/lib/IconContext';
 
   import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
@@ -53,7 +55,13 @@
     type="button"
     aria-label={variant === 'icon' ? label || undefined : undefined}
   >
-    {@render children?.()}
+    {#if variant === 'icon'}
+      <IconContext values={{ 'aria-hidden': 'true' }}>
+        {@render children?.()}
+      </IconContext>
+    {:else}
+      {@render children?.()}
+    {/if}
   </button>
 {/snippet}
 
@@ -64,8 +72,9 @@
     {/if}
     <BitsTooltip.Portal>
       <BitsTooltip.Content
+        dir={currentDirection()}
         class={multiline ? 'tooltip tooltip-multiline' : 'tooltip'}
-        {side}
+        side={inlineSide(side)}
         {align}
         sideOffset={8}
         collisionPadding={collisionPadding()}

@@ -54,7 +54,13 @@
 </script>
 
 <div class="location">
-  <a class="summary" {href} rel="external" aria-disabled={!valid || undefined}>
+  <a
+    class="summary"
+    {href}
+    target="_blank"
+    rel="external noopener noreferrer"
+    aria-disabled={!valid || undefined}
+  >
     <MapPinIcon class="pin" size={20} aria-hidden="true" />
     <span class="text">
       <span class="label">{label}</span>
@@ -87,7 +93,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-200);
-    max-width: var(--timeline-media-max);
+    max-width: min(var(--timeline-media-max), 100%);
     padding: var(--space-200) var(--space-300);
   }
 

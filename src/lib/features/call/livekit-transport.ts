@@ -23,7 +23,9 @@ import {
 } from '#lib/platform/screen-audio.js';
 import type { ScreenAudioChoice } from '#lib/platform/screen-audio-stream.js';
 import { electronBridge } from '#lib/platform/electron.js';
+import { i18n } from '#lib/i18n.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 
 import type {
   CallConnectionQuality,
@@ -36,7 +38,9 @@ import type {
 } from './call-transport';
 import { idleTransportState, ignoreError, ScreenAudioError } from './call-transport';
 import { MatrixKeyProvider } from './key-provider';
-import { createMicrophoneFilter, microphoneProcessing } from './voice-filter';
+import { followMicrophoneVolume } from './microphone-volume.svelte';
+import { createMicrophoneProcessor, microphoneProcessing } from './voice-filter';
+import { createVoiceActivity } from './voice-activity';
 import {
   resolveVideoCodec,
   screenCaptureOptions,
@@ -68,18 +72,21 @@ const trackOf = (publication: TrackPublication | undefined): CallTrack | undefin
     subscribed: publication.isSubscribed,
   };
 
-const participantOf = (participant: LocalParticipant | RemoteParticipant): CallParticipant => ({
+const participantOf = (
+  participant: LocalParticipant | RemoteParticipant,
+  speaking = participant.isSpeaking
+): CallParticipant => ({
   identity: participant.identity,
   camera: trackOf(participant.getTrackPublication(Track.Source.Camera)),
   screenShare: trackOf(participant.getTrackPublication(Track.Source.ScreenShare)),
   screenShareAudio: trackOf(participant.getTrackPublication(Track.Source.ScreenShareAudio)),
   microphone: trackOf(participant.getTrackPublication(Track.Source.Microphone)),
   connectionQuality: qualityOf(participant.connectionQuality),
-  speaking: participant.isSpeaking,
+  speaking,
 });
 
-const selfOf = (participant: LocalParticipant): CallParticipant => ({
-  ...participantOf(participant),
+const selfOf = (participant: LocalParticipant, speaking?: boolean): CallParticipant => ({
+  ...participantOf(participant, speaking),
   local: true,
 });
 
@@ -146,11 +153,19 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
       ? { resolution: videoResolution(preferences.callCameraResolution) }
       : {}),
   });
+  let av1Reported = false;
+  const videoCodec = (codec: Parameters<typeof resolveVideoCodec>[0]) => {
+    if (options.encryptMedia && codec === 'av1' && !av1Reported) {
+      av1Reported = true;
+      toasts.info(i18n.t('settings.callAv1Unencryptable'));
+    }
+    return resolveVideoCodec(codec, options.encryptMedia);
+  };
   const cameraPublish = async () =>
     videoPublishOptions(
       'camera',
       preferences.callCameraBitrate,
-      await resolveVideoCodec(preferences.callCameraCodec),
+      await videoCodec(preferences.callCameraCodec),
       preferences.callSimulcast
     );
   const screenCapture = (): ScreenShareCaptureOptions =>
@@ -159,7 +174,7 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     videoPublishOptions(
       'screen',
       preferences.callScreenBitrate,
-      await resolveVideoCodec(preferences.callScreenCodec),
+      await videoCodec(preferences.callScreenCodec),
       preferences.callSimulcast,
       preferences.callScreenFramerate
     );
@@ -337,8 +352,16 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     }
   };
 
+  /* Audio the server was told not to send cannot be measured here, so use its speaking state. */
+  const speakingOf = (participant: LocalParticipant | RemoteParticipant): boolean =>
+    (participant.getTrackPublication(Track.Source.Microphone)?.isEnabled === false
+      ? undefined
+      : voiceActivity.speaking(participant.identity)) ?? participant.isSpeaking;
+
   const syncParticipants = (): void => {
-    const participants = [...room.remoteParticipants.values()].map(participantOf);
+    const participants = [...room.remoteParticipants.values()].map((participant) =>
+      participantOf(participant, speakingOf(participant))
+    );
     publish({ participants });
     const nextQuality = participants.map((participant) => participant.connectionQuality).join(',');
     if (nextQuality !== qualitySnapshot) {
@@ -347,14 +370,43 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     }
   };
 
+  let microphoneTrack: LocalAudioTrack | null = null;
+  const attaching = new WeakSet<LocalAudioTrack>();
+  const attachMicrophone = async (track: LocalAudioTrack, filtered: boolean): Promise<void> => {
+    if (track.getProcessor() || attaching.has(track)) return;
+    attaching.add(track);
+    const processor = createMicrophoneProcessor(filtered);
+    try {
+      await step(filtered ? 'call.microphone.filter' : 'call.microphone.volume', () =>
+        track.setProcessor(processor)
+      );
+      return;
+    } catch {
+      void processor.destroy().catch(ignoreError);
+    } finally {
+      attaching.delete(track);
+    }
+    if (!filtered) return;
+    void track.applyConstraints({ noiseSuppression: true }).catch(ignoreError);
+    if (preferences.microphoneVolume !== 1) await attachMicrophone(track, false);
+  };
+  const stopMicrophoneVolume = followMicrophoneVolume((volume) => {
+    if (volume !== 1 && microphoneTrack) void attachMicrophone(microphoneTrack, false);
+  });
+
   const syncLocal = (): void => {
     publish({
       microphoneEnabled: room.localParticipant.isMicrophoneEnabled,
       cameraEnabled: room.localParticipant.isCameraEnabled,
       screenShareEnabled: room.localParticipant.isScreenShareEnabled,
-      self: selfOf(room.localParticipant),
+      self: selfOf(room.localParticipant, speakingOf(room.localParticipant)),
     });
   };
+
+  const voiceActivity = createVoiceActivity(() => {
+    syncParticipants();
+    syncLocal();
+  });
 
   room
     .on(RoomEvent.ParticipantConnected, syncParticipants)
@@ -370,8 +422,19 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     .on(RoomEvent.ActiveSpeakersChanged, syncLocal)
     .on(RoomEvent.LocalTrackPublished, syncLocal)
     .on(RoomEvent.LocalTrackUnpublished, syncLocal)
+    .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      if (publication.source === Track.Source.Microphone)
+        voiceActivity.watch(participant.identity, track);
+    })
+    .on(RoomEvent.TrackUnsubscribed, (_track, publication, participant) => {
+      if (publication.source === Track.Source.Microphone)
+        voiceActivity.unwatch(participant.identity);
+    })
     .on(RoomEvent.LocalTrackUnpublished, (publication) => {
+      if (publication.source === Track.Source.Microphone)
+        voiceActivity.unwatch(room.localParticipant.identity);
       if (publication.source === Track.Source.ScreenShare) void stopSharingAudio();
+      if (publication.track === microphoneTrack) microphoneTrack = null;
     })
     .on(RoomEvent.TrackMuted, syncLocal)
     .on(RoomEvent.TrackUnmuted, syncLocal)
@@ -388,6 +451,7 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     })
     .on(RoomEvent.Disconnected, (reason) => {
       missingKeys.clear();
+      voiceActivity.dispose();
       void stopSharingAudio();
       const disconnectReason = reason === undefined ? 'UNKNOWN' : DisconnectReason[reason];
       publish({ connection: 'disconnected', participants: [], disconnectReason });
@@ -429,13 +493,12 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     })
     .on(RoomEvent.LocalTrackPublished, (publication) => {
       const track = publication.track;
-      if (!filterMicrophone || !(track instanceof LocalAudioTrack)) return;
+      if (!(track instanceof LocalAudioTrack)) return;
       if (publication.source !== Track.Source.Microphone) return;
-      const filter = createMicrophoneFilter();
-      void step('call.microphone.filter', () => track.setProcessor(filter)).catch(() => {
-        void filter.destroy().catch(ignoreError);
-        return track.applyConstraints({ noiseSuppression: true }).catch(ignoreError);
-      });
+      microphoneTrack = track;
+      voiceActivity.watch(room.localParticipant.identity, track);
+      if (filterMicrophone || preferences.microphoneVolume !== 1)
+        void attachMicrophone(track, filterMicrophone);
     })
     .on(RoomEvent.LocalAudioSilenceDetected, () => {
       event('call.media.local_audio_silence');
@@ -447,6 +510,7 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     })
     .on(RoomEvent.ParticipantDisconnected, (participant) => {
       missingKeys.delete(participant.identity);
+      voiceActivity.unwatch(participant.identity);
       event('call.media.participant_count', {
         'call.participant_count': room.remoteParticipants.size,
       });
@@ -595,6 +659,8 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     connect,
     disconnect: async () => {
       disposed = true;
+      stopMicrophoneVolume();
+      voiceActivity.dispose();
       healthGeneration += 1;
       if (healthTimer) clearTimeout(healthTimer);
       healthTimer = undefined;

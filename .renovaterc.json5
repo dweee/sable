@@ -23,6 +23,14 @@
         'datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*\\S+\\s*=\\s*"(?<currentValue>[^"]+)";',
       ],
     },
+    {
+      description: 'node_sha256 on the next line is not updated, take it from SHASUMS256.txt',
+      customType: 'regex',
+      managerFilePatterns: ['/^scripts/ci/reproduce-android\\.sh$/'],
+      matchStrings: ['node_version=(?<currentValue>\\S+)'],
+      depNameTemplate: 'node',
+      datasourceTemplate: 'node-version',
+    },
   ],
   packageRules: [
     {
@@ -60,6 +68,13 @@
       groupName: 'docker',
     },
     {
+      description: 'One Node.js version across mise, package.json, CI and the container builds',
+      matchDatasources: ['docker', 'node-version'],
+      matchPackageNames: ['/(?:^|/)node$/'],
+      groupName: 'node',
+      commitMessageTopic: 'Node.js',
+    },
+    {
       matchDatasources: ['git-refs'],
       matchPackageNames: [
         'https://github.com/matrix-org/matrix-rust-sdk{,.git}',
@@ -87,6 +102,12 @@
       matchManagers: ['npm'],
       matchPackageNames: ['typescript'],
       allowedVersions: '<7',
+    },
+    {
+      description: '2.0.1 fails the composer round-trip tests on escaped pipes in table cells',
+      matchManagers: ['npm'],
+      matchPackageNames: ['mdast-util-gfm-table'],
+      allowedVersions: '<2.0.1',
     },
     {
       description: 'Match ruma-html until the Ruma pin is updated',

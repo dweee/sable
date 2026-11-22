@@ -3,6 +3,7 @@ import ChecksIcon from 'phosphor-svelte/lib/ChecksIcon';
 import CodeIcon from 'phosphor-svelte/lib/CodeIcon';
 import GifIcon from 'phosphor-svelte/lib/GifIcon';
 import KeyReturnIcon from 'phosphor-svelte/lib/KeyReturnIcon';
+import LinkSimpleIcon from 'phosphor-svelte/lib/LinkSimpleIcon';
 import MapPinIcon from 'phosphor-svelte/lib/MapPinIcon';
 import LockIcon from 'phosphor-svelte/lib/LockIcon';
 import MicrophoneIcon from 'phosphor-svelte/lib/MicrophoneIcon';
@@ -98,6 +99,19 @@ export const composerCategory: SettingsCategory = {
       name: 'settings.sedEdits',
       description: 'settings.sedEditsHint',
       type: 'boolean',
+    },
+    {
+      key: 'linkMscReferences',
+      section: 'writing',
+      icon: LinkSimpleIcon,
+      name: 'settings.linkMscReferences',
+      description: 'settings.linkMscReferencesHint',
+      type: 'select',
+      options: [
+        { value: 'ask', label: 'settings.linkMscReferencesAsk' },
+        { value: 'always', label: 'common.always' },
+        { value: 'never', label: 'common.never' },
+      ],
     },
     {
       key: 'inlineEditing',

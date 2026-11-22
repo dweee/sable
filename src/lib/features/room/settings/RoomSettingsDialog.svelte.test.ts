@@ -14,7 +14,7 @@ import type {
 vi.mock('#lib/core/context.js');
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/rooms/room-list.svelte.js')>()),
-  useRoomList: () => ({ rooms: [], labelFor: (id: string) => id }),
+  useRoomList: () => ({ rooms: [], roomSpaces: () => undefined, labelFor: (id: string) => id }),
 }));
 
 import { core as baseCore } from '#lib/core/__mocks__/context.js';
@@ -277,4 +277,18 @@ test('abbreviations wait for the room entries, and fall back to none when they f
   expect(await screen.findByText('room.abbreviationsEmpty')).toBeInTheDocument();
   expect(debug).toHaveBeenCalledWith('[sable room] abbreviations unavailable', failure);
   debug.mockRestore();
+});
+
+test('rules that keep acceptance after their text was removed open without unsaved changes', async () => {
+  Object.assign(core.rpc.room_state, {
+    ownRules: vi.fn().mockResolvedValue({ html: '', require_acceptance: true, delegate_to: null }),
+  });
+  core.rpc.members.permissions.mockResolvedValue(permissions(true));
+  render(RoomSettingsDialog, {
+    props: { open: true, room, initialSection: 'rules', onOpenChange: () => {} },
+  });
+
+  expect(await screen.findByRole('switch', { name: 'room.rulesRequire' })).not.toBeChecked();
+  expect(screen.getByRole('button', { name: 'common.save' })).toBeDisabled();
+  expect(screen.queryByText('common.unsavedChangesNotice')).toBeNull();
 });

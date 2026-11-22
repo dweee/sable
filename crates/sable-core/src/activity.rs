@@ -12,6 +12,10 @@ use crate::Core;
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 const STUCK_AFTER: Duration = Duration::from_secs(60);
 const STUCK_CONFIRMED_AFTER: Duration = Duration::from_secs(10);
+#[cfg(target_os = "ios")]
+const REOPEN_RETRY: Duration = Duration::from_millis(250);
+#[cfg(target_os = "ios")]
+const REOPEN_RETRY_MAX: Duration = Duration::from_secs(5);
 
 pub(crate) struct Activity {
     app_active: AtomicBool,
@@ -20,6 +24,8 @@ pub(crate) struct Activity {
     sync_suspended: AtomicBool,
     network_available: AtomicBool,
     account_locked: AtomicBool,
+    #[cfg(target_os = "ios")]
+    reopen_failures: std::sync::atomic::AtomicU32,
     stores_open: watch::Sender<bool>,
     /// Separate from `transition`, so a store read never waits for sync to start or stop.
     stores: RwLock<()>,
@@ -41,6 +47,8 @@ impl Activity {
             sync_suspended: AtomicBool::new(false),
             network_available: AtomicBool::new(true),
             account_locked: AtomicBool::new(false),
+            #[cfg(target_os = "ios")]
+            reopen_failures: std::sync::atomic::AtomicU32::new(0),
             stores_open: watch::Sender::new(true),
             stores: RwLock::new(()),
             transition: Mutex::new(()),
@@ -172,6 +180,11 @@ impl Core {
         self.activity.set_app_active(active)
     }
 
+    #[must_use]
+    pub fn is_app_active(&self) -> bool {
+        self.activity.app_active()
+    }
+
     pub async fn update_app_active(self: &Arc<Self>, active: bool) {
         self.set_app_active(active);
         self.apply_activity(active, None).await;
@@ -195,8 +208,10 @@ impl Core {
         }
         let should_sync = active || !self.call_sessions.lock().await.is_empty();
         #[cfg(target_os = "ios")]
-        if should_sync && self.activity.sync_suspended() {
-            self.reopen_stores(&transition).await;
+        if should_sync && self.activity.sync_suspended() && !self.reopen_stores(&transition).await {
+            drop(transition);
+            self.retry_reopening_stores(active, revision);
+            return;
         }
         transition.suspend_sync(!should_sync);
         let Ok(sync_service) = self.sync_service().await else {
@@ -204,8 +219,14 @@ impl Core {
         };
         if should_sync {
             // Starting a running service is a no-op, but from `Offline` it retries at once.
-            self.set_sync_presence(self.sync_presence().await).await;
+            self.set_sync_presence(self.cached_sync_presence().await)
+                .await;
             transition.start_sync(&sync_service).await;
+            if !self.sync_paused() && !self.activity.network_available() {
+                self.emit(crate::protocol::CoreEvent::SyncStatus(
+                    self.shown_sync_status(sync_service.state().get()),
+                ));
+            }
             drop(transition);
             // Fetches replied-to events, which must not hold up local reads or the next pause.
             Box::pin(self.until_stores_close(self.retry_cached_decryption())).await;
@@ -214,7 +235,7 @@ impl Core {
                 self.flush_inbox_locked(&client, &transition).await;
             }
             // Background push fetches must not report the user online.
-            self.set_sync_presence(matrix_sdk::ruma::presence::PresenceState::Offline)
+            self.set_sync_presence(ruma::presence::PresenceState::Offline)
                 .await;
             sync_service.stop().await;
             #[cfg(target_os = "ios")]
@@ -228,10 +249,27 @@ impl Core {
             .network_available
             .swap(available, Ordering::SeqCst);
         self.search_network.set_unmetered(unmetered);
-        self.refresh_search_peers();
         if available && !was_available && !self.sync_paused() {
             self.apply_activity(self.activity.app_active(), None).await;
         }
+        if !available
+            && was_available
+            && !self.sync_paused()
+            && let Ok(sync_service) = self.sync_service().await
+        {
+            self.emit(crate::protocol::CoreEvent::SyncStatus(
+                self.shown_sync_status(sync_service.state().get()),
+            ));
+        }
+        self.refresh_search_peers().await;
+    }
+
+    /// For when the OS reports the network gone and is wrong, which would block every restart.
+    pub(crate) async fn retry_sync(&self, sync_service: &SyncService) {
+        self.activity
+            .network_available
+            .store(true, Ordering::SeqCst);
+        self.resume_sync(sync_service).await;
     }
 
     pub(crate) fn watch_activity_health(self: &Arc<Self>) {
@@ -270,7 +308,7 @@ impl Core {
         self.activity.sync_allowed()
     }
 
-    async fn set_sync_presence(&self, presence: matrix_sdk::ruma::presence::PresenceState) {
+    async fn set_sync_presence(&self, presence: ruma::presence::PresenceState) {
         if let Ok(client) = self.client().await
             && let Err(error) = client.set_presence(presence, None, false).await
         {
@@ -313,16 +351,42 @@ impl Core {
         }
     }
 
+    /// Whether every store reopened. A client whose reopen failed stays paused, so the stores
+    /// must not be reported open: its locks would never be granted.
     #[cfg(target_os = "ios")]
-    async fn reopen_stores(&self, transition: &Transition<'_>) {
+    async fn reopen_stores(&self, transition: &Transition<'_>) -> bool {
         let clients = self.store_clients().await;
         let _reopening = self.activity.stores.write().await;
         for client in clients {
             if let Err(error) = client.resume().await {
-                tracing::warn!("reopening the stores after suspension failed: {error}");
+                if self.activity.reopen_failures.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tracing::error!("reopening the stores after suspension failed: {error}");
+                }
+                return false;
             }
         }
+        self.activity.reopen_failures.store(0, Ordering::SeqCst);
         transition.set_stores_open(true);
+        true
+    }
+
+    /// Reopening is idempotent, so the clients that did reopen are safe to resume again.
+    #[cfg(target_os = "ios")]
+    fn retry_reopening_stores(self: &Arc<Self>, active: bool, revision: Option<u64>) {
+        let failures = self.activity.reopen_failures.load(Ordering::SeqCst);
+        let delay = REOPEN_RETRY
+            .saturating_mul(1 << failures.min(8))
+            .min(REOPEN_RETRY_MAX);
+        self.emit(crate::protocol::CoreEvent::SyncStatus(
+            crate::protocol::SyncStatus::Error {
+                message: "Local storage could not be reopened.".to_owned(),
+            },
+        ));
+        let core = self.clone();
+        drop(spawn(async move {
+            matrix_sdk::sleep::sleep(delay).await;
+            core.apply_activity(active, revision).await;
+        }));
     }
 
     pub(crate) async fn wait_for_stores(&self) {
@@ -347,10 +411,7 @@ impl Core {
     }
 
     /// Drops `work` once the stores close, so it must be started again after they reopen.
-    pub(crate) async fn until_stores_close<T>(
-        &self,
-        work: impl std::future::Future<Output = T>,
-    ) -> Option<T> {
+    pub(crate) async fn until_stores_close<T>(&self, work: impl Future<Output = T>) -> Option<T> {
         let mut open = self.activity.subscribe_stores();
         tokio::select! {
             biased;

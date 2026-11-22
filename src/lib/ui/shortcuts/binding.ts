@@ -92,8 +92,18 @@ export function isNumpadEvent(event: KeyboardEventLike): boolean {
   return event.code in NUMPAD_KEYS;
 }
 
+const PHYSICAL_KEY = /^(?:Key|Digit)([A-Z0-9])$/;
+
 function eventKey(event: KeyboardEventLike): string {
-  return NUMPAD_KEYS[event.code] ?? event.key.toLowerCase();
+  const numpad = NUMPAD_KEYS[event.code];
+  if (numpad) return numpad;
+  const key = event.key.toLowerCase();
+  // macOS Option turns a letter into another character or a dead key, so the physical key names it.
+  if (event.altKey && (key === 'dead' || (key.length === 1 && !/[a-z0-9]/.test(key)))) {
+    const physical = PHYSICAL_KEY.exec(event.code)?.[1];
+    if (physical) return physical.toLowerCase();
+  }
+  return key;
 }
 
 function isNamedKey(key: string): boolean {
@@ -150,8 +160,12 @@ export function findShortcutConflicts(
   const conflicts: Array<[ConflictCandidate, ConflictCandidate]> = [];
 
   for (const [i, a] of candidates.entries()) {
+    if (a.binding === '') continue;
     for (const b of candidates.slice(i + 1)) {
-      if (canonicalBinding(a.binding, isMac) === canonicalBinding(b.binding, isMac)) {
+      if (
+        b.binding !== '' &&
+        canonicalBinding(a.binding, isMac) === canonicalBinding(b.binding, isMac)
+      ) {
         conflicts.push([a, b]);
       }
     }

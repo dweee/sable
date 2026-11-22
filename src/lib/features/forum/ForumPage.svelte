@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
+  import XIcon from 'phosphor-svelte/lib/XIcon';
   import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import type { RoomPermissionsView } from '#src/generated/protocol';
@@ -9,9 +10,14 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { personaSpaces } from '#lib/features/composer/persona-spaces.js';
   import { eventTimelinePath } from '#lib/features/room/event-timeline.js';
+  import { resolveForumLink } from './forum-link.js';
   import ConversationComposer from '#lib/features/room/conversation/ConversationComposer.svelte';
   import ThreadView from '#lib/features/room/conversation/ThreadView.svelte';
   import { Conversation } from '#lib/features/room/conversation/conversation.svelte.js';
+  import {
+    provideRoomMediaPreviews,
+    RoomMediaPreviews,
+  } from '#lib/features/room/media/room-media-previews.svelte.js';
   import { donateSentMessage } from '#lib/features/share/donate-sent-message.js';
   import {
     PinnedEvents,
@@ -29,6 +35,7 @@
     OpenMessageMenu,
     provideMessageMenu,
   } from '#lib/features/room/messages/message-menu-open.svelte.js';
+  import { countNotificationsElsewhere } from '#lib/features/inbox/inbox.js';
   import { i18n } from '#lib/i18n.js';
   import { usePersonaStore } from '#lib/personas/personas.svelte.js';
   import { findRoomByPathId, useRoomList } from '#lib/rooms/room-list.svelte.js';
@@ -36,15 +43,21 @@
   import { copyRoomLink } from '#lib/rooms/permalink.js';
   import { RoomMemberLoader } from '#lib/rooms/room-members.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
-  import { holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
+  import { readText, writeText } from '#lib/platform/local-json.js';
+  import { afterOverlayPops, holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
   import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
 
+  import { filterThreads, MAX_PINNED, sortThreads, type ForumView } from './forum-threads';
   import { ForumThreads } from './forum-threads.svelte.js';
+  import type { ForumThreadCallbacks } from './forum-thread-callbacks';
   import ForumHeader from './ForumHeader.svelte';
   import ForumThreadList from './ForumThreadList.svelte';
+  import ForumToolbar from './ForumToolbar.svelte';
 
+  const LAYOUT_KEY = 'sable-forum-layout';
   const AUTO_FILL_ROUNDS = 10;
   const FORUM_TITLE_MAX = 150;
 
@@ -63,15 +76,23 @@
   const memberLoader = new RoomMemberLoader();
   const pinnedEvents = new PinnedEvents(core.rpc.timeline);
   providePinnedEvents(pinnedEvents);
+  const mediaPreviews = provideRoomMediaPreviews(
+    new RoomMediaPreviews(() => resolvedRoom?.join_rule ?? null)
+  );
 
   let resolvedRoom = $derived(findRoomByPathId(roomList.rooms, roomId));
   let resolvedRoomId = $derived(resolvedRoom?.room_id ?? roomId);
   let roomName = $derived(resolvedRoom?.name ?? roomId);
+  let backUnread = $derived(
+    countNotificationsElsewhere(roomList.rooms, resolvedRoomId, roomList.badgeUnreadFor)
+  );
   let roomAvatar = $derived(resolvedRoom?.avatar_url ?? null);
   let threadRootId = $derived.by<string | null>(() => {
     void resolvedRoomId;
     return null;
   });
+  let linkedEventId = $derived(page.url.searchParams.get('event') ?? page.state.notified ?? null);
+  let threadEventId = $state<string | null>(null);
   const sidePanels = new MediaQuery(BREAKPOINTS.sidePanels);
   let threadInPanel = $derived(sidePanels.current && preferences.threadPresentation === 'panel');
   let permissions = $state.raw<RoomPermissionsView | null>(null);
@@ -84,16 +105,31 @@
     return null;
   });
   let autoFills = 0;
+  let view = $state.raw<ForumView>({
+    sort: 'active',
+    layout: readText(LAYOUT_KEY) === 'gallery' ? 'gallery' : 'list',
+  });
+  let query = $state('');
+  let composing = $state(false);
+  let composeArea = $state<HTMLElement>();
+  let threads = $derived(sortThreads(filterThreads(forumThreads.threads, query), view.sort));
+  let canPost = $derived(permissions?.can_post ?? true);
 
   const conversation = new Conversation({
     core,
     personas,
     timeline: forumThreads.roomTimeline,
     roomId: () => resolvedRoomId,
-    spaceIds: (id) => personaSpaces(roomList.rooms, id, page.params.spaceId).order,
+    spaceIds: (id) => personaSpaces(roomList, id, page.params.spaceId).order,
     encrypted: () => resolvedRoom?.encrypted ?? null,
-    afterSend: (id) => donateSentMessage(core, roomList.byId(id)),
+    publicRoom: () => resolvedRoom?.join_rule === 'public',
+    canRedactOwn: () => permissions?.can_redact_own ?? true,
+    afterSend: (id) => {
+      composing = false;
+      donateSentMessage(core, roomList.byId(id));
+    },
   });
+  let composerOpen = $derived(canPost && (composing || conversation.context !== null));
 
   $effect(() => {
     autoFills = 0;
@@ -121,6 +157,40 @@
 
   $effect(() => {
     void pinnedEvents.load(resolvedRoomId);
+  });
+
+  $effect(() => {
+    void mediaPreviews.load(resolvedRoomId);
+  });
+
+  $effect(() => {
+    const target = linkedEventId;
+    const targetRoomId = resolvedRoomId;
+    if (target === null) return;
+    threadRootId = null;
+    threadEventId = null;
+    let active = true;
+    const readSource = (eventId: string) =>
+      core.rpc.timeline
+        .eventSource({ room_id: targetRoomId, event_id: eventId, include_original: false })
+        .then(({ source }) => source);
+    void resolveForumLink(readSource, target)
+      .then((linked) => {
+        if (!active) return;
+        threadRootId = linked.rootEventId;
+        threadEventId = linked.eventId;
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        console.debug('[sable forum] linked event unavailable', error);
+        // eslint-disable-next-line svelte/no-navigation-without-resolve -- eventTimelinePath resolves the route
+        void goto(`${eventTimelinePath(targetRoomId)}&event=${encodeURIComponent(target)}`, {
+          replace: true,
+        });
+      });
+    return () => {
+      active = false;
+    };
   });
 
   let wasEditing = false;
@@ -167,6 +237,8 @@
 
   function openThread(eventId: string): void {
     threadRootId = eventId;
+    threadEventId = null;
+    void clearLinkedEvent();
   }
 
   function editThread(thread: (typeof forumThreads.threads)[number]): void {
@@ -183,21 +255,24 @@
   }
 
   function togglePin(eventId: string): void {
+    const shown = forumThreads.threads.filter((thread) => pinnedEvents.has(thread.eventId));
+    if (!pinnedEvents.has(eventId) && shown.length >= MAX_PINNED) {
+      toasts.info(i18n.t('forum.pinLimit', { count: MAX_PINNED }));
+      return;
+    }
     pinnedEvents.toggle(resolvedRoomId, eventId).catch((error: unknown) => {
       console.warn('[sable forum] pinning a thread failed', error);
       toasts.error(pinErrorMessage(error));
     });
   }
 
-  function copyEventLink(eventId: string): void {
+  function copyEventLink(eventId: string, format?: 'matrix' | 'external'): void {
     void copyRoomLink(
       core,
       { room_id: resolvedRoomId, canonical_alias: resolvedRoom?.canonical_alias ?? null },
-      eventId
-    ).then((copied) => {
-      if (!copied) toasts.error(i18n.t('errors.copyFailed'));
-      else toasts.info(i18n.t('timeline.linkCopied'));
-    });
+      eventId,
+      format
+    );
   }
 
   function canDeleteThread(thread: (typeof forumThreads.threads)[number]): boolean {
@@ -207,10 +282,35 @@
     );
   }
 
+  const threadCallbacks: ForumThreadCallbacks = {
+    onOpen: openThread,
+    get onEdit() {
+      return permissions?.can_post === false ? undefined : editThread;
+    },
+    onDelete: deleteThread,
+    get onReact() {
+      return permissions?.can_react === false ? undefined : conversation.toggleReaction;
+    },
+    onCopyLink: copyEventLink,
+    get onPin() {
+      return permissions?.can_pin ? togglePin : undefined;
+    },
+  };
+
   holdOverlayBack(() => threadRootId !== null, closeThread);
 
   function closeThread(): void {
     threadRootId = null;
+    threadEventId = null;
+    void afterOverlayPops().then(clearLinkedEvent);
+  }
+
+  function clearLinkedEvent(): Promise<void> | undefined {
+    if (!page.url.searchParams.has('event') && !page.state.notified) return;
+    const url = new URL(page.url.href);
+    url.searchParams.delete('event');
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- rewrites the query of the current, already resolved URL
+    return goto(`${url.pathname}${url.search}`, { replace: true, reset: false });
   }
 
   function loadMoreThreads(): void {
@@ -218,6 +318,38 @@
       console.warn('[sable forum] loading threads failed', error);
     });
   }
+
+  function setView(next: ForumView): void {
+    view = next;
+    writeText(LAYOUT_KEY, next.layout);
+  }
+
+  async function startThread(): Promise<void> {
+    const title = query.trim().slice(0, FORUM_TITLE_MAX);
+    if (title !== '' && conversation.forumTitle === '') conversation.forumTitle = title;
+    query = '';
+    composing = true;
+    await tick();
+    composeArea?.querySelector('input')?.focus();
+  }
+
+  function submitSearch(): void {
+    if (!canPost || query.trim() === '' || threads.length > 0 || forumThreads.canLoadMore) return;
+    void startThread();
+  }
+
+  function closeComposer(): void {
+    composing = false;
+    conversation.clearContext();
+  }
+
+  // A search or a ranking is only right once every thread is loaded.
+  $effect(() => {
+    if (view.sort === 'active' && query.trim() === '') return;
+    if (forumThreads.error || !forumThreads.canLoadMore) return;
+    if (forumThreads.loading || forumThreads.backwardPagination !== 'idle') return;
+    untrack(loadMoreThreads);
+  });
 
   async function findJustSent(body: string, sentAfter: number): Promise<string | null> {
     const deadline = Date.now() + 3000;
@@ -273,6 +405,7 @@
       {roomName}
       {roomAvatar}
       onBack={backToRoomList}
+      {backUnread}
       onSearch={() => searchInRoom(resolvedRoom, resolvedRoomId)}
       onEventTimeline={preferences.developerTools
         ? () => {
@@ -283,39 +416,48 @@
     />
     <RoomBannerStrip roomId={resolvedRoomId} />
     <div class="forum-content">
-      <div class="forum-compose-area">
-        <p class="forum-composer-hint">{i18n.t('forum.newThreadHint')}</p>
-        <TextInput
-          bind:value={conversation.forumTitle}
-          maxlength={FORUM_TITLE_MAX}
-          placeholder={i18n.t('forum.titlePlaceholder')}
-          aria-label={i18n.t('forum.titleLabel')}
-          disabled={permissions ? !permissions.can_post : false}
-        />
-        <ConversationComposer
-          {conversation}
-          roomId={resolvedRoomId}
-          onSend={sendMessage}
-          {roomName}
-          readOnly={permissions ? !permissions.can_post : false}
-        />
-      </div>
+      <ForumToolbar
+        bind:query
+        {view}
+        onView={setView}
+        onSubmit={submitSearch}
+        onCreate={canPost ? () => void startThread() : undefined}
+      />
+      {#if composerOpen}
+        <div class="forum-compose-area" bind:this={composeArea}>
+          <div class="forum-compose-title">
+            <TextInput
+              bind:value={conversation.forumTitle}
+              maxlength={FORUM_TITLE_MAX}
+              placeholder={i18n.t('forum.titlePlaceholder')}
+              aria-label={i18n.t('forum.titleLabel')}
+            />
+            <IconButton variant="ghost" label={i18n.t('common.close')} onclick={closeComposer}>
+              <XIcon />
+            </IconButton>
+          </div>
+          <ConversationComposer
+            {conversation}
+            roomId={resolvedRoomId}
+            onSend={sendMessage}
+            {roomName}
+          />
+        </div>
+      {/if}
       <ForumThreadList
-        threads={forumThreads.threads}
+        {threads}
         failed={forumThreads.error}
         onRetry={() => void forumThreads.retry()}
         loading={forumThreads.loading || forumThreads.backwardPagination === 'loading'}
         canLoadMore={forumThreads.canLoadMore}
-        onOpen={openThread}
+        callbacks={threadCallbacks}
         canDelete={canDeleteThread}
-        onEdit={permissions?.can_post === false ? undefined : editThread}
-        onDelete={deleteThread}
         roomId={resolvedRoomId}
-        onReact={permissions?.can_react === false ? undefined : conversation.toggleReaction}
-        onCopyLink={copyEventLink}
         onLoadMore={loadMoreThreads}
         isPinned={(eventId) => pinnedEvents.has(eventId)}
-        onPin={permissions?.can_pin ? togglePin : undefined}
+        layout={view.layout}
+        filtered={query.trim() !== ''}
+        onCreate={canPost ? () => void startThread() : undefined}
       />
     </div>
   </div>
@@ -325,6 +467,7 @@
       <ThreadView
         roomId={resolvedRoomId}
         rootEventId={threadRootId}
+        focusEventId={threadEventId}
         sidePanel={threadInPanel}
         backLabel={i18n.t('forum.backToForum')}
         rootMessage={forumThreads.roomTimeline.items.find((item) => item.event_id === threadRootId)}
@@ -383,17 +526,17 @@
 
   .forum-compose-area {
     flex: 0 0 auto;
-    padding: var(--space-400) var(--space-400) var(--space-200);
+    padding: var(--space-200) var(--space-400);
   }
 
-  .forum-compose-area :global(.text-input) {
+  .forum-compose-area :global(.composer-stack) {
+    width: 100%;
+  }
+
+  .forum-compose-title {
+    align-items: center;
+    display: flex;
+    gap: var(--space-200);
     margin-bottom: var(--space-200);
-  }
-
-  .forum-composer-hint {
-    color: var(--surface-var-on-container);
-    font-size: var(--font-size-small);
-    margin: 0;
-    padding: 0 0 var(--space-200);
   }
 </style>

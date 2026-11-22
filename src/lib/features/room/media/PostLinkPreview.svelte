@@ -11,21 +11,27 @@
     UrlPreviewView,
   } from '#src/generated/protocol';
 
+  import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
-  import MediaContent from '#lib/ui/MediaContent.svelte';
+  import { currentLanguage } from '#lib/language.svelte.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
+  import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
+  import VideoPlayer from '#lib/ui/VideoPlayer.svelte';
   import { formatMessageTimestamp } from '#lib/ui/date-time.js';
   import Button from '#lib/ui/primitives/Button.svelte';
 
   import { GIF_PLAYBACK } from './link-preview.js';
+  import { scrapedPostVideo } from './link-preview-cache';
 
   interface Props {
     url: string;
     preview: UrlPreviewView;
     mediaHidden: boolean;
+    tunnel: boolean;
   }
 
-  let { url, preview, mediaHidden }: Props = $props();
+  let { url, preview, mediaHidden, tunnel }: Props = $props();
+  const core = useCoreClient();
   let post = $derived(preview.post);
   const revealed = new SvelteSet<'post' | 'quote'>();
 
@@ -34,6 +40,14 @@
     inappropriate: 'timeline.postInappropriate',
     spoiler: 'timeline.postSpoiler',
   } as const satisfies Record<PostSensitivityView, string>;
+
+  function languageName(code: string): string {
+    try {
+      return new Intl.DisplayNames([currentLanguage()], { type: 'language' }).of(code) ?? code;
+    } catch {
+      return code;
+    }
+  }
 </script>
 
 {#snippet author(post: PostView, size: number)}
@@ -52,13 +66,14 @@
   </span>
 {/snippet}
 
-{#snippet media(items: PostMediaView[])}
+{#snippet media(items: PostMediaView[], key: 'post' | 'quote')}
   {#if items.length > 0 && !mediaHidden}
     <div class={['post-media', { grid: items.length > 1 }]}>
       {#each items as item, index (index)}
-        {#if item.kind === 'image'}
+        {#if item.kind === 'image' && item.source}
+          {@const source = item.source}
           <MediaImage
-            source={item.source}
+            {source}
             alt={item.alt ?? ''}
             width={items.length > 1 ? 200 : 400}
             height={items.length > 1 ? 200 : 300}
@@ -66,15 +81,21 @@
             intrinsicHeight={item.height}
             mime={item.mime}
             href={url}
+            onclick={() => {
+              mediaViewerState.openStandalone(source, url, item.mime, item.width, item.height);
+            }}
           />
-        {:else}
-          <MediaContent
+        {:else if item.kind !== 'image'}
+          {@const video = items.slice(0, index).filter((media) => media.kind !== 'image').length}
+          <VideoPlayer
             source={item.source}
+            resolveSource={() =>
+              scrapedPostVideo(core.rpc.messages, url, key === 'quote', video, tunnel)}
             mime={item.mime ?? 'video/mp4'}
             filename={url}
-            kind="video"
             width={item.width}
             height={item.height}
+            thumbnail={item.poster}
             playback={item.kind === 'gif' ? GIF_PLAYBACK : null}
           />
         {/if}
@@ -92,7 +113,12 @@
     </Button>
   {:else}
     {#if note.text}<p class="post-text">{note.text}</p>{/if}
-    {@render media(note.media)}
+    {#if note.translated_from}
+      <p class="post-translated">
+        {i18n.t('timeline.postTranslatedFrom', { language: languageName(note.translated_from) })}
+      </p>
+    {/if}
+    {@render media(note.media, key)}
   {/if}
 {/snippet}
 
@@ -157,7 +183,7 @@
     flex-direction: column;
     gap: var(--space-200);
     margin-top: var(--space-100);
-    max-width: var(--timeline-media-max);
+    max-width: min(var(--timeline-media-max), 100%);
     overflow: hidden;
     padding: var(--space-200) var(--space-250);
   }
@@ -210,6 +236,12 @@
     margin: 0;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+  }
+
+  .post-translated {
+    color: var(--surface-var-on-container);
+    font-size: var(--font-size-small);
+    margin: 0;
   }
 
   .post-media.grid {

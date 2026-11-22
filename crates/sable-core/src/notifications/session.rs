@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use matrix_sdk::ruma::api::client::filter::{FilterDefinition, RoomFilter};
 use matrix_sdk::ruma::api::client::sync::sync_events;
 use matrix_sdk::ruma::presence::PresenceState;
 use matrix_sdk::ruma::{EventId, RoomId};
@@ -52,23 +51,95 @@ pub async fn fetch_cold_push_event(
 pub struct PushSession {
     host: push_cache::ColdHost,
     store_dir: std::path::PathBuf,
-    pub(super) room_id: matrix_sdk::ruma::OwnedRoomId,
+    pub(super) room_id: ruma::OwnedRoomId,
 }
 
 const READ_ROOMS_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_ROOMS_CONNECTION: &str = "read-rooms";
+const READ_ROOMS_TIMELINE: u32 = 1;
 
+/// MSC4186 has no notification counts (Synapse always sent zero), so a room is
+/// read when its latest event carries the user's own receipt or is the user's
+/// own. A room missing from the response proves nothing, so it stays unread.
 fn read_rooms_from_sync(
-    joined: &std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, Option<u64>>,
-    room_ids: &[matrix_sdk::ruma::OwnedRoomId],
+    response: &sync_events::msc4186::Response,
+    own_user: &ruma::UserId,
+    room_ids: &[ruma::OwnedRoomId],
 ) -> Vec<String> {
     room_ids
         .iter()
         .filter(|room_id| {
-            joined
-                .get(*room_id)
-                .is_none_or(|count| count.is_none_or(|count| count == 0))
+            let Some(room) = response.rooms.get(*room_id) else {
+                return false;
+            };
+            let receipts = own_receipts(response.extensions.receipts.rooms.get(*room_id), own_user);
+            read_through_latest(&room.timeline, &receipts, own_user)
         })
         .map(ToString::to_string)
+        .collect()
+}
+
+fn read_through_latest(
+    timeline: &[ruma::serde::Raw<ruma::events::AnySyncTimelineEvent>],
+    receipts: &std::collections::HashSet<String>,
+    own_user: &ruma::UserId,
+) -> bool {
+    let Some(latest) = timeline.last() else {
+        return false;
+    };
+    latest
+        .get_field::<String>("event_id")
+        .ok()
+        .flatten()
+        .is_some_and(|event_id| receipts.contains(&event_id))
+        || latest
+            .get_field::<String>("sender")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(own_user.as_str())
+}
+
+/// Main-timeline receipts only: a threaded receipt says nothing about the room's latest event.
+fn own_receipts(
+    receipts: Option<&ruma::serde::Raw<ruma::events::receipt::SyncReceiptEvent>>,
+    own_user: &ruma::UserId,
+) -> std::collections::HashSet<String> {
+    let Some(value) =
+        receipts.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.json().get()).ok())
+    else {
+        return std::collections::HashSet::new();
+    };
+    // MSC4551 sends the receipts bare; servers predating it wrap them in an `m.receipt` event.
+    let content = value
+        .get("content")
+        .filter(|_| value.get("type").is_some())
+        .unwrap_or(&value);
+    let Some(events) = content.as_object() else {
+        return std::collections::HashSet::new();
+    };
+    events
+        .iter()
+        .filter(|(_, types)| {
+            [
+                "m.read",
+                "m.read.private",
+                "org.matrix.msc2285.read.private",
+            ]
+            .iter()
+            .any(|kind| {
+                types
+                    .get(kind)
+                    .and_then(|users| users.get(own_user.as_str()))
+                    .is_some_and(|receipt| {
+                        receipt
+                            .get("thread_id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none_or(|thread| thread == "main")
+                    })
+            })
+        })
+        .map(|(event_id, _)| event_id.clone())
         .collect()
 }
 
@@ -120,14 +191,47 @@ impl PushSession {
         .await
     }
 
-    pub async fn sender_name(&self, sender: Option<&str>, payload_name: Option<&str>) -> String {
+    pub async fn sender_name(
+        &self,
+        sender: Option<&str>,
+        payload_name: Option<&str>,
+        content: Option<&serde_json::Value>,
+    ) -> String {
         let override_name = match sender {
             Some(sender) => {
                 crate::profile_overrides::notification_name(self.host.client(), sender).await
             }
             None => None,
         };
-        push_sender_name(sender, override_name.as_deref().or(payload_name))
+        let name = push_sender_name(sender, override_name.as_deref().or(payload_name), content);
+        let Some(sender) = sender else {
+            return name;
+        };
+        let speaks_as_profile = crate::view::per_message_profile(content)
+            .is_some_and(|profile| profile.display_name.is_some());
+        if override_name.is_none()
+            && !speaks_as_profile
+            && name != sender
+            && self.name_ambiguous(sender).await
+        {
+            format!("{name} ({sender})")
+        } else {
+            name
+        }
+    }
+
+    async fn name_ambiguous(&self, sender: &str) -> bool {
+        let (Some(room), Ok(sender)) = (
+            self.host.client().get_room(&self.room_id),
+            ruma::UserId::parse(sender),
+        ) else {
+            return false;
+        };
+        room.get_member_no_sync(&sender)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|member| member.name_ambiguous())
     }
 
     pub async fn fetch(&self, event_id: &str) -> PushFetchView {
@@ -164,7 +268,7 @@ impl PushSession {
         };
         let Ok(response) = client
             .send(
-                matrix_sdk::ruma::api::client::config::get_global_account_data::v3::Request::new(
+                ruma::api::client::config::get_global_account_data::v3::Request::new(
                     user_id.to_owned(),
                     DEVICE_ACTIVITY_EVENT.into(),
                 ),
@@ -193,24 +297,30 @@ impl PushSession {
             return Some(Vec::new());
         }
 
-        let mut filter = FilterDefinition::default();
-        filter.presence.types = Some(Vec::new());
-        filter.account_data.types = Some(Vec::new());
-        let mut rooms = RoomFilter::default();
-        rooms.rooms = Some(room_ids.clone());
-        rooms.timeline.limit = Some(matrix_sdk::ruma::uint!(0));
-        rooms.state.types = Some(Vec::new());
-        rooms.ephemeral.types = Some(Vec::new());
-        rooms.account_data.types = Some(Vec::new());
-        filter.room = rooms;
+        // Room subscriptions name exactly what to send. A `/sync` filter is advisory: a server
+        // ignoring it answers with every room and all of the account's data.
+        let own_user = self.host.client().user_id()?.to_owned();
+        let subscriptions: std::collections::BTreeMap<_, _> = room_ids
+            .iter()
+            .map(|room_id| {
+                let mut subscription = sync_events::msc4186::request::RoomSubscription::default();
+                subscription.timeline_limit = READ_ROOMS_TIMELINE.into();
+                (room_id.clone(), subscription)
+            })
+            .collect();
 
         let response = tokio::time::timeout(
             READ_ROOMS_TIMEOUT,
             self.host.retry(|| async {
-                let mut request = sync_events::v3::Request::new();
-                request.filter = Some(sync_events::v3::Filter::FilterDefinition(filter.clone()));
+                let mut request = sync_events::msc4186::Request::new();
+                request.conn_id = Some(READ_ROOMS_CONNECTION.to_owned());
                 request.timeout = Some(Duration::ZERO);
                 request.set_presence = PresenceState::Offline;
+                request.room_subscriptions.clone_from(&subscriptions);
+                request.extensions.receipts.enabled = Some(true);
+                request.extensions.receipts.rooms = Some(vec![
+                    sync_events::msc4186::request::ExtensionRoomConfig::AllSubscribed,
+                ]);
                 self.host
                     .client()
                     .send(request)
@@ -224,18 +334,7 @@ impl PushSession {
         .await
         .ok()?
         .ok()?;
-        let joined = response
-            .rooms
-            .join
-            .iter()
-            .map(|(room_id, room)| {
-                (
-                    room_id.clone(),
-                    room.unread_notifications.notification_count.map(u64::from),
-                )
-            })
-            .collect();
-        Some(read_rooms_from_sync(&joined, &room_ids))
+        Some(read_rooms_from_sync(&response, &own_user, &room_ids))
     }
 
     #[must_use]
@@ -246,15 +345,18 @@ impl PushSession {
             .map(|room| room.joined_members_count())
     }
 
-    /// `sender` asks for the avatars, `content` for the message's image; leave out
-    /// the content when the notification may not show the message.
+    /// `sender` asks for the avatars, `content` for the message's image and per-message
+    /// profile; leave out the content when the notification may not show the message.
+    /// `payload_avatar` is the sender avatar the SDK resolved with the pushed event, which
+    /// this store may have no member for.
     pub async fn media(
         &self,
         sender: Option<&str>,
         payload_name: Option<&str>,
+        payload_avatar: Option<&str>,
         content: Option<&serde_json::Value>,
     ) -> PushMedia {
-        let sender_name = self.sender_name(sender, payload_name).await;
+        let sender_name = self.sender_name(sender, payload_name, content).await;
         let client = self.host.client();
         let Some(room) = client.get_room(&self.room_id) else {
             return PushMedia {
@@ -262,20 +364,29 @@ impl PushSession {
                 ..PushMedia::default()
             };
         };
-        let sender_url =
-            match sender.and_then(|sender| matrix_sdk::ruma::UserId::parse(sender).ok()) {
-                Some(sender) => room
+        let profile = sender.and_then(|_| crate::view::per_message_profile(content));
+        let profile_avatar = profile
+            .as_ref()
+            .and_then(|profile| profile.avatar_url.as_deref());
+        let sender_url = match (profile_avatar, payload_avatar, sender) {
+            (Some(url), _, _) => crate::media::mxc_only(url).map(ruma::OwnedMxcUri::from),
+            (None, Some(url), Some(_)) => crate::media::mxc_only(url).map(ruma::OwnedMxcUri::from),
+            (None, None, Some(sender)) => match ruma::UserId::parse(sender) {
+                Ok(sender) => room
                     .get_member_no_sync(&sender)
                     .await
                     .ok()
                     .flatten()
                     .and_then(|member| member.avatar_url().map(ToOwned::to_owned)),
-                None => None,
-            };
-        let room_url = if sender.is_none() || room.is_direct().await.unwrap_or(false) {
-            None
-        } else {
-            room.avatar_url()
+                Err(_) => None,
+            },
+            (None, _, None) => None,
+        };
+        let room_url = match sender {
+            Some(_) => crate::view::room_avatar_url(&room)
+                .await
+                .map(ruma::OwnedMxcUri::from),
+            None => None,
         };
         let own = match sender {
             Some(_) => room
@@ -292,6 +403,12 @@ impl PushSession {
                 .map(ToOwned::to_owned)
         });
         let own_url = own.and_then(|member| member.avatar_url().map(ToOwned::to_owned));
+        let room_name = match sender {
+            Some(_) => super::view::direct_name(&room)
+                .await
+                .or_else(|| room.cached_display_name().map(|name| name.to_string())),
+            None => None,
+        };
         let image = match content {
             Some(content) if crate::account_documents::shows_media_previews(&room).await => {
                 message_image(content)
@@ -300,8 +417,8 @@ impl PushSession {
         };
         let directory = self.store_dir.join(PUSH_MEDIA_DIRECTORY);
         prune_push_media(&directory).await;
-        let avatar = |url: Option<matrix_sdk::ruma::OwnedMxcUri>| {
-            let source = url.map(matrix_sdk::ruma::events::room::MediaSource::Plain);
+        let avatar = |url: Option<ruma::OwnedMxcUri>| {
+            let source = url.map(ruma::events::room::MediaSource::Plain);
             cached_push_media(
                 client,
                 &directory,
@@ -323,50 +440,49 @@ impl PushSession {
         PushMedia {
             sender_name,
             sender: sender.map(|(path, _)| path),
+            sender_profile: profile.and_then(|profile| profile.id.or(profile.display_name)),
             room: room.map(|(path, _)| path),
             image: image.map(|(path, mimetype)| PushImage { path, mimetype }),
             own_name,
             own_avatar: own_avatar.map(|(path, _)| path),
+            room_name,
         }
     }
 
-    /// Sends `text` to the room, then marks `event_id` read. Retrying with the same
-    /// `transaction_id` never sends it twice.
+    /// Sends `text` to the room, then marks `event_id` read, and returns the body that was
+    /// sent, which drops a profile shorthand. Retrying with the same `transaction_id` never
+    /// sends it twice.
     pub async fn reply(
         &self,
         text: &str,
         transaction_id: &str,
         event_id: &str,
         private_receipt: bool,
-    ) -> bool {
-        let Some(room) = self.host.client().get_room(&self.room_id) else {
-            return false;
-        };
-        let profile = match self
+    ) -> Option<String> {
+        let room = self.host.client().get_room(&self.room_id)?;
+        let (text, profile) = match self
             .host
-            .retry(|| crate::personas::notification_profile(self.host.client(), &self.room_id))
+            .retry(|| crate::personas::notification_reply(self.host.client(), &self.room_id, text))
             .await
         {
-            Ok(profile) => profile,
+            Ok(reply) => reply,
             Err(error) => {
                 tracing::warn!("notification reply profile unavailable: {error}");
-                return false;
+                return None;
             }
         };
         let content = crate::outgoing::message_content(
-            text.to_owned(),
+            text.clone(),
             None,
             crate::protocol::MessageKind::Text,
             Vec::new(),
             false,
         );
-        let Ok(mut content) = serde_json::to_value(content) else {
-            return false;
-        };
+        let mut content = serde_json::to_value(content).ok()?;
         if let Some(profile) = profile.as_ref() {
             crate::personas::stamp_profile(&mut content, profile);
         }
-        let transaction = matrix_sdk::ruma::OwnedTransactionId::from(transaction_id);
+        let transaction = ruma::OwnedTransactionId::from(transaction_id);
         let sent = self
             .host
             .retry(|| {
@@ -377,10 +493,10 @@ impl PushSession {
             .await;
         if let Err(error) = sent {
             tracing::warn!("notification reply not sent: {error}");
-            return false;
+            return None;
         }
         self.mark_read(event_id, private_receipt).await;
-        true
+        Some(text)
     }
 
     /// In the event's thread, or the main timeline, as the app's timelines would.
@@ -447,9 +563,9 @@ pub async fn cold_push_media(
     content: Option<&serde_json::Value>,
 ) -> PushMedia {
     match PushSession::cached(&cold_push_store_dir(data_dir), user_id, device_id, room_id).await {
-        Some(session) => session.media(sender, payload_name, content).await,
+        Some(session) => session.media(sender, payload_name, None, content).await,
         None => PushMedia {
-            sender_name: push_sender_name(sender, payload_name),
+            sender_name: push_sender_name(sender, payload_name, content),
             ..PushMedia::default()
         },
     }
@@ -457,31 +573,103 @@ pub async fn cold_push_media(
 
 #[cfg(test)]
 mod tests {
-    use matrix_sdk::ruma::room_id;
+    use matrix_sdk::ruma::api::client::sync::sync_events::msc4186::{Response, response};
+    use matrix_sdk::ruma::events::AnySyncTimelineEvent;
+    use matrix_sdk::ruma::serde::Raw;
+    use matrix_sdk::ruma::{RoomId, user_id};
+    use serde_json::json;
 
     use super::read_rooms_from_sync;
 
+    fn event(id: &str, sender: &str) -> Raw<AnySyncTimelineEvent> {
+        Raw::from_json_string(
+            json!({"type": "m.room.message", "event_id": id, "sender": sender,
+                "origin_server_ts": 1, "content": {"msgtype": "m.text", "body": "hi"}})
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn room(
+        response: &mut Response,
+        id: &str,
+        timeline: Vec<Raw<AnySyncTimelineEvent>>,
+        receipts: Option<serde_json::Value>,
+    ) {
+        let room_id = RoomId::parse(id).unwrap();
+        let mut room = response::Room::default();
+        room.timeline = timeline;
+        response.rooms.insert(room_id.clone(), room);
+        if let Some(receipts) = receipts {
+            response.extensions.receipts.rooms.insert(
+                room_id,
+                Raw::from_json_string(receipts.to_string()).unwrap(),
+            );
+        }
+    }
+
     #[test]
-    fn filtered_sync_response_identifies_read_rooms() {
-        let rooms = vec![
-            room_id!("!zero:example.org").to_owned(),
-            room_id!("!unread:example.org").to_owned(),
-            room_id!("!missing-count:example.org").to_owned(),
-            room_id!("!absent:example.org").to_owned(),
-        ];
-        let joined = [
-            (room_id!("!zero:example.org").to_owned(), Some(0)),
-            (room_id!("!unread:example.org").to_owned(), Some(2)),
-            (room_id!("!missing-count:example.org").to_owned(), None),
+    fn a_room_is_read_once_the_users_receipt_or_message_follows_everyone_elses() {
+        let me = user_id!("@me:example.org");
+        let bob = "@bob:example.org";
+        let mut response = Response::new("1".to_owned());
+        room(
+            &mut response,
+            "!read:example.org",
+            vec![event("$a", bob), event("$b", bob)],
+            Some(
+                json!({"type": "m.receipt", "content": {"$b": {"m.read": {"@me:example.org": {"ts": 1}}}}}),
+            ),
+        );
+        room(
+            &mut response,
+            "!private:example.org",
+            vec![event("$c", bob)],
+            Some(json!({"$c": {"m.read.private": {"@me:example.org": {"thread_id": "main"}}}})),
+        );
+        room(
+            &mut response,
+            "!replied:example.org",
+            vec![event("$d", bob), event("$e", me.as_str())],
+            None,
+        );
+        room(
+            &mut response,
+            "!unread:example.org",
+            vec![event("$f", bob), event("$g", bob)],
+            Some(json!({"$f": {"m.read": {"@me:example.org": {}}}})),
+        );
+        room(
+            &mut response,
+            "!threaded:example.org",
+            vec![event("$h", bob)],
+            Some(json!({"$h": {"m.read": {"@me:example.org": {"thread_id": "$root"}}}})),
+        );
+        room(
+            &mut response,
+            "!theirs:example.org",
+            vec![event("$i", bob)],
+            Some(json!({"$i": {"m.read": {"@bob:example.org": {}}}})),
+        );
+        room(&mut response, "!no-timeline:example.org", Vec::new(), None);
+        let rooms = [
+            "!read:example.org",
+            "!private:example.org",
+            "!replied:example.org",
+            "!unread:example.org",
+            "!threaded:example.org",
+            "!theirs:example.org",
+            "!no-timeline:example.org",
+            "!left:example.org",
         ]
-        .into_iter()
-        .collect();
+        .map(|id| RoomId::parse(id).unwrap());
+
         assert_eq!(
-            read_rooms_from_sync(&joined, &rooms),
+            read_rooms_from_sync(&response, me, &rooms),
             vec![
-                "!zero:example.org".to_owned(),
-                "!missing-count:example.org".to_owned(),
-                "!absent:example.org".to_owned(),
+                "!read:example.org".to_owned(),
+                "!private:example.org".to_owned(),
+                "!replied:example.org".to_owned(),
             ]
         );
     }

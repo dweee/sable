@@ -183,6 +183,7 @@ impl Core {
         &self,
         items: &[SidebarItemView],
     ) -> Result<(), RpcError> {
+        let _guard = self.account_data_lock.lock().await;
         set_sidebar(&self.client().await?, items)
             .await
             .or_failed(self, "set_space_sidebar")
@@ -451,7 +452,7 @@ mod server_tests {
 
         assert_eq!(
             sidebar(&client).await.expect("layout"),
-            [] as [sable_model::sidebar::SidebarItemView; 0]
+            Vec::<SidebarItemView>::new()
         );
     }
 

@@ -1,6 +1,5 @@
 {
   "nav": {
-    "exploreSpaces": "สำรวจพื้นที่ต่าง ๆ",
     "messageSearch": "ค้นหาข้อความ",
     "rooms": "ห้อง",
     "unspaced": "ห้องภายนอกพื้นที่",
@@ -8,8 +7,7 @@
     "editProfile": "แก้ไขโปรไฟล์",
     "settings": "การตั้งค่า",
     "newChat": "แชทใหม่",
-    "createRoomInSpace": "สร้างห้องในพื้นที่",
-    "joinWithAddress": "เข้าร่วมด้วยที่อยู่"
+    "createRoomInSpace": "สร้างห้องในพื้นที่"
   },
   "home": {
     "getSupport": "รับความช่วยเหลือ",
@@ -18,9 +16,7 @@
     "findCommunityTitle": "ค้นหาชุมชน",
     "findCommunityDescription": "เลือกดูห้องและพื้นที่สาธารณะเพื่อค้นหากลุ่มที่มีความสนใจตรงกัน",
     "startRoomTitle": "สร้างห้อง",
-    "startRoomDescription": "สร้างห้องหรือพื้นที่สำหรับกลุ่มเพื่อนหรือชุมชนของคุณเอง",
-    "joinConversationTitle": "เข้าร่วมห้องหรือส่งข้อความส่วนตัว",
-    "joinConversationDescription": "ระบุที่อยู่ของห้องหรือ ID ผู้ใช้ Matrix เพื่อเริ่มแชท"
+    "startRoomDescription": "สร้างห้องหรือพื้นที่สำหรับกลุ่มเพื่อนหรือชุมชนของคุณเอง"
   },
   "auth": {
     "welcome": "ยินดีต้อนรับสู่ {{appName}}",
@@ -144,12 +140,6 @@
     "directoryDescription": "เลือกดูห้องที่เผยแพร่ในสารบัญของเซิร์ฟเวอร์ หรือเข้าร่วมห้องโดยระบุที่อยู่",
     "directoryTotal_other": "{{count, number}} ห้อง",
     "leaveSpaceChildrenRoomsCount_other": "{{count, number}} ห้อง",
-    "directoryJoinByAddress": "เข้าร่วมด้วยที่อยู่",
-    "joinDescription": "ป้อนที่อยู่สาธารณะเพื่อเข้าร่วมห้องหรือพื้นที่",
-    "joinExamplesLabel": "รูปแบบของที่อยู่เป็นดังนี้:",
-    "joinAddressLabel": "ที่อยู่",
-    "joinAddressPlaceholder": "#room:server",
-    "joinInvalid": "นั่นดูไม่เหมือนที่อยู่ห้องหรือลิงก์ matrix.to เลย",
     "directorySearch": "ค้นหา"
   },
   "timeline": {
@@ -169,11 +159,11 @@
     "powerLevelMember": "สมาชิก",
     "markUnread": "ทำเครื่องหมายว่ายังไม่ได้อ่านจากตรงนี้",
     "memberGroup": {
-      "knock_retracted": "{{users}} ถอนคำขอเข้าห้อง",
-      "invitation_rejected": "{{users}} ปฏิเสธคำเชิญ",
-      "knocked": "{{users}} ขอเข้าห้อง",
-      "joined": "{{users}} เข้าร่วมห้อง",
-      "left": "{{users}} ออกจากห้อง"
+      "knock_retracted_other": "{{users}} ถอนคำขอเข้าห้อง",
+      "invitation_rejected_other": "{{users}} ปฏิเสธคำเชิญ",
+      "knocked_other": "{{users}} ขอเข้าห้อง",
+      "joined_other": "{{users}} เข้าร่วมห้อง",
+      "left_other": "{{users}} ออกจากห้อง"
     },
     "membership": {
       "invitation_rejected": "{{user}} ปฏิเสธคำเชิญ",
@@ -223,7 +213,6 @@
     "syncNotNow": "เอาไว้ก่อน",
     "recoveryDownloadFailed": "ไม่สามารถบันทึกคีย์นี้ได้ ให้คัดลอกหรือจดบันทึกไว้แทน",
     "resetAction": "รีเซ็ตตัวตนดิจิทัลของฉัน",
-    "stageDeviceLabel": "ยืนยันว่าเป็นคุณ",
     "skipBody": "หากยังไม่มีการยืนยัน แอปของผู้อื่นอาจไม่แชร์คีย์ข้อความกับอุปกรณ์นี้ และอาจซ่อนข้อความที่คุณส่งจากอุปกรณ์นี้ไว้",
     "resetWhen": "รีเซ็ตตัวตนดิจิทัลของคุณก็ต่อเมื่อคุณไม่สามารถเข้าถึงอุปกรณ์อื่นที่ได้รับการยืนยันแล้ว และไม่มีคีย์กู้คืนของคุณ",
     "resetPassword": "ป้อนรหัสผ่านของคุณเพื่อรีเซ็ตตัวตนดิจิทัลของคุณ",

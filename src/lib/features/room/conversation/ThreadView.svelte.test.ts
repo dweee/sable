@@ -65,6 +65,8 @@ function image(eventId: string, filename: string): TimelineItemView {
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    shared_by: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,
@@ -81,6 +83,7 @@ test.each([false, true])('thread quotes jump to messages (loaded=%s)', async (lo
     sender_mentioned: false,
     body: 'Quoted message',
     fallback: null,
+    emotes: [],
   };
   const startThread = vi.spyOn(RoomTimeline.prototype, 'startThread').mockImplementation(function (
     this: RoomTimeline

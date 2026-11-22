@@ -648,6 +648,7 @@ impl RoomIndex {
         query: &str,
         filter: &IndexFilter,
         terms: &FoldedTerms,
+        expand: bool,
     ) -> Vec<Ranked<'index>> {
         if query.is_empty() {
             return self
@@ -659,7 +660,7 @@ impl RoomIndex {
         }
 
         self.index
-            .query(query)
+            .query(query, expand)
             .into_iter()
             .filter_map(|(key, score)| {
                 let document = self.documents.get(&key)?;
@@ -1045,7 +1046,9 @@ impl MessageIndex {
                 (filter.rooms.is_empty() || filter.rooms.iter().any(|wanted| wanted == *room_id))
                     && !filter.not_rooms.iter().any(|denied| denied == *room_id)
             })
-            .flat_map(|(room_id, index)| index.ranked(room_id, query, filter, &terms))
+            .flat_map(|(room_id, index)| {
+                index.ranked(room_id, query, filter, &terms, expands(order))
+            })
             .collect();
 
         self.materialize(page_ranked(ranked, order, limit, offset))
@@ -1176,6 +1179,7 @@ impl MessageIndex {
             skip,
             take,
             context,
+            order,
         } = window;
         let Some(index) = self.rooms.get(room_id) else {
             return (Vec::new(), 0);
@@ -1184,7 +1188,7 @@ impl MessageIndex {
         if documents.is_empty() {
             return (Vec::new(), 0);
         }
-        let matched = rank_cold_documents(&documents, query, filter, terms);
+        let matched = rank_cold_documents(&documents, query, filter, terms, expands(order));
         let total = matched.len();
         let hits = matched
             .into_iter()
@@ -1272,7 +1276,7 @@ impl MessageIndex {
         &mut self,
         room_id: &OwnedRoomId,
         redacted: Vec<OwnedEventId>,
-        cache: &RoomEventCache,
+        cache: Option<&RoomEventCache>,
     ) {
         let index = self
             .rooms
@@ -1357,7 +1361,7 @@ impl MessageIndex {
 
             if is_redacted(&event) {
                 if !index.redacted.contains(event_id) {
-                    apply_redacted(index, event_id.to_owned(), cache).await;
+                    apply_redacted(index, event_id.to_owned(), Some(cache)).await;
                     fresh += 1;
                     since_yield += 1;
                 }
@@ -1431,7 +1435,7 @@ async fn apply_event(
         }
         AnySyncMessageLikeEvent::RoomRedaction(redaction) => {
             if let Some(target) = redacted_event_id(&redaction, rules) {
-                apply_redacted(index, target, cache).await;
+                apply_redacted(index, target, Some(cache)).await;
             }
         }
         _ => {}
@@ -1518,7 +1522,11 @@ async fn apply_room_message(
     index.upsert(document);
 }
 
-async fn apply_redacted(index: &mut RoomIndex, redacted: OwnedEventId, cache: &RoomEventCache) {
+async fn apply_redacted(
+    index: &mut RoomIndex,
+    redacted: OwnedEventId,
+    cache: Option<&RoomEventCache>,
+) {
     if !index.redacted.insert(redacted.clone()) {
         return;
     }
@@ -1526,7 +1534,9 @@ async fn apply_redacted(index: &mut RoomIndex, redacted: OwnedEventId, cache: &R
     index.dirty = true;
     index.revision = index.revision.wrapping_add(1);
 
-    if let Some(target) = index.edits.remove(&redacted) {
+    if let Some(target) = index.edits.remove(&redacted)
+        && let Some(cache) = cache
+    {
         if let Some(document) = latest_content(cache, &target, &index.redacted).await {
             let document = adopt_edit(document, index.document(&target), &index.redacted);
             let document = index.apply_pending(document);
@@ -1585,6 +1595,7 @@ fn rank_cold_documents(
     query: &str,
     filter: &IndexFilter,
     terms: &FoldedTerms,
+    expand: bool,
 ) -> Vec<(usize, f64)> {
     let mut matched: Vec<(usize, f64)> = if query.is_empty() {
         documents
@@ -1599,7 +1610,7 @@ fn rank_cold_documents(
             scratch.add_document(position, &document.body);
         }
         scratch
-            .query(query)
+            .query(query, expand)
             .into_iter()
             .filter(|(position, _)| {
                 documents
@@ -1714,6 +1725,7 @@ pub(super) struct ColdWindow {
     pub(super) skip: usize,
     pub(super) take: usize,
     pub(super) context: usize,
+    pub(super) order: SearchOrder,
 }
 
 impl ColdWindow {
@@ -1723,6 +1735,7 @@ impl ColdWindow {
             skip: 0,
             take: usize::MAX,
             context,
+            order: SearchOrder::Rank,
         }
     }
 }
@@ -1778,6 +1791,12 @@ pub(super) fn newest_chunks_within(
         wanted.entry(room).or_default().push(chunk);
     }
     wanted
+}
+
+/// Date orders have no score to sink a loose match, so only relevance takes
+/// prefixes and typos.
+const fn expands(order: SearchOrder) -> bool {
+    matches!(order, SearchOrder::Rank)
 }
 
 fn by_rank(left: &Ranked<'_>, right: &Ranked<'_>) -> std::cmp::Ordering {
@@ -1967,6 +1986,71 @@ mod tests {
     }
 
     #[test]
+    fn test_date_orders_match_whole_words_only() {
+        let (mut index, room) = filtered_index();
+        let room_index = index.rooms.get_mut(&room).expect("the room");
+        for (seed, body) in [
+            ("mute", "please mute it"),
+            ("muted", "so I muted it"),
+            ("mutex", "a tokio mutex"),
+        ] {
+            room_index.upsert(document(
+                seed,
+                body,
+                "@kris:localhost",
+                4_000,
+                None,
+                Vec::new(),
+            ));
+        }
+        let search = |order| {
+            let mut hits: Vec<String> = index
+                .search("mute", &super::IndexFilter::default(), order, 20, 0)
+                .into_iter()
+                .map(|hit| hit.event_id.to_string())
+                .collect();
+            hits.sort();
+            hits
+        };
+
+        assert_eq!(
+            search(super::SearchOrder::Rank),
+            ["$mute", "$muted", "$mutex"]
+        );
+        assert_eq!(search(super::SearchOrder::Recent), ["$mute", "$muted"]);
+        assert_eq!(search(super::SearchOrder::Oldest), ["$mute", "$muted"]);
+    }
+
+    #[test]
+    fn test_a_cold_chunk_matches_whole_words_only_unless_expanded() {
+        let documents = [
+            document(
+                "mute",
+                "please mute it",
+                "@kris:localhost",
+                1,
+                None,
+                Vec::new(),
+            ),
+            document(
+                "mutex",
+                "a tokio mutex",
+                "@kris:localhost",
+                2,
+                None,
+                Vec::new(),
+            ),
+        ];
+        let filter = super::IndexFilter::default();
+        let terms = super::FoldedTerms::of(&filter, std::collections::HashSet::new());
+        let matched =
+            |expand| super::rank_cold_documents(&documents, "mute", &filter, &terms, expand).len();
+
+        assert_eq!(matched(true), 2);
+        assert_eq!(matched(false), 1);
+    }
+
+    #[test]
     fn test_an_empty_query_with_filters_still_lists_messages() {
         let (index, _room) = filtered_index();
 
@@ -1985,7 +2069,7 @@ mod tests {
     #[test]
     fn test_a_room_filter_excludes_other_rooms() {
         let (mut index, room) = filtered_index();
-        let other = matrix_sdk::ruma::RoomId::parse("!other:localhost").expect("room id");
+        let other = ruma::RoomId::parse("!other:localhost").expect("room id");
         index
             .rooms
             .entry(other)
@@ -2149,7 +2233,7 @@ mod tests {
                 pattern: Some("(unclosed".to_owned()),
                 ..super::IndexFilter::default()
             }),
-            [] as [String; 0]
+            Vec::<String>::new()
         );
     }
 
@@ -2191,7 +2275,7 @@ mod tests {
     #[test]
     fn test_a_denied_room_is_skipped_even_with_no_room_filter() {
         let (mut index, room) = filtered_index();
-        let other = matrix_sdk::ruma::RoomId::parse("!other:localhost").expect("room id");
+        let other = ruma::RoomId::parse("!other:localhost").expect("room id");
         index
             .rooms
             .entry(other.clone())
@@ -2221,7 +2305,7 @@ mod tests {
 
     #[test]
     fn test_attachment_pages_walk_every_picture_once_across_a_timestamp_tie() {
-        let room = matrix_sdk::ruma::RoomId::parse("!pictures:localhost").expect("room id");
+        let room = ruma::RoomId::parse("!pictures:localhost").expect("room id");
         let mut index = MessageIndex::new();
         let room_index = index
             .rooms
@@ -2247,7 +2331,7 @@ mod tests {
 
     #[test]
     fn test_attachment_pages_reach_into_an_unloaded_chunk() {
-        let room = matrix_sdk::ruma::RoomId::parse("!gallery:localhost").expect("room id");
+        let room = ruma::RoomId::parse("!gallery:localhost").expect("room id");
         let mut room_index = super::RoomIndex::new();
         for seed in 0..2_500_u64 {
             room_index.upsert(picture(&format!("p{seed}"), "@kris:localhost", seed));
@@ -2283,7 +2367,7 @@ mod tests {
 
     #[test]
     fn test_attachment_pages_skip_ignored_senders() {
-        let room = matrix_sdk::ruma::RoomId::parse("!pictures:localhost").expect("room id");
+        let room = ruma::RoomId::parse("!pictures:localhost").expect("room id");
         let mut index = MessageIndex::new();
         let room_index = index
             .rooms
@@ -2305,7 +2389,7 @@ mod tests {
 
     #[test]
     fn test_the_memory_budget_unloads_the_oldest_chunk_and_keeps_it_on_disk() {
-        let room = matrix_sdk::ruma::RoomId::parse("!budget:localhost").expect("room id");
+        let room = ruma::RoomId::parse("!budget:localhost").expect("room id");
         let room_index = budgeted_room(5_000, 0);
         let full = room_index.bytes;
         let mut index = MessageIndex::with_budgets(full / 2, u64::MAX);
@@ -2321,8 +2405,8 @@ mod tests {
 
     #[test]
     fn test_the_memory_budget_spans_rooms_rather_than_each_room_separately() {
-        let busy = matrix_sdk::ruma::RoomId::parse("!busy:localhost").expect("room id");
-        let quiet = matrix_sdk::ruma::RoomId::parse("!quiet:localhost").expect("room id");
+        let busy = ruma::RoomId::parse("!busy:localhost").expect("room id");
+        let quiet = ruma::RoomId::parse("!quiet:localhost").expect("room id");
         let busy_index = budgeted_room(2_500, 1_000_000);
         let quiet_index = budgeted_room(2_500, 0);
         let budget = busy_index.bytes + quiet_index.bytes / 2;
@@ -2338,7 +2422,7 @@ mod tests {
 
     #[test]
     fn test_a_dirty_chunk_is_never_unloaded() {
-        let room = matrix_sdk::ruma::RoomId::parse("!dirty:localhost").expect("room id");
+        let room = ruma::RoomId::parse("!dirty:localhost").expect("room id");
         let mut room_index = super::RoomIndex::new();
         seed_room(&mut room_index, 3_000);
         let mut index = MessageIndex::with_budgets(1, u64::MAX);
@@ -2351,7 +2435,7 @@ mod tests {
 
     #[test]
     fn test_four_gib_disk_budget_and_totals() {
-        let room = matrix_sdk::ruma::RoomId::parse("!large:localhost").expect("room id");
+        let room = ruma::RoomId::parse("!large:localhost").expect("room id");
         let mut room_index = super::RoomIndex::new();
         // Each chunk fits in 32 bits; the total must also work on wasm32.
         room_index.chunk_meta.insert(0, (2_147_483_648, 1));
@@ -2368,7 +2452,7 @@ mod tests {
 
     #[test]
     fn test_the_disk_budget_reports_the_index_full() {
-        let room = matrix_sdk::ruma::RoomId::parse("!full:localhost").expect("room id");
+        let room = ruma::RoomId::parse("!full:localhost").expect("room id");
         let mut room_index = budgeted_room(10, 0);
         room_index
             .chunk_meta

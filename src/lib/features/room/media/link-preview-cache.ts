@@ -1,10 +1,13 @@
 import QuickLRU from 'quick-lru';
+import { SvelteMap } from 'svelte/reactivity';
 
-import { CoreError } from '#src/transport';
+import { isCoreError } from '#src/transport';
 
 import { runtimeConfig } from '#lib/config/runtime-config.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 import type { UrlPreviewView, Rpc } from '#src/generated/protocol';
+
+export const shownLinkPreviews = new SvelteMap<string, UrlPreviewView>();
 
 const previews = new QuickLRU<string, Promise<UrlPreviewView | null>>({ maxSize: 256 });
 let homeserverPreviews = true;
@@ -20,19 +23,21 @@ export function loadUrlPreview(
   url: string,
   client: boolean,
   service: string | null = null,
-  klipyApiKey: string | null = null
+  tunnel = false
 ): Promise<UrlPreviewView | null> {
   if (!client && !homeserverPreviews) return Promise.resolve(null);
 
-  const key = client ? `client:${service ?? ''}:${url}` : `homeserver:${url}`;
+  const key = client
+    ? `${tunnel ? 'tunnel' : 'client'}:${service ?? ''}:${url}`
+    : `homeserver:${url}`;
   const cached = previews.get(key);
   if (cached) return cached;
 
   const params = client
-    ? { url, client, service, klipy_api_key: klipyApiKey }
+    ? { url, client, service, ...(tunnel ? { tunnel } : {}) }
     : { url, service: null };
   const request = messages.urlPreview(params).catch((error: unknown) => {
-    if (!client && error instanceof CoreError && error.detail.code === 'unsupported') {
+    if (!client && isCoreError(error, 'unsupported')) {
       homeserverPreviews = false;
     }
     console.warn('[sable link preview] unavailable', url, error);
@@ -75,15 +80,35 @@ export function previewSources(encrypted: boolean | null): PreviewSources {
   };
 }
 
+/** Only a public room that is not encrypted lets the preview service see the whole link. */
+export function usesTunnel(encrypted: boolean | null, publicRoom: boolean): boolean {
+  return encrypted !== false || !publicRoom;
+}
+
 export async function resolveUrlPreview(
   messages: Pick<Rpc['messages'], 'urlPreview'>,
   url: string,
-  sources: PreviewSources
+  sources: PreviewSources,
+  tunnel = false
 ): Promise<UrlPreviewView | null> {
   const config = sources.client ? await runtimeConfig() : null;
   const fromClient = config
-    ? await loadUrlPreview(messages, url, true, config.embeds.serviceUrl, config.gifs.klipyApiKey)
+    ? await loadUrlPreview(messages, url, true, config.embeds.serviceUrl, tunnel)
     : null;
   if (fromClient !== null || !sources.server || !homeserverCanPreview(url)) return fromClient;
   return loadUrlPreview(messages, url, false);
+}
+
+export async function scrapedPostVideo(
+  messages: Pick<Rpc['messages'], 'urlPreview'>,
+  url: string,
+  quote: boolean,
+  index: number,
+  tunnel: boolean
+): Promise<string | null> {
+  const config = await runtimeConfig();
+  const preview = await loadUrlPreview(messages, url, true, config.embeds.serviceUrl, tunnel);
+  const post = quote ? preview?.post?.quote : preview?.post;
+  const videos = post?.media.filter((media) => media.kind !== 'image') ?? [];
+  return videos[index]?.source ?? null;
 }

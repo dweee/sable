@@ -9,6 +9,7 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { pickFiles, saveBytes } from '#lib/platform/files.js';
+  import { confirmSaved } from '#lib/ui/download.js';
   import { importPersonaAvatar } from '#lib/platform/persona-avatar.js';
   import { i18n } from '#lib/i18n.js';
   import { backupFileName } from '#lib/personas/backup.js';
@@ -31,6 +32,7 @@
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import Switch from '#lib/ui/primitives/Switch.svelte';
   import '#lib/ui/primitives/settings-row.css';
@@ -205,9 +207,9 @@
     error = null;
     try {
       const bytes = new TextEncoder().encode(await core.rpc.personas.backup());
-      if ((await saveBytes(bytes, backupFileName(), 'application/json')) === 'failed') {
-        error = i18n.t('personas.backupFailed');
-      }
+      const outcome = await saveBytes(bytes, backupFileName(), 'application/json');
+      if (outcome === 'failed') error = i18n.t('personas.backupFailed');
+      if (outcome === 'saved') confirmSaved();
     } catch (cause) {
       console.warn('[sable personas] the backup failed', cause);
       error = i18n.t('personas.backupFailed');
@@ -264,19 +266,13 @@
   >
     <div class="settings-form">
       {#if personas.loading && personas.personas.length === 0}
-        <p class="persona-empty"><Spinner small label={i18n.t('a11y.loading')} /></p>
+        <p class="empty-text"><Spinner small label={i18n.t('a11y.loading')} /></p>
       {:else if personas.personas.length === 0}
-        <p class="persona-empty">{i18n.t('personas.empty')}</p>
+        <p class="empty-text">{i18n.t('personas.empty')}</p>
       {:else}
-        <TextInput
-          bind:value={query}
-          type="search"
-          autocomplete="off"
-          placeholder={i18n.t('personas.search')}
-          aria-label={i18n.t('personas.search')}
-        />
+        <SearchField bind:value={query} label={i18n.t('personas.search')} />
         {#if shownPersonas.length === 0}
-          <p class="persona-empty">{i18n.t('personas.noMatches')}</p>
+          <p class="empty-text">{i18n.t('personas.noMatches')}</p>
         {:else}
           <ul class="persona-list">
             {#each shownPersonas as persona (persona.id)}
@@ -554,11 +550,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .persona-empty {
-    color: var(--surface-var-on-container);
-    margin: 0;
   }
 
   .persona-actions {

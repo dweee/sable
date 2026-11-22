@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { i18n } from '#lib/i18n.js';
-  import BackIcon from 'phosphor-svelte/lib/CaretLeftIcon';
   import BugIcon from 'phosphor-svelte/lib/BugIcon';
   import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
   import ChatCircleIcon from 'phosphor-svelte/lib/ChatCircleIcon';
@@ -22,6 +21,7 @@
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
 
   import { memberIdentity } from './members/members.js';
+  import RoomBackButton from './RoomBackButton.svelte';
 
   const MAX_FACES = 3;
 
@@ -31,6 +31,7 @@
     roomAvatar: string | null;
     topic?: string | null;
     encrypted?: boolean | null;
+    publicRoom?: boolean;
     presence?: PresenceView | null;
     isVoice: boolean;
     callParticipants: readonly string[];
@@ -42,6 +43,7 @@
     chatOpen?: boolean;
     chatBeside?: boolean;
     onBack: () => void;
+    backUnread?: number;
     onMembers: () => void;
     onSearch: () => void;
     onTopic?: (() => void) | null;
@@ -57,6 +59,7 @@
     roomAvatar,
     topic = null,
     encrypted = null,
+    publicRoom = false,
     presence = null,
     isVoice,
     callParticipants,
@@ -68,6 +71,7 @@
     chatOpen = false,
     chatBeside = false,
     onBack,
+    backUnread = 0,
     onMembers,
     onSearch,
     onTopic = null,
@@ -87,7 +91,7 @@
       : i18n.t('common.voiceRoom')
   );
   let encryptionLabel = $derived(
-    encrypted === null
+    encrypted === null || (!encrypted && publicRoom)
       ? null
       : encrypted
         ? i18n.t('room.encryptionOn')
@@ -98,9 +102,7 @@
 
 <PanelHeader class="room-header" suffixToolbarLabel={i18n.t('room.actionsLabel')}>
   {#snippet prefix()}
-    <PanelHeaderButton class="back-button" label={i18n.t('timeline.back')} onclick={onBack}>
-      <BackIcon />
-    </PanelHeaderButton>
+    <RoomBackButton {onBack} unread={backUnread} />
 
     <span class="room-avatar">
       <Avatar id={roomId} src={roomAvatar} openable={true} name={roomName} size="small" />
@@ -110,14 +112,14 @@
   {#snippet main()}
     <div class={['room-identity', { 'with-topic': topicShown }]}>
       <div class="room-title">
-        <h1 tabindex="-1" data-room-heading>{roomName}</h1>
+        <h1 tabindex="-1" data-room-heading><bdi>{roomName}</bdi></h1>
         {#if presence && presence !== 'offline'}
           <PresenceDot {presence} label={i18n.t(`presence.${presence}`)} size="medium" />
         {/if}
-        {#if encryptionLabel !== null}
+        {#if preferences.showEncryptionStatusIcon && encryptionLabel !== null}
           <Tooltip label={encryptionLabel}>
             {#snippet trigger({ props })}
-              <span {...props} class="encryption-state" role="img" aria-label={encryptionLabel}>
+              <span {...props} class={['encryption-state', { encrypted }]} role="img" aria-label={encryptionLabel}>
                 {#if encrypted}<LockSimpleIcon />{:else}<LockSimpleOpenIcon />{/if}
               </span>
             {/snippet}
@@ -125,7 +127,7 @@
         {/if}
       </div>
       {#if topicShown}
-        <button class="room-topic" type="button" onclick={onTopic}>{topic}</button>
+        <button class="room-topic" type="button" onclick={onTopic}><bdi>{topic}</bdi></button>
       {/if}
     </div>
     {#if isVoice || inVoice.length > 0}
@@ -264,7 +266,7 @@
     margin: 0;
     overflow: hidden;
     padding: 0;
-    text-align: left;
+    text-align: start;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -309,10 +311,13 @@
   }
 
   .encryption-state {
-    color: var(--surface-var-on-container);
+    color: color-mix(in srgb, var(--crit-main) 55%, transparent);
     display: flex;
-    opacity: var(--opacity-placeholder);
     padding: var(--space-100);
+  }
+
+  .encryption-state.encrypted {
+    color: color-mix(in srgb, var(--success-main) 55%, transparent);
   }
 
   .encryption-state :global(svg) {
@@ -327,7 +332,7 @@
   }
 
   .voice-faces :global(.avatar-root.voice-face:not(:first-child)) {
-    margin-left: calc(-1 * var(--space-150));
+    margin-inline-start: calc(-1 * var(--space-150));
   }
 
   .voice-count {

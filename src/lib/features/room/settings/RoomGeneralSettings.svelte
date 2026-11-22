@@ -18,13 +18,15 @@
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
+  import SaveBar from '#lib/ui/primitives/SaveBar.svelte';
   import FormField from '#lib/ui/primitives/FormField.svelte';
   import OptionCards from '#lib/ui/primitives/OptionCards.svelte';
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
   import TextArea from '#lib/ui/primitives/TextArea.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
-  import { uprightJpeg } from '#lib/ui/upright-jpeg.js';
+  import { requestCrop } from '#lib/ui/image-crop/crop-request.svelte.js';
+  import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
 
   import '#lib/ui/primitives/settings-row.css';
 
@@ -183,11 +185,12 @@
     event.currentTarget.value = '';
     const target = roomId;
     if (!file || !target || !canEditAvatar) return;
+    const cropped = await requestCrop(file, 'avatar');
+    if (!cropped) return;
 
     await run(async () => {
-      const upright = await uprightJpeg(file);
-      const bytes = new Uint8Array(await upright.arrayBuffer());
-      await core.uploadRoomAvatar(target, upright.type || 'image/*', bytes);
+      const { mime, bytes } = await uprightImageBytes(cropped);
+      await core.uploadRoomAvatar(target, mime, bytes);
     });
   }
 
@@ -221,10 +224,12 @@
     event.currentTarget.value = '';
     const target = roomId;
     if (!file || !target || !canEditBanner) return;
+    const cropped = await requestCrop(file, 'banner');
+    if (!cropped) return;
 
     await run(async () => {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const uri = await core.media.uploadMedia(file.type || 'image/*', bytes);
+      const bytes = new Uint8Array(await cropped.arrayBuffer());
+      const uri = await core.media.uploadMedia(cropped.type || 'image/*', bytes);
       await setRoomBanner(core, target, uri);
     });
   }
@@ -278,7 +283,7 @@
         <input
           bind:this={avatarInput}
           use:nativeFilePicker
-          class="avatar-input"
+          class="screen-reader-only"
           type="file"
           accept="image/*"
           tabindex="-1"
@@ -304,7 +309,7 @@
         <input
           bind:this={bannerInput}
           use:nativeFilePicker
-          class="avatar-input"
+          class="screen-reader-only"
           type="file"
           accept="image/*"
           tabindex="-1"
@@ -434,23 +439,7 @@
   <RoomUpgradeSettings {room} {levels} {ownPowerLevel} {onClose} />
 
   {#if canEditGeneral || canEditAccess}
-    <div class={['save-bar', { pending: dirty }]}>
-      {#if failed}
-        <p class="save-status error" role="alert">{i18n.t('room.settingsFailed')}</p>
-      {:else if dirty}
-        <p class="save-status" role="status">{i18n.t('common.unsavedChangesNotice')}</p>
-      {:else if saved}
-        <p class="save-status" role="status">{i18n.t('room.settingsSaved')}</p>
-      {/if}
-      {#if dirty}
-        <Button variant="ghost" disabled={saving} onclick={resetDraft}>
-          {i18n.t('common.reset')}
-        </Button>
-      {/if}
-      <Button variant="primary" disabled={!dirty || saving} loading={saving} onclick={save}>
-        {i18n.t('common.save')}
-      </Button>
-    </div>
+    <SaveBar {dirty} {saving} {saved} {failed} onReset={resetDraft} onSave={() => void save()} />
   {/if}
 </div>
 
@@ -473,48 +462,5 @@
     max-width: none;
     object-fit: cover;
     overflow: hidden;
-  }
-
-  .avatar-input {
-    height: 0;
-    opacity: 0;
-    position: absolute;
-    width: 0;
-  }
-
-  .save-bar {
-    align-items: center;
-    border: var(--border-width) solid transparent;
-    border-radius: var(--radius);
-    display: flex;
-    gap: var(--space-300);
-    justify-content: flex-end;
-    padding: var(--space-200) var(--space-300);
-  }
-
-  .save-bar.pending {
-    background: var(--bg-container);
-    border-color: var(--bg-container-line);
-    bottom: var(--space-300);
-    box-shadow: var(--shadow-e200);
-    color: var(--bg-on-container);
-    position: sticky;
-    z-index: 1;
-  }
-
-  .save-status {
-    color: var(--surface-var-on-container);
-    font-size: var(--font-size-small);
-    margin: 0;
-    margin-right: auto;
-  }
-
-  .save-bar.pending .save-status:not(.error) {
-    color: var(--bg-on-container);
-    font-weight: var(--font-weight-medium);
-  }
-
-  .save-status.error {
-    color: var(--crit-main);
   }
 </style>

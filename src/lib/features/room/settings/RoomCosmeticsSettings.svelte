@@ -16,7 +16,6 @@
   import ColorSetting from '#lib/ui/ColorSetting.svelte';
   import { i18n } from '#lib/i18n.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { joinedSpaceRooms } from '#lib/rooms/spaces.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -24,7 +23,8 @@
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
   import Switch from '#lib/ui/primitives/Switch.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
-  import { uprightJpeg } from '#lib/ui/upright-jpeg.js';
+  import { requestCrop } from '#lib/ui/image-crop/crop-request.svelte.js';
+  import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
 
   import { senderDisplayColors } from '../members/members';
   import SenderName from '../members/SenderName.svelte';
@@ -72,7 +72,7 @@
   let canSetPronouns = $derived(
     canSendState(effectiveLevels, ownLevel, COSMETIC_EVENT_TYPES.pronoun)
   );
-  let applyTargets = $derived(joinedSpaceRooms(room, (id) => roomList.byId(id)));
+  let applyTargets = $derived(room ? (roomList.section(room.room_id)?.descendants ?? []) : []);
   let applyDescription = $derived.by(() => {
     if (saving === 'apply' && applied)
       return i18n.t('room.cosmeticsApplying', {
@@ -187,14 +187,14 @@
     });
   }
 
-  function uploadAvatar(event: Event & { currentTarget: HTMLInputElement }): void {
+  async function uploadAvatar(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
-    if (!file) return;
+    const cropped = file && (await requestCrop(file, 'avatar'));
+    if (!cropped) return;
     void save('avatar', async (target) => {
-      const upright = await uprightJpeg(file);
-      const bytes = new Uint8Array(await upright.arrayBuffer());
-      const uri = await core.media.uploadMedia(upright.type || 'image/*', bytes);
+      const { mime, bytes } = await uprightImageBytes(cropped);
+      const uri = await core.media.uploadMedia(mime, bytes);
       await writeMember(target, { avatar_url: field(uri) });
       avatar = uri;
     });
@@ -314,7 +314,7 @@
         <input
           bind:this={avatarInput}
           use:nativeFilePicker
-          class="avatar-input"
+          class="screen-reader-only"
           type="file"
           accept="image/*"
           tabindex="-1"
@@ -456,13 +456,6 @@
     color: var(--surface-on-container);
     margin-bottom: var(--space-300);
     padding: var(--space-300) var(--space-400);
-  }
-
-  .avatar-input {
-    height: 0;
-    opacity: 0;
-    position: absolute;
-    width: 0;
   }
 
   .inline-field {

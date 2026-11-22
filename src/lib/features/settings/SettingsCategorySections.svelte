@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
@@ -78,7 +79,9 @@
       .then((flags) => {
         if (!stale) serverFeatures = flags;
       })
-      .catch(() => {});
+      .catch((error: unknown) => {
+        console.warn('[sable settings] server features unavailable', error);
+      });
     return () => {
       stale = true;
     };
@@ -178,7 +181,7 @@
                   const typed = Number(event.currentTarget.value) / 100;
                   if (event.currentTarget.value !== '' && Number.isFinite(typed)) {
                     const { min, max } = PREFERENCE_RANGES[key];
-                    const next = Math.min(max, Math.max(min, typed));
+                    const next = clamp(typed, min, max);
                     setPreference(key, next);
                     setting.onChange?.(next);
                   }

@@ -9,6 +9,7 @@
   import { setPageState } from '#lib/platform/page-state.js';
   import { page } from '$app/state';
 
+  import { countNotificationsElsewhere } from '#lib/features/inbox/inbox.js';
   import { voiceChat } from '#lib/features/room/voice-chat.svelte.js';
 
   import { useCoreClient } from '#lib/core/context.js';
@@ -21,9 +22,14 @@
   import { memberName } from './members/members.js';
   import { provideRoomMemberNames } from './members/room-member-names.js';
   import { notifiedRelation } from './messages/notified-relation.js';
-  import { PinnedEvents, providePinnedEvents } from './timeline/pinned-events.svelte.js';
+  import {
+    latestPinChange,
+    PinnedEvents,
+    providePinnedEvents,
+  } from './timeline/pinned-events.svelte.js';
   import { useBookmarks } from '#lib/rooms/bookmarks.svelte.js';
-  import ConversationComposer from './conversation/ConversationComposer.svelte';
+  import type ConversationComposer from './conversation/ConversationComposer.svelte';
+  import RoomComposerArea from './RoomComposerArea.svelte';
   import InlineEdit from './conversation/InlineEdit.svelte';
   import { Conversation } from './conversation/conversation.svelte.js';
   import { donateSentMessage } from '#lib/features/share/donate-sent-message.js';
@@ -33,18 +39,17 @@
   import { afterOverlayPops, holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
   import { matrixLinkPath, copyRoomLink, roomSectionPath } from '#lib/rooms/permalink.js';
   import { backToRoomList, searchInRoom, trackRoomEntry } from './room-navigation.js';
+  import { isPublicRoom } from '#lib/rooms/public-room.js';
   import { findRoomByPathId, useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { RoomMemberLoader } from '#lib/rooms/room-members.svelte.js';
   import { provideRoomCosmetics, RoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { activeRoomTimeline } from '#lib/rooms/timeline.svelte.js';
-  import ScheduledMessages from '#lib/features/composer/ScheduledMessages.svelte';
   import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
   import { composerClearance } from '#lib/ui/composer-clearance.svelte.js';
   import { PanelWidth } from '#lib/ui/panel-width.svelte.js';
   import { providePanelStage } from '#lib/ui/motion.js';
-  import { toasts } from '#lib/ui/toasts.svelte.js';
 
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import VoiceLobby from '#lib/features/call/VoiceLobby.svelte';
@@ -60,20 +65,26 @@
   import { openSettingsOver } from '#lib/features/settings/settings-navigation.js';
   import RoomHeaderMenu from './RoomHeaderMenu.svelte';
   import { canSendState } from './settings/permission-groups';
+  import { WATCHED_LISTS_EVENT } from '#lib/rooms/meowlnir-config.js';
+  import { discoverMeowlnirRooms, noteRoomOpened } from '#lib/rooms/meowlnir-registry.svelte.js';
   import RoomPinMenu from './RoomPinMenu.svelte';
   import RoomPredecessorNotice from './RoomPredecessorNotice.svelte';
-  import RoomPresencePrompt from './RoomPresencePrompt.svelte';
-  import RoomTombstoneBanner from './RoomTombstoneBanner.svelte';
+  import RoomRulesDialog from './RoomRulesDialog.svelte';
+  import { RoomRules, provideRoomRulesOpener } from './room-rules.svelte.js';
   import RoomReadReceipts from './timeline/RoomReadReceipts.svelte';
   import TimelineList from './timeline/TimelineList.svelte';
+  import type { TimelineCallbacks } from './timeline/timeline-row.svelte.js';
   import { tagForLevel } from './settings/power-level-tags.js';
   import { memberListChanges } from './settings/member-list.svelte.js';
   import { provideSenderRoles, type SenderRole } from './members/sender-roles.js';
   import { powerTag } from './members/power-tags';
   import { splitVia } from '#lib/rooms/join-address.js';
   import type { MatrixLink } from '#lib/rooms/matrix-link.js';
-  import { eventBefore } from './timeline/timeline-format';
   import { RoomSession } from './room-session.svelte.js';
+  import { RoomPins, provideRoomPins } from './room-pins.svelte.js';
+  import { useEventItems } from './messages/event-items.svelte.js';
+  import { RoomReadActions } from './room-read-actions.svelte.js';
+  import { RoomUnreadMentions } from './room-unread-mentions.svelte.js';
   import { MemberProfile } from './members/member-profile.svelte.js';
   import { RoomPanels, useOpenRoomSearch } from './room-panels.svelte.js';
   import { TombstoneJoin } from './room-tombstone-join.svelte.js';
@@ -127,8 +138,10 @@
     personas,
     timeline,
     roomId: () => resolvedRoomId,
-    spaceIds: (id) => personaSpaces(roomList.rooms, id, page.params.spaceId).order,
+    spaceIds: (id) => personaSpaces(roomList, id, page.params.spaceId).order,
     encrypted: () => resolvedRoom?.encrypted ?? null,
+    publicRoom: () => resolvedRoom?.join_rule === 'public',
+    canRedactOwn: () => roomSession.permissions?.can_redact_own ?? true,
     beforeSend: () => timelineList?.resumeLive() ?? resumeLive(),
     afterSend: (id) => donateSentMessage(core, roomList.byId(id)),
   });
@@ -142,19 +155,10 @@
     void roomId;
     return eventId === null;
   });
-  let timelineFollowingLive = $state<boolean>(false);
 
   const callSupport = new RoomCallSupport(core, () => resolvedRoomId);
 
-  let pinRevision = $derived(
-    timeline.items.reduce(
-      (count, item) =>
-        item.content.kind === 'state_event' && item.content.change?.kind === 'pinned_events'
-          ? count + 1
-          : count,
-      0
-    )
-  );
+  let pinRevision = $derived(latestPinChange(timeline.items));
 
   const pinnedEvents = new PinnedEvents(core.rpc.timeline);
   const roomSession = new RoomSession(core.rpc, pinnedEvents);
@@ -170,9 +174,17 @@
   );
 
   $effect(() => {
-    if (pinRevision === 0) return;
+    if (pinRevision === null) return;
     const target = resolvedRoomId;
     if (target) void pinnedEvents.load(target);
+  });
+
+  const roomPins = new RoomPins(core.rpc.timeline, useEventItems());
+  provideRoomPins(roomPins);
+  $effect(() => {
+    void pinRevision;
+    const target = resolvedRoomId;
+    if (target) void roomPins.refresh(target);
   });
 
   const bookmarks = useBookmarks();
@@ -292,9 +304,14 @@
     void activeTimeline.stop(timelineOwner);
   });
 
+  const rules = new RoomRules(core.rpc);
+  provideRoomRulesOpener(() => {
+    if (rules.view) rules.open = true;
+  });
   let callParticipants = $derived(resolvedRoom?.call_participants ?? []);
   let callable = $derived(
     !call.active &&
+      !rules.blocking &&
       callSupport.current !== null &&
       callSupport.current.can_join &&
       (callSupport.current.has_focus || callParticipants.length > 0)
@@ -309,6 +326,20 @@
       })
   );
 
+  let composerMounted = $state(false);
+  $effect(() => {
+    if (composerMounted) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const frame = requestAnimationFrame(() => {
+      timer = setTimeout(() => {
+        composerMounted = true;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  });
   let resolvedPermalink = $derived(
     permalinkTarget?.roomId === resolvedRoomId && permalinkTarget.eventId === eventId
       ? permalinkTarget
@@ -335,6 +366,28 @@
 
   const abbreviations = new RoomAbbreviations(core.rpc);
   provideRoomAbbreviations(abbreviations);
+
+  let canPost = $derived(!rules.blocking && (roomSession.permissions?.can_post ?? true));
+  let canReact = $derived(!rules.blocking && (roomSession.permissions?.can_react ?? true));
+  let rulesSourceName = $derived.by(() => {
+    const source = rules.shown?.source_room_id;
+    if (!source || source === resolvedRoomId) return null;
+    return roomList.byId(source)?.name ?? source;
+  });
+  let online = $derived(core.sync?.state === 'live');
+
+  $effect(() => {
+    const target = resolvedRoomId;
+    if (!target) return;
+    void rules.load(target);
+    return core.subscribeEvents((event) => {
+      if (event.type === 'room_rules_changed') void rules.load(target);
+    });
+  });
+
+  $effect(() => {
+    if (online) rules.retry();
+  });
   const mediaPreviews = new RoomMediaPreviews(() => resolvedRoom?.join_rule ?? null);
   provideRoomMediaPreviews(mediaPreviews);
   $effect(() => {
@@ -370,7 +423,7 @@
     void cosmetics.load(resolvedRoomId, cosmeticsSpaceId);
   });
 
-  let ancestorSpaceKey = $derived(ancestorSpaceIds(roomList.rooms, resolvedRoomId).join(','));
+  let ancestorSpaceKey = $derived(ancestorSpaceIds(roomList.roomSpaces(resolvedRoomId)).join(','));
 
   $effect(() => {
     void abbreviationChanges.version;
@@ -382,11 +435,13 @@
       .filter((room) => room.state === 'joined' && room.room_kind !== 'space')
       .reduce((total, room) => total + roomList.notificationsFor(room).highlight, 0)
   );
+  let backUnread = $derived(
+    countNotificationsElsewhere(roomList.rooms, resolvedRoomId, roomList.badgeUnreadFor)
+  );
   let pageTitle = $derived(mentionCount > 0 ? `(${mentionCount}) ${roomName}` : roomName);
   const appLayout = new AppLayout();
   let phone = $derived(!appLayout.current);
   let pinsOpen = $state(false);
-  let pinsUnread = $state(0);
   let desktop = $derived(sidePanels.current);
   let threadInPanel = $derived(desktop && preferences.threadPresentation === 'panel');
   let voiceView = $derived(isVoiceRoom && (!voiceChat.open || desktop));
@@ -417,6 +472,24 @@
     );
   });
 
+  $effect(() => {
+    const target = resolvedRoomId;
+    const userId = core.session?.user_id;
+    const levels = roomSession.powerLevels;
+    if (!target || !userId || !levels || resolvedRoom?.is_direct) return;
+    const admin = canSendState(
+      levels,
+      roomSession.permissions?.own_power_level ?? 0,
+      WATCHED_LISTS_EVENT
+    );
+    void noteRoomOpened(core, target, userId, admin);
+  });
+
+  $effect(() => {
+    const userId = core.session?.user_id;
+    if (userId) void discoverMeowlnirRooms(core, userId, roomList.rooms);
+  });
+
   let canManageWidgets = $derived(
     canSendState(
       roomSession.powerLevels,
@@ -437,7 +510,6 @@
 
   // Returning to live drops the anchor from the URL.
   /** The `?event=` the effect below has handed to the timeline. */
-  let appliedEventId: string | null = null;
   let openedRoomId: string | null = null;
   let timelineRoomId = $derived(resolvedRoom?.room_id);
   let roomHasUnread = $derived(
@@ -445,15 +517,6 @@
       (resolvedRoom?.highlight ?? 0) > 0 ||
       (resolvedRoom?.marked_unread ?? false)
   );
-
-  $effect(() => {
-    // A jump restarts the timeline asynchronously, so wait for the target to be applied.
-    if (eventId === null || eventId !== appliedEventId) return;
-    if (resolvedPermalink === null || resolvedPermalink.rootEventId !== null) return;
-    if (!timelineFollowingLive || timeline.mode.kind !== 'live') return;
-    // eslint-disable-next-line svelte/no-navigation-without-resolve -- rewrites the query of the current, already resolved URL
-    void goto(roomUrl(null), { replace: true, reset: false });
-  });
 
   $effect(() => {
     const activeRoomId = timelineRoomId;
@@ -467,12 +530,16 @@
     )
       return;
     const targetEventId = timelineEventId;
-    const anchor = untrack(() => {
-      // A loaded event is reached by scrolling, but only while live.
-      const loaded = timeline.items.some((item) => item.event_id === targetEventId);
-      return loaded && timeline.mode.kind === 'live' ? null : targetEventId;
-    });
-    appliedEventId = eventId;
+    // Read outside `untrack`: the toggle only takes effect by re-subscribing.
+    const hiddenEvents = preferences.showHiddenEvents;
+    const serving = untrack(() => timeline.serves(activeRoomId, hiddenEvents));
+    // A jump inside the open room waits to learn whether its target sits in a thread.
+    if (serving && eventId !== null && resolvedPermalink === null) return;
+    // A loaded event is reached by scrolling, in whichever context holds it.
+    const loaded =
+      serving &&
+      targetEventId !== null &&
+      untrack(() => timeline.items.some((item) => item.event_id === targetEventId));
     const openAtUnread = untrack(() => {
       if (openedRoomId === activeRoomId) return false;
       openedRoomId = activeRoomId;
@@ -483,18 +550,25 @@
         preferences.openRoomsAtUnread
       );
     });
-    // Read outside `untrack`: the toggle only takes effect by re-subscribing.
-    const hiddenEvents = preferences.showHiddenEvents;
-    void untrack(() =>
-      activeTimeline.start(
-        timelineOwner,
-        activeRoomId,
-        anchor,
-        hiddenEvents,
-        openAtUnread,
-        landingEventId
-      )
-    );
+    if (!loaded) {
+      const origin =
+        jumpOrigin !== null && jumpOrigin.target === eventId ? jumpOrigin.origin : null;
+      jumpOrigin = null;
+      savedPosition =
+        serving && targetEventId !== null && untrack(() => timeline.error) === null
+          ? (untrack(() => timelineList?.capturePosition(origin)) ?? null)
+          : null;
+      void untrack(() =>
+        activeTimeline.start(
+          timelineOwner,
+          activeRoomId,
+          targetEventId,
+          hiddenEvents,
+          openAtUnread,
+          landingEventId
+        )
+      );
+    }
     void untrack(() => loadMembers());
   });
 
@@ -521,6 +595,12 @@
       }
     });
   });
+
+  const unreadMentions = new RoomUnreadMentions(
+    core,
+    () => resolvedRoomId,
+    () => resolvedRoom?.highlight
+  );
 
   function toggleWidgets(): void {
     panels.toggleWidgets();
@@ -593,17 +673,12 @@
     handleMatrixLink(link, anchor);
   }
 
-  function copyEventLink(eventId: string): void {
-    void writeEventLink(eventId);
-  }
-
-  async function writeEventLink(eventId: string): Promise<void> {
+  function copyEventLink(eventId: string, format?: 'matrix' | 'external'): void {
     const room = {
       room_id: resolvedRoomId,
       canonical_alias: resolvedRoom?.canonical_alias ?? null,
     };
-    if (!(await copyRoomLink(core, room, eventId))) toasts.error(i18n.t('errors.copyFailed'));
-    else toasts.info(i18n.t('timeline.linkCopied'));
+    void copyRoomLink(core, room, eventId, format);
   }
 
   function memberDisplayName(userId: string): string | null {
@@ -623,13 +698,31 @@
     void setPageState({ ...page.state, notified: undefined }, true);
   }
 
+  function returnedToLatest(): void {
+    if (eventId === null || panels.threadRootId !== null) return;
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- rewrites the query of the current, already resolved URL
+    void goto(roomUrl(null), { replace: true, reset: false });
+  }
+
+  let savedPosition = $state<string | null>(null);
+  let jumpOrigin: { target: string; origin: string } | null = null;
+
+  function returnToPosition(): void {
+    const position = savedPosition;
+    savedPosition = null;
+    if (position === null) return;
+    // eslint-disable-next-line svelte/no-navigation-without-resolve -- rewrites the query of the current, already resolved URL
+    void goto(roomUrl(position), { replace: true, reset: false });
+  }
+
   function jumpToLive(): void {
     void activeTimeline.start(timelineOwner, resolvedRoomId, null, preferences.showHiddenEvents);
     // eslint-disable-next-line svelte/no-navigation-without-resolve -- rewrites the query of the current, already resolved URL
     void goto(roomUrl(null), { replace: true });
   }
 
-  function jumpToEvent(eventId: string): void {
+  function jumpToEvent(eventId: string, origin: string | null = null): void {
+    jumpOrigin = origin !== null ? { target: eventId, origin } : null;
     if (eventId === page.url.searchParams.get('event')) {
       if (!timelineList?.jumpToEvent(eventId)) {
         void activeTimeline.start(
@@ -654,55 +747,12 @@
     await timeline.paginateForward(25);
   }
 
-  async function markRead(eventId: string, fullyRead: boolean): Promise<void> {
-    await core.rpc.timeline.markRead({
-      room_id: resolvedRoomId,
-      event_id: eventId,
-      thread_root: null,
-      subscription: timeline.subscriptionId,
-      fully_read: fullyRead,
-    });
-  }
-
-  function setFullyRead(roomId: string, eventId: string): void {
-    void core.rpc.timeline
-      .setFullyRead({ room_id: roomId, event_id: eventId })
-      .catch((error: unknown) => {
-        console.warn('[sable room] moving the read marker failed', error);
-      });
-  }
-
-  function markUnreadFrom(eventId: string): void {
-    void core.rpc.timeline
-      .markUnread({ room_id: resolvedRoomId, read_marker: eventBefore(timeline.items, eventId) })
-      .catch((error: unknown) => {
-        console.warn('[sable room] mark as unread failed', error);
-        toasts.error(i18n.t('errors.actionFailed'));
-      });
-  }
-
-  function markRoomRead(): void {
-    void markAllRead().catch((error: unknown) => {
-      console.warn('[sable room] mark as read failed', error);
-      toasts.error(i18n.t('errors.actionFailed'));
-    });
-  }
-
-  async function markAllRead(): Promise<void> {
-    const list = timelineList;
-    await core.rpc.timeline.markRead({
-      room_id: resolvedRoomId,
-      event_id: null,
-      thread_root: null,
-      subscription: null,
-      fully_read: true,
-    });
-    list?.dismissUnread();
-  }
-
-  function loadReadMarker(): Promise<string | null> {
-    return core.rpc.timeline.readMarker({ room_id: resolvedRoomId });
-  }
+  const readActions = new RoomReadActions(
+    core,
+    () => resolvedRoomId,
+    timeline,
+    () => timelineList
+  );
 
   function requestUnread(eventId: string): Promise<void> {
     return activeTimeline.startUnread(
@@ -715,15 +765,6 @@
 
   function resumeLive(): Promise<void> {
     return activeTimeline.resumeLive(timelineOwner);
-  }
-
-  function markRoomUnread(): void {
-    void core.rpc.timeline
-      .markUnread({ room_id: resolvedRoomId, read_marker: null })
-      .catch((error: unknown) => {
-        console.warn('[sable room] mark as unread failed', error);
-        toasts.error(i18n.t('errors.actionFailed'));
-      });
   }
 
   function toggleThreads(): void {
@@ -774,6 +815,31 @@
   function joinCall(): void {
     void call.join(resolvedRoomId, prescreenMedia, callSupport.fallbackUrl);
   }
+  const timelineCallbacks: TimelineCallbacks = {
+    onMarkUnread: readActions.markUnreadFrom,
+    onMatrixLink: handleMatrixLink,
+    onCopyLink: copyEventLink,
+    onSenderProfile: openProfile,
+    onMentionUser: mentionUser,
+    onRetrySend: conversation.retrySend,
+    onCancelSend: conversation.cancelSend,
+    get onToggleReaction() {
+      return canReact ? conversation.toggleReaction : undefined;
+    },
+    onDelete: conversation.redact,
+    get onReply() {
+      return canPost ? conversation.reply : undefined;
+    },
+    onSwipeMembers: toggleMembers,
+    onCancelContext: conversation.clearContext,
+    onOpenThread: openThread,
+    get onEdit() {
+      return canPost ? conversation.edit : undefined;
+    },
+    onOpenMedia: (eventId) => mediaViewerState.open(eventId, () => timeline.items, jumpToEvent),
+    onVotePoll: conversation.votePoll,
+    onEndPoll: conversation.endPoll,
+  };
 </script>
 
 <PageTitle title={pageTitle} />
@@ -798,40 +864,24 @@
       focusEventId={timelineEventId}
       {landingEventId}
       onLanded={landed}
+      onReturnedToLatest={returnedToLatest}
       onRequestHistory={requestHistory}
       onRequestFuture={requestFuture}
-      onRead={markRead}
-      onFullyRead={setFullyRead}
+      onRead={readActions.markRead}
+      onFullyRead={readActions.setFullyRead}
       hasUnread={resolvedRoom === undefined || roomHasUnread}
-      onLoadReadMarker={loadReadMarker}
+      mentionEventIds={unreadMentions.ids}
+      onLoadReadMarker={readActions.loadReadMarker}
       onRequestUnread={requestUnread}
       onResumeLive={resumeLive}
-      onMarkRead={markAllRead}
-      onMarkUnread={markUnreadFrom}
-      onMatrixLink={handleMatrixLink}
-      onCopyLink={copyEventLink}
-      onSenderProfile={openProfile}
-      onMentionUser={mentionUser}
-      onRetrySend={conversation.retrySend}
-      onCancelSend={conversation.cancelSend}
-      onToggleReaction={roomSession.permissions?.can_react === false
-        ? undefined
-        : conversation.toggleReaction}
-      onDelete={conversation.redact}
-      onReply={roomSession.permissions?.can_post === false ? undefined : conversation.reply}
-      onSwipeMembers={toggleMembers}
-      onCancelContext={conversation.clearContext}
-      onOpenThread={openThread}
-      onEdit={roomSession.permissions?.can_post === false ? undefined : conversation.edit}
+      onMarkRead={readActions.markAllRead}
+      callbacks={timelineCallbacks}
       roomId={resolvedRoomId}
       members={memberLoader.members}
       onJumpToEvent={jumpToEvent}
+      onReturnToPosition={savedPosition !== null ? returnToPosition : undefined}
       onJumpToLive={jumpToLive}
-      onOpenMedia={(eventId: string) =>
-        mediaViewerState.open(eventId, () => timeline.items, jumpToEvent)}
-      onVotePoll={conversation.votePoll}
-      onEndPoll={conversation.endPoll}
-      readOnly={roomSession.permissions ? !roomSession.permissions.can_post : false}
+      readOnly={!canPost}
       canRedactOwn={roomSession.permissions?.can_redact_own ?? true}
       canRedactOthers={roomSession.permissions?.can_redact_others ?? false}
       canPin={roomSession.permissions?.can_pin ?? false}
@@ -841,7 +891,6 @@
       {typingUsers}
       footTrailingVisible={showReceiptFooter && timelineAtBottom && latestReadBy.length > 0}
       bind:nearLatest={timelineAtBottom}
-      bind:followingLive={timelineFollowingLive}
       timelineStart={roomSession.predecessor ? predecessorNotice : undefined}
     >
       {#snippet footTrailing()}
@@ -863,44 +912,24 @@
     onfocusin={(event) => timelineList?.composerFocused(event)}
     {@attach publishComposerClearance}
   >
-    {#if isTombstoned}
-      <RoomTombstoneBanner
-        isSpace={resolvedRoom?.room_kind === 'space'}
-        body={roomSession.tombstoneBody}
-        resolved={roomSession.tombstoneChecked}
-        successorId={roomSession.tombstoneReplacementId}
-        joined={tombstoneJoin.successorJoined}
-        joining={tombstoneJoin.joining}
-        failed={tombstoneJoin.failed}
-        onOpen={() => tombstoneJoin.open()}
-        onJoin={() => void tombstoneJoin.join()}
-      />
-    {:else}
-      <RoomPresencePrompt roomId={resolvedRoomId} roomName={resolvedRoom?.display_name ?? ''} />
-      <ScheduledMessages
-        roomId={resolvedRoomId}
-        revision={conversation.scheduledRevision}
-        editing={conversation.context?.kind === 'schedule' ? conversation.context.eventId : null}
-        onEdit={conversation.editScheduled}
-      />
-      <ConversationComposer
-        bind:this={composer}
-        {conversation}
-        roomId={resolvedRoomId}
-        roomMembers={memberLoader.members}
-        onSchedule={conversation.schedule}
-        canReact={roomSession.permissions?.can_react ?? true}
-        {roomName}
-        readOnly={roomSession.permissions ? !roomSession.permissions.can_post : false}
-        encrypted={resolvedRoom?.encrypted ?? null}
-        onDeleteEdited={conversation.redact}
-        onEditLast={conversation.editLast}
-        onEditNext={conversation.editNext}
-        onReplyStep={(direction) =>
-          conversation.moveReply(timelineList?.stepReply(direction) ?? null)}
-        onJumpToContext={jumpToEvent}
-      />
-    {/if}
+    <RoomComposerArea
+      bind:composer
+      {conversation}
+      roomId={resolvedRoomId}
+      {roomName}
+      room={resolvedRoom}
+      members={memberLoader.members}
+      {roomSession}
+      {tombstoneJoin}
+      {rules}
+      tombstoned={isTombstoned}
+      mounted={composerMounted}
+      {canPost}
+      {canReact}
+      onReplyStep={(direction) =>
+        conversation.moveReply(timelineList?.stepReply(direction) ?? null)}
+      onJumpToContext={jumpToEvent}
+    />
   </div>
 {/snippet}
 
@@ -921,6 +950,7 @@
     {roomAvatar}
     topic={roomTopic}
     encrypted={resolvedRoom?.encrypted ?? null}
+    publicRoom={resolvedRoom ? isPublicRoom(resolvedRoom, roomList.rooms) : false}
     presence={dmPresence?.presence ?? null}
     isVoice={resolvedRoom?.room_kind === 'voice'}
     callParticipants={resolvedRoom?.call_participants ?? []}
@@ -932,6 +962,7 @@
     chatOpen={voiceChat.open}
     chatBeside={desktop}
     onBack={backToRoomList}
+    {backUnread}
     onMembers={toggleMembers}
     onSearch={openSearch}
     onTopic={() => (topicOpen = true)}
@@ -941,10 +972,8 @@
     {#snippet pins()}
       <RoomPinMenu
         bind:open={pinsOpen}
-        onUnread={(count) => (pinsUnread = count)}
         triggerHidden={phone}
         roomId={resolvedRoomId}
-        revision={pinRevision}
         members={memberLoader.members}
         canPin={roomSession.permissions?.can_pin ?? false}
         onJump={jumpToEvent}
@@ -955,8 +984,8 @@
         room={resolvedRoom ?? null}
         canInvite={roomSession.permissions?.can_invite ?? false}
         compact={!desktop}
-        onMarkRead={markRoomRead}
-        onMarkUnread={markRoomUnread}
+        onMarkRead={readActions.markRoomRead}
+        onMarkUnread={readActions.markRoomUnread}
         onInvite={() => (inviteOpen = true)}
         onMembers={toggleMembers}
         onSettings={() => (settingsOpen = true)}
@@ -968,10 +997,11 @@
           ? () => panels.toggleNotifications()
           : undefined}
         onPins={phone ? () => (pinsOpen = true) : undefined}
-        {pinsUnread}
+        pinsUnread={roomPins.unread}
         onWidgets={phone && (roomSession.widgets.length > 0 || canManageWidgets)
           ? toggleWidgets
           : undefined}
+        onRules={rules.view ? () => (rules.open = true) : undefined}
         onReport={() => (reportOpen = true)}
         onLeave={() => (leaveOpen = true)}
       />
@@ -1033,10 +1063,10 @@
         rootMessage={timeline.items.find((item) => item.event_id === panels.threadRootId)}
         {roomName}
         members={memberLoader.members}
-        readOnly={roomSession.permissions ? !roomSession.permissions.can_post : false}
+        readOnly={!canPost}
         canRedactOwn={roomSession.permissions?.can_redact_own ?? true}
         canRedactOthers={roomSession.permissions?.can_redact_others ?? false}
-        canReact={roomSession.permissions?.can_react ?? true}
+        {canReact}
         canPin={roomSession.permissions?.can_pin ?? false}
         encrypted={resolvedRoom?.encrypted ?? null}
         onClose={closeThread}
@@ -1079,6 +1109,15 @@
     bind:leaveOpen
     bind:settingsOpen
     onJump={jumpToEvent}
+    onMatrixLink={handleMatrixLink}
+  />
+
+  <RoomRulesDialog
+    {rules}
+    {roomName}
+    sourceName={rulesSourceName}
+    isSpace={resolvedRoom?.room_kind === 'space'}
+    onLeave={() => (leaveOpen = true)}
     onMatrixLink={handleMatrixLink}
   />
 
@@ -1179,7 +1218,7 @@
       min-width: min(var(--room-column-min-width), 100cqi - var(--side-panel-min-width));
     }
 
-    .room-view.room-view > :global(aside) {
+    .room-view.room-view > :global(:is(aside, .thread-view.side-panel)) {
       flex-shrink: 1;
       max-width: calc(100cqi - var(--room-column-min-width));
       min-width: var(--side-panel-min-width);

@@ -15,7 +15,7 @@
   let { icon: Icon, title, tone = 'neutral', body, actions }: Props = $props();
 </script>
 
-<div class={['banner', `banner-${tone}`]} role="status">
+<div class={['banner', `banner-${tone}`]} role="status" aria-atomic="false">
   <div class="description">
     <span class="icon">
       <IconContext values={{ 'aria-hidden': 'true' }}><Icon /></IconContext>
@@ -29,8 +29,8 @@
 <style>
   .banner {
     align-items: center;
-    background: var(--sec-container);
-    border: var(--border-width) solid var(--surface-container-line);
+    background: var(--bg-container);
+    border: var(--border-width) solid transparent;
     border-radius: var(--radius);
     color: var(--surface-on-container);
     display: grid;
@@ -46,6 +46,23 @@
 
   .banner-warning {
     border-color: var(--warn-container-line);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    :global(html:not([data-reduced-motion='on'])) .banner {
+      --banner-sibling-delay: 100ms;
+
+      animation: alert-in var(--duration-slow) var(--ease-smooth-out)
+        calc(var(--duration-micro) + (sibling-index() * var(--banner-sibling-delay)));
+      animation-fill-mode: backwards;
+    }
+  }
+
+  @keyframes alert-in {
+    from {
+      opacity: 0;
+      transform: translateX(-50%);
+    }
   }
 
   .description {

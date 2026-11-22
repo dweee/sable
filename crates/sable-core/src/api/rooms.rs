@@ -4,6 +4,10 @@ use matrix_sdk::ruma::api::client::alias::{create_alias, delete_alias};
 use matrix_sdk::ruma::api::client::directory::{get_room_visibility, set_room_visibility};
 use matrix_sdk::ruma::api::client::discovery::get_capabilities;
 use matrix_sdk::ruma::api::client::discovery::get_capabilities::v3::RoomVersionStability;
+use matrix_sdk::ruma::api::client::membership::invite_user::{
+    self,
+    v3::{InvitationRecipient, InviteUserId},
+};
 use matrix_sdk::ruma::api::client::room::Visibility;
 use matrix_sdk::ruma::api::client::room::aliases;
 use matrix_sdk::ruma::api::client::room::create_room::{self, v3::RoomPreset};
@@ -20,15 +24,18 @@ use serde::{Deserialize, Serialize};
 
 use super::Handler;
 use crate::calendar::CALENDAR_ROOM_TYPE;
+use crate::media::is_not_found;
 use crate::search::MAX_SEARCH_RESULTS;
 use crate::room_settings::StateEventOut;
 use crate::room_settings::join_rule_content;
 use crate::room_settings::voice_power_level_override;
-use crate::protocol::{RpcError, CreateJoinRuleView, PresenceHintView, PresencePromptView, PublicRoomView, RoomAttachmentKind, RoomAttachmentView, RoomCosmeticsView, RoomOpenView, RoomPreviewView, RoomListItemView, RoomTag, RoomVersionView, RoomVersionsView};
+use crate::protocol::{RpcError, CreateJoinRuleView, InviteHistoryView, ShareHistoryView, PresenceHintView, PresencePromptView, PublicRoomView, RoomAttachmentKind, RoomAttachmentView, RoomCosmeticsView, RoomOpenView, RoomPreviewView, RoomListItemView, RoomTag, RoomVersionView, RoomVersionsView};
 use crate::view::FORUM_ROOM_TYPE;
 use crate::{Core, ResultExt, power_levels, view};
 
 const WIDGETS_EVENT_TYPE: &str = "im.vector.modular.widgets";
+const POLICY_ROOM_TYPE: &str = "m.policy";
+const POLICY_ROOM_TYPE_UNSTABLE: &str = "support.feline.policy.lists.msc.v1";
 
 domain! {
     open,
@@ -84,6 +91,8 @@ pub enum RoomKind {
     Forum,
     /// `chat.commet.calendar`
     Calendar,
+    /// `m.policy` / `support.feline.policy.lists.msc.v1`
+    Policy,
 }
 
 impl RoomKind {
@@ -98,6 +107,8 @@ impl RoomKind {
             Some(RoomType::Call) => Some(Self::Voice),
             Some(other) if other.as_str() == FORUM_ROOM_TYPE => Some(Self::Forum),
             Some(other) if other.as_str() == CALENDAR_ROOM_TYPE => Some(Self::Calendar),
+            Some(other) if other.as_str() == POLICY_ROOM_TYPE => Some(Self::Policy),
+            Some(other) if other.as_str() == POLICY_ROOM_TYPE_UNSTABLE => Some(Self::Policy),
             Some(_) => None,
         }
     }
@@ -111,6 +122,7 @@ impl RoomKind {
             Self::Voice => Some(RoomType::Call),
             Self::Forum => Some(RoomType::from(FORUM_ROOM_TYPE)),
             Self::Calendar => Some(RoomType::from(CALENDAR_ROOM_TYPE)),
+            Self::Policy => Some(RoomType::from(POLICY_ROOM_TYPE)),
         }
     }
 }
@@ -332,16 +344,28 @@ pub struct InviteParams {
 }
 
 impl Handler for InviteParams {
-    type Ok = ();
+    type Ok = InviteHistoryView;
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.room(&self.room_id)
-            .await?
-            .invite_user_by_id(&self.user_id)
+    async fn run(self, core: &Arc<Core>) -> Result<InviteHistoryView, RpcError> {
+        let room = core.room(&self.room_id).await?;
+        // MSC4268 sends the keys ahead of the invite. `invite_user_by_id`
+        // gives up on the invite when that fails, so both steps happen here.
+        let history =
+            match super::encryption::share_history(core, &room, &self.user_id, true).await {
+                Ok(ShareHistoryView::Shared) => InviteHistoryView::Shared,
+                Ok(_) => InviteHistoryView::NotShared,
+                // `share_history` has reported the error.
+                Err(_) => InviteHistoryView::Failed,
+            };
+        let recipient = InvitationRecipient::UserId(InviteUserId::new(self.user_id));
+        room.client()
+            .send(invite_user::v3::Request::new(self.room_id, recipient))
             .await
             .or_failed(core, "invite_user")?;
+        // The next send reloads the members, so the invitee gets its key.
+        room.mark_members_missing();
 
-        Ok(())
+        Ok(history)
     }
 }
 
@@ -444,6 +468,10 @@ impl Handler for CreateParams {
             request.initial_state.push(rule.to_raw_any());
         }
 
+        if let Some(rules) = core.delegated_rules_state(self.parent_space.as_ref()).await {
+            request.initial_state.push(rules);
+        }
+
         if matches!(self.kind, RoomKind::Voice) {
             // The override is a shallow merge: naming `events` drops the
             // server's default map, so it is re-stated.
@@ -530,13 +558,23 @@ impl Handler for CreateDmParams {
         let room = if let Some(room) = existing {
             room
         } else {
+            let own = client.user_id() == Some(&*user_id);
+            if !own
+                && let Err(error) = client.account().fetch_user_profile_of(&user_id).await
+                && is_not_found(&error)
+            {
+                return Err(core.rpc_error("create_dm_profile", &error));
+            }
             let mut request = create_room::v3::Request::new();
-            request.creation_content = Some(
-                Raw::new(&serde_json::json!({ "additional_creators": [&user_id] }))
-                    .or_failed(core, "create_dm_creation_content")?
-                    .cast_unchecked(),
-            );
-            request.invite = vec![user_id];
+            // The sender already creates the room, and may not be listed again.
+            if !own {
+                request.creation_content = Some(
+                    Raw::new(&serde_json::json!({ "additional_creators": [&user_id] }))
+                        .or_failed(core, "create_dm_creation_content")?
+                        .cast_unchecked(),
+                );
+                request.invite = vec![user_id.clone()];
+            }
             request.is_direct = true;
             request.preset = Some(RoomPreset::TrustedPrivateChat);
             if encrypted == Some(true) || (encrypted.is_none() && encrypt_new) {
@@ -553,10 +591,19 @@ impl Handler for CreateDmParams {
             {
                 request.initial_state.push(hint);
             }
-            client
+            let room = client
                 .create_room(request)
                 .await
-                .or_failed(core, "create_dm")?
+                .or_failed(core, "create_dm")?;
+            // The SDK marks a direct room only from its invitees.
+            if own {
+                client
+                    .account()
+                    .mark_as_dm(room.room_id(), &[user_id])
+                    .await
+                    .or_failed(core, "create_dm_mark")?;
+            }
+            room
         };
 
         Ok(room.room_id().to_string())
@@ -579,17 +626,21 @@ impl Handler for VersionsParams {
             .or_failed(core, "room_versions")?;
 
         let versions = response.capabilities.room_versions;
-        Ok(RoomVersionsView {
-            default: versions.default.to_string(),
-            available: versions
-                .available
-                .into_iter()
-                .map(|(id, stability)| RoomVersionView {
-                    id: id.to_string(),
-                    stable: stability == RoomVersionStability::Stable,
-                })
-                .collect(),
-        })
+        let mut available: Vec<RoomVersionView> = versions
+            .available
+            .into_iter()
+            .map(|(id, stability)| RoomVersionView {
+                id: id.to_string(),
+                stable: stability == RoomVersionStability::Stable,
+            })
+            .collect();
+        available.sort_by(|a, b| {
+            b.id.parse::<u32>()
+                .ok()
+                .cmp(&a.id.parse::<u32>().ok())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(RoomVersionsView { default: versions.default.to_string(), available })
     }
 }
 

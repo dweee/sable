@@ -188,6 +188,37 @@ fn name_sorts_ignore_case_and_accents_and_ties_keep_the_list_order() {
 }
 
 #[test]
+fn unread_first_keeps_recent_order_within_unread_and_read() {
+    let mut marked = row("marked");
+    marked.counts.marked = true;
+    let rows = [
+        row("read-early"),
+        unread(row("unread-late"), 2, 0),
+        row("read-late"),
+        unread(row("unread-early"), 1, 0),
+        marked,
+    ];
+    let sections = RoomSections::build(
+        &rows,
+        &RoomListOptionsView {
+            room_sort: RoomSortView::UnreadFirst,
+            ..RoomListOptionsView::default()
+        },
+    );
+
+    assert_eq!(
+        section(&sections, HOME).rooms,
+        ids(&[
+            "unread-late",
+            "unread-early",
+            "marked",
+            "read-early",
+            "read-late"
+        ])
+    );
+}
+
+#[test]
 fn direct_messages_follow_their_own_sort() {
     let options = RoomListOptionsView {
         room_sort: RoomSortView::NameAsc,
@@ -473,6 +504,39 @@ fn mentions_mode_keeps_unread_and_drops_notifying() {
 }
 
 #[test]
+fn the_app_badge_counts_mentions_in_rooms_that_only_notify_for_mentions() {
+    let mut left = unread(row("left"), 4, 4);
+    left.state = RoomStateView::Left;
+    let sections = RoomSections::build(
+        &[
+            unread(row("mentioned"), 6, 2),
+            unread(row("plain"), 6, 0),
+            unread(direct("dm"), 3, 0),
+            left,
+        ],
+        &group_badges(BadgeModeView::Mentions),
+    );
+
+    assert_eq!(sections.app_badge, 5);
+    let push_badge = sections.push_badge();
+    assert_eq!(
+        push_badge[id("mentioned").as_str()],
+        PushBadgeRoom {
+            count: 2,
+            every: false
+        }
+    );
+    assert_eq!(
+        push_badge[id("dm").as_str()],
+        PushBadgeRoom {
+            count: 3,
+            every: true
+        }
+    );
+    assert!(!push_badge.contains_key(id("left").as_str()));
+}
+
+#[test]
 fn quiet_mode_keeps_only_mentions() {
     let sections = RoomSections::build(
         &[unread(row("mentioned"), 6, 2), unread(row("plain"), 6, 0)],
@@ -481,6 +545,68 @@ fn quiet_mode_keeps_only_mentions() {
 
     assert_eq!(badge(&sections, "mentioned"), Some(counts(2, 0, 2, false)));
     assert_eq!(badge(&sections, "plain"), None);
+}
+
+#[test]
+fn show_beats_a_quiet_default() {
+    let options = RoomListOptionsView {
+        shown_rooms: ids(&["shown"]),
+        ..group_badges(BadgeModeView::Quiet)
+    };
+    let sections = RoomSections::build(
+        &[unread(row("shown"), 6, 0), unread(row("plain"), 6, 0)],
+        &options,
+    );
+
+    assert_eq!(badge(&sections, "shown"), Some(counts(6, 0, 0, false)));
+    assert_eq!(badge(&sections, "plain"), None);
+}
+
+#[test]
+fn show_beats_a_quiet_space_but_does_not_spread_to_its_rooms() {
+    let options = RoomListOptionsView {
+        quiet_rooms: ids(&["hushed"]),
+        shown_rooms: ids(&["shown", "hushed"]),
+        ..RoomListOptionsView::default()
+    };
+    let sections = RoomSections::build(
+        &[
+            space("hushed", &["shown", "other"]),
+            unread(row("shown"), 4, 0),
+            unread(row("other"), 4, 0),
+        ],
+        &options,
+    );
+
+    assert_eq!(badge(&sections, "shown"), Some(counts(4, 0, 0, false)));
+    assert_eq!(badge(&sections, "other"), None);
+}
+
+#[test]
+fn show_leaves_a_mode_that_already_shows_the_dot_alone() {
+    let options = RoomListOptionsView {
+        shown_rooms: ids(&["loud"]),
+        ..group_badges(BadgeModeView::All)
+    };
+    let sections = RoomSections::build(&[unread(row("loud"), 6, 0)], &options);
+
+    assert_eq!(badge(&sections, "loud"), Some(counts(6, 6, 0, false)));
+}
+
+#[test]
+fn hide_still_quiets_a_room_that_is_not_shown() {
+    let options = RoomListOptionsView {
+        quiet_rooms: ids(&["hidden"]),
+        shown_rooms: ids(&["shown"]),
+        ..group_badges(BadgeModeView::All)
+    };
+    let sections = RoomSections::build(
+        &[unread(row("hidden"), 6, 0), unread(row("shown"), 6, 0)],
+        &options,
+    );
+
+    assert_eq!(badge(&sections, "hidden"), None);
+    assert_eq!(badge(&sections, "shown"), Some(counts(6, 6, 0, false)));
 }
 
 #[test]
@@ -683,7 +809,7 @@ fn a_nickname_renames_and_re_sorts_a_direct_message() {
             direct_targets: vec![OwnedUserId::try_from(user).expect("a user id")],
             ..direct(room_id)
         };
-        Nicknames::default().apply_room(&mut row);
+        Nicknames::default().apply_room(&mut row, false);
         row
     };
     let mut rows = RoomListRows::default();
@@ -729,4 +855,51 @@ fn a_nickname_renames_and_re_sorts_a_direct_message() {
         .find(|section| section.key == DIRECT)
         .expect("the direct section is resent");
     assert_eq!(direct.rooms, ids(&["carol", "bob"]));
+}
+
+#[test]
+fn room_spaces_name_each_listed_rooms_spaces_and_ships_only_when_it_changes() {
+    let rows = [space("root", &["mid"]), space("mid", &["a"]), row("a")];
+    let mut sections = RoomSections::default();
+    let first = sections.update(build(&rows)).expect("everything is new");
+
+    let room_spaces = first
+        .room_spaces
+        .expect("the room spaces are whole on the first update");
+    let a = room_spaces
+        .iter()
+        .find(|entry| entry.room_id == id("a"))
+        .expect("a listed room");
+    assert_eq!(
+        a.levels,
+        [vec![id("mid").to_string()], vec![id("root").to_string()]]
+    );
+    assert_eq!(a.root_name.as_deref(), Some("root"));
+    assert_eq!(
+        a.parent.as_ref().map(|parent| parent.space_id.as_str()),
+        Some(id("mid").as_str())
+    );
+
+    assert_eq!(sections.update(build(&rows)), None);
+}
+
+#[test]
+fn room_spaces_are_reused_until_the_space_tree_changes() {
+    let options = RoomListOptionsView::default();
+    let rows = [space("root", &["a"]), row("a")];
+    let first = RoomSections::build(&rows, &options);
+
+    let busier = [space("root", &["a"]), unread(row("a"), 3, 1)];
+    let reused = RoomSections::rebuild(&busier, &options, &first);
+    assert!(Arc::ptr_eq(&first.room_spaces, &reused.room_spaces));
+
+    let mut renamed = space("root", &["a"]);
+    renamed.display_name = "Guild".to_owned();
+    let rebuilt = RoomSections::rebuild(&[renamed, row("a")], &options, &reused);
+    let a = rebuilt
+        .room_spaces
+        .iter()
+        .find(|entry| entry.room_id == id("a"))
+        .expect("a listed room");
+    assert_eq!(a.root_name.as_deref(), Some("Guild"));
 }

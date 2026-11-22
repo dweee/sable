@@ -141,9 +141,45 @@ test('an empty provider has no Continue button', () => {
   expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull();
 });
 
+test('QR sign-in is offered while the provider is still being checked', () => {
+  setup(() => Promise.resolve(null), {
+    loginFlows: null,
+    isCheckingHomeserver: true,
+    onQrLogin: vi.fn(),
+  });
+  expect(screen.getByRole('button', { name: 'Sign in with a QR code' })).toBeEnabled();
+});
+
 test('the create-account link only shows when the caller offers it', async () => {
   const { rerender } = setup(() => Promise.resolve(flows));
   expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
   await rerender({ onCreateAccount: vi.fn() });
   expect(screen.getByRole('button', { name: 'Create account' })).toBeTruthy();
+});
+
+test('Tab leaves the provider for the username without stopping on the options button', async () => {
+  setup(() => Promise.resolve(flows));
+  const user = userEvent.setup();
+  homeserver().focus();
+  await user.tab();
+  expect(screen.getByRole('textbox', { name: 'Username, Matrix ID or email' })).toHaveFocus();
+});
+
+test('Tab still reaches the username while the provider is being rechecked', async () => {
+  const { rerender } = setup(() => Promise.resolve(flows));
+  const user = userEvent.setup();
+  homeserver().focus();
+  await rerender({ isCheckingHomeserver: true });
+  await user.tab();
+  expect(screen.getByRole('textbox', { name: 'Username, Matrix ID or email' })).toHaveFocus();
+});
+
+test('the password toggle changes its name instead of exposing a pressed state', async () => {
+  setup(() => Promise.resolve(flows));
+  const user = userEvent.setup();
+
+  const show = screen.getByRole('button', { name: 'Show password' });
+  expect(show).not.toHaveAttribute('aria-pressed');
+  await user.click(show);
+  expect(screen.getByRole('button', { name: 'Hide password' })).not.toHaveAttribute('aria-pressed');
 });

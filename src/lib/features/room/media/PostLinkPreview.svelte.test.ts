@@ -6,6 +6,14 @@ import { expect, test, vi } from 'vitest';
 import type { PostView, UrlPreviewView } from '#src/generated/protocol';
 
 vi.mock('#lib/core/context.js');
+vi.mock('#lib/config/runtime-config.js', () => ({
+  runtimeConfig: () =>
+    Promise.resolve({ embeds: { serviceUrl: null }, gifs: { klipyApiKey: null } }),
+}));
+
+import { core } from '#lib/core/__mocks__/context.js';
+
+import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
 
 import PostLinkPreview from './PostLinkPreview.svelte';
 
@@ -14,6 +22,7 @@ function post(overrides: Partial<PostView> = {}): PostView {
     url: null,
     author: { name: 'Alice', handle: 'alice.test', avatar: null, url: null },
     text: 'hello',
+    translated_from: null,
     created_at: null,
     media: [],
     stats: null,
@@ -44,8 +53,23 @@ function preview(value: PostView): UrlPreviewView {
 
 function renderPost(value: PostView, mediaHidden = false) {
   const shown = preview(value);
-  return render(PostLinkPreview, { url: shown.url, preview: shown, mediaHidden });
+  return render(PostLinkPreview, { url: shown.url, preview: shown, mediaHidden, tunnel: false });
 }
+
+test('says which language a translated post came from', () => {
+  renderPost(post({ text: 'Hello', translated_from: 'ja' }));
+
+  expect(screen.getByText('Translated from Japanese')).toBeInTheDocument();
+});
+
+test('names an unknown language by its code and leaves an untranslated post unmarked', () => {
+  const { unmount } = renderPost(post({ translated_from: 'not a language' }));
+  expect(screen.getByText('Translated from not a language')).toBeInTheDocument();
+  unmount();
+
+  renderPost(post());
+  expect(screen.queryByText(/Translated from/)).not.toBeInTheDocument();
+});
 
 test('shows the author, text, quote and the counts it knows', () => {
   renderPost(
@@ -87,6 +111,7 @@ test('hides avatars and media while room media is hidden', () => {
         {
           kind: 'image',
           source: 'mxc://s/cat',
+          poster: null,
           mime: null,
           width: null,
           height: null,
@@ -124,4 +149,66 @@ test('hides the text of a sensitive post until revealed, and names the warning',
 
   expect(screen.getByText('hello')).toBeInTheDocument();
   expect(screen.queryByText('quoted')).not.toBeInTheDocument();
+});
+
+test('plays a bundled video by scraping the link again', async () => {
+  const video = {
+    kind: 'video' as const,
+    mime: 'video/mp4',
+    width: 16,
+    height: 9,
+    alt: null,
+  };
+  const scraped = preview(
+    post({ media: [{ ...video, source: 'https://pds/clip', poster: null }] })
+  );
+  core.rpc.messages.urlPreview.mockResolvedValue(scraped);
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  const { container } = renderPost(
+    post({ media: [{ ...video, source: null, poster: 'mxc://s/still' }] })
+  );
+
+  expect(container.querySelector('.media-poster')).toBeInTheDocument();
+  expect(core.rpc.messages.urlPreview).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: /Play/ }));
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('video')).toBeInTheDocument();
+  });
+  expect(core.rpc.messages.urlPreview).toHaveBeenCalledWith(
+    expect.objectContaining({ url: scraped.url, client: true })
+  );
+  expect(core.fetchMedia).toHaveBeenCalledWith('https://pds/clip', 0, 0);
+});
+
+test('opens a post image in the media viewer', async () => {
+  const open = vi.spyOn(mediaViewerState, 'openStandalone').mockImplementation(() => undefined);
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
+  renderPost(
+    post({
+      media: [
+        {
+          kind: 'image',
+          source: 'mxc://s/cat',
+          poster: null,
+          mime: 'image/png',
+          width: 640,
+          height: 480,
+          alt: 'a cat',
+        },
+      ],
+    })
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Open a cat' }));
+
+  expect(open).toHaveBeenCalledExactlyOnceWith(
+    'mxc://s/cat',
+    'https://bsky.app/profile/alice.test/post/3abc',
+    'image/png',
+    640,
+    480
+  );
+  open.mockRestore();
 });

@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "2.3.8"
+version = "26.11.4"
 description = "A Tauri App"
 authors = ["you"]
 license.workspace = true
@@ -52,7 +52,7 @@ tauri-plugin-clipboard-manager = "2.4.1"
 # mobile targets below enable.
 # The published crate hands back a bare token; the fork takes a VAPID key and
 # returns the keys a UnifiedPush distributor produces.
-tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "8573c30823b4f3c4393b37e188b59c35960aa65c", default-features = false }
+tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "b97e58f58dc04dc75c9e62e95ccb04f5202d47c5", default-features = false }
 sable-core = { path = "../crates/sable-core", version = "0.1.0" }
 tokio = { workspace = true }
 # default-features drags in reqwest and native-tls; ureq is a sync rustls
@@ -67,12 +67,12 @@ sentry = { version = "0.49", default-features = false, features = [
   "ureq",
   "rustls",
 ] }
-tauri-plugin-sentry = "0.8.0"
+tauri-plugin-sentry = "0.9.0"
 
 # The plugin only compiles on a host build, which lints and tests the crate,
 # with a desktop backend.
 [target."cfg(any(target_os = \"linux\", target_os = \"macos\"))".dependencies]
-tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "8573c30823b4f3c4393b37e188b59c35960aa65c", default-features = false, features = [
+tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "b97e58f58dc04dc75c9e62e95ccb04f5202d47c5", default-features = false, features = [
   "notify-rust",
 ] }
 
@@ -81,6 +81,7 @@ tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/Sabl
 paranoid-android = "0.2.2"
 android_system_properties = "0.1.6"
 jni = "0.22"
+libc = "=0.2.191"
 tauri-plugin-android-fs = "=30.2.0"
 tauri-plugin-sable-push = { path = "../plugins/tauri-plugin-sable-push", version = "0.1.0" }
 
@@ -88,16 +89,18 @@ tauri-plugin-sable-push = { path = "../plugins/tauri-plugin-sable-push", version
 [target."cfg(any(target_os = \"android\", target_os = \"ios\"))".dependencies]
 tauri-plugin-app-icon = { version = "0.1.0", git = "https://github.com/SableClient/tauri-plugin-app-icon", rev = "bb3b31dfe356425f36b4ff21cb4315fa5d3e535e" }
 tauri-plugin-geolocation = { version = "2.3.3", optional = true }
-tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "8573c30823b4f3c4393b37e188b59c35960aa65c", default-features = false, features = [
+tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "b97e58f58dc04dc75c9e62e95ccb04f5202d47c5", default-features = false, features = [
   "push-notifications",
 ] }
-tauri-plugin-livekit-mobile = { version = "0.2.0", git = "https://github.com/SableClient/tauri-plugin-livekit-mobile.git", rev = "a50cb0db7e812367cbf4be65fe049ae73a0a8d23" }
+tauri-plugin-livekit-mobile = { version = "0.2.0", git = "https://github.com/SableClient/tauri-plugin-livekit-mobile.git", rev = "5f3e8e32d93968b21404252981139e14c506951a" }
 # Injects the --safe-area-inset-* custom properties: Android reports the system
 # bars to nobody, and `env()` there only covers a display cutout.
 tauri-plugin-edge-to-edge = { version = "0.3.3", git = "https://github.com/SableClient/tauri-plugin-edge-to-edge.git", rev = "45a98971fc4957db32cb5f5985a8d8687eb3dc15" }
 # `navigator.share` reaches no webview we ship, so the system share sheet only
 # comes from the native side.
 tauri-plugin-sharekit = "=0.4.0-rc.8"
+# The webviews mute `<audio>` in the background, the system player keeps going.
+tauri-plugin-native-audio = { version = "1.0.5", git = "https://github.com/SableClient/tauri-plugin-native-audio.git", rev = "1bbab74ed550b8395fdd287a25542c2b99624597" }
 
 [target."cfg(target_os = \"ios\")".dependencies]
 # backtrace 0.3.76 needs dyld bindings that libc 0.2.190 removed on iOS.
@@ -120,13 +123,27 @@ objc2-foundation = { version = "0.3", features = [
   "NSBundle",
   "NSData",
   "NSValue",
+  "NSArray",
+  "NSSortDescriptor",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CFCGTypes",
+  "objc2",
 ] }
 objc2-photos = { version = "0.3.2", default-features = false, features = [
   "std",
   "PHPhotoLibrary",
+  "PHAsset",
   "PHAssetChangeRequest",
   "PHAssetCreationRequest",
+  "PHAssetResource",
+  "PHAssetResourceManager",
   "PHChangeRequest",
+  "PHFetchOptions",
+  "PHFetchResult",
+  "PHImageManager",
+  "PHObject",
   "PhotosTypes",
   "block2",
   "dispatch2",

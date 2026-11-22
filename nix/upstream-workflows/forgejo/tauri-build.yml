@@ -10,7 +10,7 @@ on:
         description: 'Release tag to build and attach bundles to (e.g. v1.2.3). Empty builds a nightly from HEAD.'
         required: false
         type: string
-permissions: {}
+
 concurrency:
   group: tauri-build-${{ github.event_name == 'workflow_dispatch' && (inputs.tag || github.run_id) || github.ref_name }}
   cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
@@ -25,10 +25,10 @@ env:
   FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
   # Each nightly is ~1.5 GB of bundles on a node with ~100 GB of disk.
   NIGHTLY_KEEP: 20
-  SCCACHE_BUCKET: sccache
+  SCCACHE_BUCKET: ow-oops-sccache
   SCCACHE_S3_KEY_PREFIX: sable-next
-  SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
-  SCCACHE_REGION: us-east-1
+  SCCACHE_ENDPOINT: https://s3.gra.io.cloud.ovh.net
+  SCCACHE_REGION: gra
   SCCACHE_S3_USE_SSL: 'true'
   SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
 jobs:
@@ -36,8 +36,6 @@ jobs:
     name: Resolve release target
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
@@ -74,18 +72,6 @@ jobs:
         env:
           TAG: ${{ steps.meta.outputs.tag }}
         run: node scripts/ci/forgejo-release.mjs wait --attempts 12 --interval 15
-      - name: Dispatch the GitHub build for the tag
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          GH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
-          TAG: ${{ steps.meta.outputs.nightly != 'true' && steps.meta.outputs.tag || '' }}
-        run: |
-          [ -n "$GH_TOKEN" ] || { echo 'GH_DISPATCH_TOKEN is not set; dispatch the GitHub build for this tag by hand.' >&2; exit 1; }
-          curl -fsS -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            https://api.github.com/repos/SableClient/sable-next/actions/workflows/tauri-build.yml/dispatches \
-            -d "{\"ref\":\"main\",\"inputs\":{\"tag\":\"$TAG\"}}"
       - name: Create nightly prerelease
         if: ${{ steps.meta.outputs.nightly == 'true' && steps.gate.outputs.skip != 'true' }}
         env:
@@ -99,6 +85,21 @@ jobs:
             --prerelease true \
             --title "Nightly build $VERSION" \
             --notes "Nightly build from main at $SHA"
+      # GitHub builds Windows and Linux from this commit, so both sides compute
+      # the same version and attach to the same release.
+      - name: Dispatch the GitHub build
+        if: ${{ github.event_name == 'workflow_dispatch' || (steps.meta.outputs.nightly == 'true' && steps.gate.outputs.skip != 'true') }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+          NIGHTLY: ${{ steps.meta.outputs.nightly }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SHA: ${{ steps.meta.outputs.ref }}
+        run: |
+          if [ "$NIGHTLY" = 'true' ]; then
+            node scripts/ci/github-dispatch.mjs tauri-build.yml "sha=$SHA"
+          else
+            node scripts/ci/github-dispatch.mjs tauri-build.yml "tag=$TAG"
+          fi
   build-web:
     name: Build web assets
     needs: setup-release
@@ -107,8 +108,6 @@ jobs:
     # Cold, this compiles the workspace for wasm32 in release. Warm, the setup
     # action restores the bindings and only Vite runs.
     timeout-minutes: 60
-    permissions:
-      contents: write
     env:
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
@@ -161,6 +160,14 @@ jobs:
             src/generated/wasm
           if-no-files-found: error
           retention-days: 7
+  deploy:
+    name: Deploy to Cloudflare
+    needs: build-web
+    # Forgejo copies this condition onto the called jobs, where the event is
+    # workflow_call, so it tests the ref.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    uses: ./.forgejo/workflows/cloudflare-web.yml
+    secrets: inherit
   docker:
     name: Build ${{ matrix.image }} image (${{ matrix.arch }})
     needs: [setup-release, build-web]
@@ -186,9 +193,6 @@ jobs:
             arch: arm64
             runner: docker-arm64
             file: packaging/server/Dockerfile
-    permissions:
-      contents: read
-      packages: write
     env:
       REGISTRY: git.sable.moe
       ARCH: ${{ matrix.arch }}
@@ -196,15 +200,17 @@ jobs:
       DOCKERFILE: ${{ matrix.file }}
       PACKAGES_USER: ${{ secrets.PACKAGES_USER }}
       PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
     steps:
       - name: Check out repository
         uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.setup-release.outputs.ref }}
           persist-credentials: false
-      # The web image reuses the bundle built for the desktop packages.
+      # The web image reuses the bundle built for the desktop packages, the
+      # server image its WASM bindings.
       - name: Download web assets
-        if: ${{ matrix.image == 'web' }}
         uses: https://code.forgejo.org/forgejo/download-artifact@769f970437aa3291b13f35dc23fc87967d7fb19f # v7
         with:
           name: web-assets
@@ -217,28 +223,34 @@ jobs:
         run: |
           revision="$(git rev-parse HEAD)"
           image="$REGISTRY/${GITHUB_REPOSITORY,,}"
-          [ "$IMAGE_KIND" = web ] || image="$image-server"
-          builder="ci-builder-$GITHUB_RUN_ID-$IMAGE_KIND-$ARCH"
-          cleanup() {
-            docker buildx rm --force "$builder" || {
-              docker rm -f "buildx_buildkit_${builder}0" || true
-              docker volume rm "buildx_buildkit_${builder}0_state" || true
-            }
-            docker context rm --force "ci-$GITHUB_RUN_ID-$IMAGE_KIND-$ARCH" || true
-          }
-          trap cleanup EXIT
-          docker context create "ci-$GITHUB_RUN_ID-$IMAGE_KIND-$ARCH"
-          docker buildx create "ci-$GITHUB_RUN_ID-$IMAGE_KIND-$ARCH" --name "$builder" --driver docker-container --buildkitd-config .forgejo/buildkitd.toml --use
+          if [ "$IMAGE_KIND" = web ]; then
+            prebuilt=(--build-context dist=dist)
+          else
+            image="$image-server"
+            prebuilt=(--build-context wasm=src/generated/wasm)
+          fi
+          # Where Docker outlives the job, so does this builder and its local cache.
+          builder="ci-builder-$ARCH"
+          docker context inspect "ci-$ARCH" >/dev/null 2>&1 || docker context create "ci-$ARCH"
+          docker buildx inspect "$builder" >/dev/null 2>&1 \
+            || docker buildx create "ci-$ARCH" --name "$builder" --driver docker-container --buildkitd-config .forgejo/buildkitd.toml
           # Forgejo fails the push when both arch jobs upload the same layer at once.
           for attempt in 1 2 3; do
             docker buildx build . \
+              --builder "$builder" \
               --file "$DOCKERFILE" \
               --platform "linux/$ARCH" \
+              "${prebuilt[@]}" \
+              --build-arg SCCACHE_BUCKET --build-arg SCCACHE_ENDPOINT --build-arg SCCACHE_REGION \
+              --build-arg SCCACHE_S3_KEY_PREFIX --build-arg SCCACHE_S3_USE_SSL \
+              --secret id=aws_access_key_id,env=AWS_ACCESS_KEY_ID \
+              --secret id=aws_secret_access_key,env=AWS_SECRET_ACCESS_KEY \
+              --provenance=false \
               --label "org.opencontainers.image.source=$FORGEJO_URL/$GITHUB_REPOSITORY" \
               --label "org.opencontainers.image.revision=$revision" \
               --label "org.opencontainers.image.version=$VERSION" \
-              --cache-from "type=registry,ref=$image:buildcache-$ARCH" \
-              --cache-to "type=registry,ref=$image:buildcache-$ARCH,mode=max,ignore-error=true" \
+              --cache-from "type=s3,region=$SCCACHE_REGION,bucket=$SCCACHE_BUCKET,endpoint_url=$SCCACHE_ENDPOINT,prefix=buildkit/sable-next/,name=$IMAGE_KIND-$ARCH" \
+              --cache-to "type=s3,region=$SCCACHE_REGION,bucket=$SCCACHE_BUCKET,endpoint_url=$SCCACHE_ENDPOINT,prefix=buildkit/sable-next/,name=$IMAGE_KIND-$ARCH,mode=max,ignore-error=true" \
               --output "type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" \
               --metadata-file "$RUNNER_TEMP/build-metadata.json" && break
             [ "$attempt" -lt 3 ] || exit 1
@@ -252,15 +264,6 @@ jobs:
             [ "$attempt" -lt 3 ] || exit 1
             sleep $((attempt * 5))
           done
-      - name: Remove the builder
-        if: ${{ always() }}
-        run: |
-          builder="ci-builder-$GITHUB_RUN_ID-$IMAGE_KIND-$ARCH"
-          docker buildx rm --force "$builder" || {
-            docker rm -f "buildx_buildkit_${builder}0" || true
-            docker volume rm "buildx_buildkit_${builder}0_state" || true
-          }
-          docker context rm --force "ci-$GITHUB_RUN_ID-$IMAGE_KIND-$ARCH" || true
 
   docker-manifest:
     name: Publish ${{ matrix.image }} image manifest
@@ -268,11 +271,8 @@ jobs:
     strategy:
       matrix:
         image: [web, server]
-    runs-on: docker-arm64
+    runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
     env:
       REGISTRY: git.sable.moe
       PACKAGES_USER: ${{ secrets.PACKAGES_USER }}
@@ -428,8 +428,6 @@ jobs:
     if: ${{ needs.setup-release.outputs.skip != 'true' && needs.setup-release.outputs.nightly != 'true' }}
     runs-on: docker
     timeout-minutes: 90
-    permissions:
-      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -501,8 +499,6 @@ jobs:
     if: ${{ !cancelled() && needs.setup-release.result == 'success' && needs.android-native.result == 'success' && (needs.android-foss.result == 'success' || (needs.setup-release.outputs.nightly == 'true' && needs.android-foss.result == 'skipped')) }}
     runs-on: docker
     timeout-minutes: 120
-    permissions:
-      contents: write
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -655,8 +651,6 @@ jobs:
     container:
       image: ubuntu:resolute@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
     timeout-minutes: 150
-    permissions:
-      contents: read
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -667,7 +661,7 @@ jobs:
           # The runner mounts the host's zoneinfo read-only, so tzdata cannot unpack there.
           echo 'path-exclude=/usr/share/zoneinfo/*' > /etc/dpkg/dpkg.cfg.d/runner-zoneinfo
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git
+          apt-get install -y --no-install-recommends ca-certificates clang git llvm
           git init -q /shared/workdir/SableClient/sable-next
           cd /shared/workdir/SableClient/sable-next
           git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/tags/$TAG"
@@ -675,83 +669,6 @@ jobs:
       - name: Rebuild and compare
         working-directory: /shared/workdir/SableClient/sable-next
         run: scripts/ci/reproduce-android.sh "$VERSION"
-  electron-linux:
-    name: Linux x86_64 (Electron)
-    needs: [setup-release, build-web]
-    runs-on: docker
-    timeout-minutes: 60
-    permissions:
-      contents: write
-    env:
-      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-      MISE_DISABLE_TOOLS: github:WebAssembly/binaryen,ubi:rustwasm/wasm-bindgen
-      VERSION: ${{ needs.setup-release.outputs.version }}
-      TAG: ${{ needs.setup-release.outputs.tag }}
-      SHA: ${{ github.sha }}
-      # Baked into the main process by electron/build.mjs.
-      VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
-      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-      SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-      SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-      VITE_SENTRY_ENVIRONMENT: ${{ needs.setup-release.outputs.nightly == 'true' && 'preview' || 'production' }}
-      VITE_APP_VERSION: ${{ needs.setup-release.outputs.version }}
-      SABLE_BUILD_FLAVOR: ${{ needs.setup-release.outputs.nightly == 'true' && 'nightly' || 'stable' }}
-    steps:
-      - name: Check out repository
-        uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.setup-release.outputs.ref }}
-          persist-credentials: false
-      - name: Download web assets
-        uses: https://code.forgejo.org/forgejo/download-artifact@769f970437aa3291b13f35dc23fc87967d7fb19f # v7
-        with:
-          name: web-assets
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential libclang-dev libpipewire-0.3-dev pkg-config rpm
-          # The Electron binary links these even under ELECTRON_RUN_AS_NODE.
-          asound=$(apt-cache show libasound2t64 >/dev/null 2>&1 && echo libasound2t64 || echo libasound2)
-          sudo apt-get install --no-install-recommends -y libnss3 libgtk-3-0 libgbm1 "$asound"
-      - name: Set up app
-        uses: ./.forgejo/actions/setup
-        with:
-          rust: 'true'
-          rust-cache-key: electron-linux
-          install-mise-tools: 'false'
-      - name: Package
-        run: pnpm --dir electron package --linux
-      - name: Upload native addon symbols
-        run: node scripts/ci/upload-sentry-symbols.mjs electron/dist
-      - name: Verify native core shutdown
-        run: SABLE_NODE_ADDON="$PWD/electron/dist/sable_node.node" node --test crates/sable-node/tests/native-lifecycle.mjs
-      - name: Verify native core shutdown in Electron
-        run: ELECTRON_RUN_AS_NODE=1 SABLE_NODE_ADDON="$PWD/electron/dist/sable_node.node" pnpm --dir electron exec electron --test "$PWD/crates/sable-node/tests/native-lifecycle.mjs"
-      - name: Publish Electron bundles and update metadata
-        run: node electron/publish-updates.mjs
-      - name: Publish deb and rpm to the package registries
-        env:
-          PACKAGES_USER: ${{ secrets.PACKAGES_USER }}
-          PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
-        run: |
-          channel=stable
-          case "$VERSION" in *-nightly.*) channel=nightly ;; esac
-          api="https://git.sable.moe/api/packages/${GITHUB_REPOSITORY_OWNER}"
-          upload() {
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --user "$PACKAGES_USER:$PACKAGES_TOKEN" \
-              --upload-file "$1" "$2")
-            # 409 means this exact version is already published.
-            case "$code" in 201|409) ;; *) echo "Upload of $1 failed with HTTP $code" >&2; exit 1 ;; esac
-          }
-          for deb in electron/release/*.deb; do
-            upload "$deb" "$api/debian/pool/$channel/main/upload"
-          done
-          for rpm in electron/release/*.rpm; do
-            upload "$rpm" "$api/rpm/$channel/upload?sign=true"
-          done
-
   electron-macos:
     name: macOS arm64 (Electron)
     needs: [setup-release, build-web]
@@ -760,9 +677,10 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 60
-    permissions:
-      contents: write
     env:
+      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
       VERSION: ${{ needs.setup-release.outputs.version }}
       TAG: ${{ needs.setup-release.outputs.tag }}
       SHA: ${{ github.sha }}
@@ -822,6 +740,9 @@ jobs:
       - name: Remove the signing keychain
         if: ${{ always() && env.APPLE_CERTIFICATE != '' }}
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+      - name: Show sccache stats
+        if: ${{ always() && env.RUSTC_WRAPPER != '' }}
+        run: sccache --show-stats || true
       - name: Upload native addon symbols
         run: node scripts/ci/upload-sentry-symbols.mjs electron/dist
       - name: Verify native core shutdown
@@ -839,13 +760,14 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 60
-    permissions:
-      contents: write
     outputs:
       ipa_size: ${{ steps.ipa.outputs.size }}
       ipa_version: ${{ steps.ipa.outputs.version }}
       ipa_build: ${{ steps.ipa.outputs.build }}
     env:
+      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
       RUST_TARGETS: aarch64-apple-ios
@@ -925,6 +847,9 @@ jobs:
             echo "version=$short_version"
             echo "build=$bundle_version"
           } >> "$GITHUB_OUTPUT"
+      - name: Show sccache stats
+        if: ${{ always() && env.RUSTC_WRAPPER != '' }}
+        run: sccache --show-stats || true
       - name: Attach iOS bundle to release
         env:
           IPA_PATH: ${{ steps.ipa.outputs.path }}
@@ -932,9 +857,19 @@ jobs:
       - name: Upload to TestFlight
         env:
           IPA_PATH: ${{ steps.ipa.outputs.path }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APP_STORE_API_KEY_BASE64 }}
         run: |
           command -v fastlane >/dev/null || brew install fastlane
           fastlane ios testflight ipa:"$IPA_PATH" version:"$VERSION"
+      - name: Submit to the App Store
+        if: ${{ needs.setup-release.outputs.nightly != 'true' }}
+        env:
+          SHORT_VERSION: ${{ steps.ipa.outputs.version }}
+          BUILD: ${{ steps.ipa.outputs.build }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APP_STORE_API_KEY_BASE64 }}
+        run: |
+          notes="$PWD/$(node -e 'import("./scripts/release/release-prep.mjs").then((m) => console.log(m.fastlaneChangelogs(process.argv[1]).at(-1)))' "$VERSION")"
+          fastlane ios app_store version:"$SHORT_VERSION" build:"$BUILD" notes:"$notes"
 
   github-bundles:
     name: Wait for GitHub bundles
@@ -942,7 +877,7 @@ jobs:
     if: ${{ needs.setup-release.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # github-bundles.json is published by the GitHub-side handoff job, which
-    # waits on the Windows and Linux aarch64 builds.
+    # waits on the Windows and Linux Electron builds.
     timeout-minutes: 120
     steps:
       - name: Check out repository
@@ -961,8 +896,6 @@ jobs:
     needs: [setup-release, android, github-bundles]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -981,8 +914,6 @@ jobs:
     needs: [setup-release, ios]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -1041,8 +972,6 @@ jobs:
     if: ${{ needs.setup-release.outputs.nightly != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -1088,8 +1017,6 @@ jobs:
     if: ${{ always() && needs.setup-release.outputs.nightly == 'true' && needs.setup-release.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       SHA: ${{ github.sha }}
@@ -1137,12 +1064,10 @@ jobs:
           node scripts/ci/forgejo-release.mjs prune --keep "$NIGHTLY_KEEP" --protect "$protect"
   sign-release:
     name: Sign release checksums
-    needs: [setup-release, electron-linux, electron-macos, obtainium, altstore]
+    needs: [setup-release, github-bundles, electron-macos, obtainium, altstore]
     if: ${{ needs.setup-release.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: write
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       RELEASE_GPG_KEY: ${{ secrets.RELEASE_GPG_KEY }}
@@ -1178,11 +1103,9 @@ jobs:
         run: echo '::notice::RELEASE_GPG_KEY/RELEASE_GPG_KEY_ID are not set; skipping the checksum signature.'
   distribute-aur:
     name: Publish to the AUR
-    needs: [setup-release, electron-linux]
+    needs: [setup-release, github-bundles]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -1254,8 +1177,6 @@ jobs:
     if: ${{ needs.setup-release.outputs.nightly != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -1314,12 +1235,10 @@ jobs:
           push_tap Forgejo "${HOMEBREW_TAP_TOKEN:-}" git.sable.moe/SableClient/homebrew-sable.git
   distribute-gentoo:
     name: Publish the Gentoo overlay
-    needs: [setup-release, electron-linux]
+    needs: [setup-release, github-bundles]
     if: ${{ needs.setup-release.outputs.nightly != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
@@ -1357,8 +1276,6 @@ jobs:
     if: ${{ needs.setup-release.outputs.nightly != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
     env:
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}

@@ -7,12 +7,7 @@ use super::{in_room, reingest_whole_room};
 use crate::search::MessageIndex;
 use crate::search::crawl::{CrawlBatch, CrawlOutcome};
 
-async fn wait_for_hits(
-    core: &crate::Core,
-    room_id: &matrix_sdk::ruma::OwnedRoomId,
-    query: &str,
-    count: usize,
-) {
+async fn wait_for_hits(core: &crate::Core, room_id: &ruma::OwnedRoomId, query: &str, count: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while in_room(
             &*core.search_index.lock().await,
@@ -63,7 +58,7 @@ async fn test_search_watcher_releases_paginated_room_cache() {
         .map(|index| {
             factory
                 .text_msg("archaeology")
-                .event_id(&EventId::parse(format!("$history{index}")).unwrap())
+                .event_id(EventId::parse(format!("$history{index}")).unwrap())
         })
         .collect();
     server

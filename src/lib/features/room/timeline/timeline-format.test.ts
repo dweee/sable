@@ -117,6 +117,7 @@ const defaults: TimelinePreferences = {
   hideProfileChanges: true,
   hideTopicChanges: false,
   hideMemberInReadOnly: true,
+  hideSentBeforeJoined: false,
   showTombstoneEvents: false,
   showHiddenEvents: false,
   hiddenEventEdits: true,
@@ -288,6 +289,25 @@ test('honours each toggle independently', () => {
   expect(shown.map((entry) => entry.content.kind)).toEqual(['profile_change', 'state_event']);
 });
 
+test('can hide messages sent before the join', () => {
+  const unreadable = withEvent(
+    item({ kind: 'unable_to_decrypt', reason: 'sent_before_we_joined', session_id: null }),
+    '$old'
+  );
+  const waiting = withEvent(
+    item({ kind: 'unable_to_decrypt', reason: 'unknown', session_id: null }),
+    '$waiting'
+  );
+
+  expect(visibleTimelineItems([unreadable, waiting, message], defaults)).toHaveLength(3);
+  expect(
+    visibleTimelineItems([unreadable, waiting, message], {
+      ...defaults,
+      hideSentBeforeJoined: true,
+    })
+  ).toEqual([waiting, message]);
+});
+
 const removed = item({ kind: 'redacted', reason: null, redacted_by: null });
 
 test('keeps tombstones out unless the preference asks for them', () => {
@@ -441,6 +461,7 @@ test('only a connected reply preview starts a new message group', () => {
       sender_name: 'Bob',
       body: 'Earlier message',
       fallback: null,
+      emotes: [],
     },
   } as TimelineItemView;
   const run = [first, reply];

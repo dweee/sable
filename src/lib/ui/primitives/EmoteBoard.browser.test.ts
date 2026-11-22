@@ -71,11 +71,11 @@ async function mountBoard(props: { tab?: 'emoticon' | 'sticker'; unicode?: boole
     ...props,
   });
   const list = () => {
-    const node = document.querySelector<HTMLElement>('.virtual-list-wrapper');
+    const node = document.querySelector<HTMLElement>('.grid-scroller');
     if (!node) throw new Error('the board list is not rendered');
     return node;
   };
-  await expect.poll(() => document.querySelector('.virtual-list-wrapper')).not.toBeNull();
+  await expect.poll(() => document.querySelector('.grid-scroller')).not.toBeNull();
   return { screen, list };
 }
 
@@ -169,6 +169,19 @@ test('sticker rows keep every cell whole on one line', async () => {
   }
 });
 
+test('the previewed shortcode is set in the interface font', async () => {
+  const { screen } = await mountBoard({ tab: 'sticker' });
+  const cell = screen.getByRole('button', { name: ':alpha0:', exact: true });
+  await expect.element(cell).toBeVisible();
+  cell.element().focus();
+
+  await expect.poll(() => document.querySelector('.preview code')).not.toBeNull();
+  const shortcode = document.querySelector('.preview code');
+  const pack = document.querySelector('.preview-pack');
+  if (!shortcode || !pack) throw new Error('the preview is not rendered');
+  expect(getComputedStyle(shortcode).fontFamily).toBe(getComputedStyle(pack).fontFamily);
+});
+
 test('search shows matching emotes from different packs with the same shortcode', async () => {
   activePacks = ['one', 'two'].map((id) => ({
     id,
@@ -199,4 +212,27 @@ test('search shows matching emotes from different packs with the same shortcode'
   await expect
     .poll(() => screen.getByRole('button', { name: ':duplicate:' }).elements().length)
     .toBe(2);
+});
+
+test('a board opened while hidden still shows its emoji once visible', async () => {
+  activePacks = [];
+  const host = document.createElement('div');
+  host.style.cssText = 'display: none; height: 600px; width: 400px';
+  document.body.append(host);
+  await render(EmoteBoard, {
+    target: host,
+    props: { roomId: '!room:example.test', unicode: true, onPick: vi.fn() },
+  });
+  await expect.poll(() => host.querySelector('.grids .unicode button')).not.toBeNull();
+
+  host.style.display = 'flex';
+
+  await expect
+    .poll(
+      () =>
+        host.querySelector<HTMLElement>('.grids .unicode')?.closest<HTMLElement>('.virtual-row')
+          ?.offsetHeight
+    )
+    .toBeGreaterThan(0);
+  host.remove();
 });

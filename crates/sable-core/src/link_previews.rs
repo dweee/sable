@@ -28,7 +28,19 @@ pub(crate) fn is_mxc(source: &str) -> bool {
     source.starts_with("mxc://")
 }
 
-#[cfg(any(target_family = "wasm", test))]
+pub(crate) fn service_client() -> Result<reqwest::Client, RpcError> {
+    let builder = crate::tls::apply(reqwest::Client::builder());
+    #[cfg(not(target_family = "wasm"))]
+    let builder = builder.timeout(std::time::Duration::from_secs(10));
+    builder.build().map_err(|error| {
+        crate::errors::coded(
+            "link_preview_client",
+            crate::protocol::RpcCode::Unavailable,
+            &error,
+        )
+    })
+}
+
 pub(crate) async fn soliditas_preview(
     base: &str,
     target: &str,
@@ -46,20 +58,14 @@ pub(crate) async fn soliditas_preview(
     })?;
     endpoint.query_pairs_mut().append_pair("url", target);
 
-    let builder = crate::tls::apply(matrix_sdk::reqwest::Client::builder());
-    #[cfg(not(target_family = "wasm"))]
-    let builder = builder.timeout(std::time::Duration::from_secs(10));
-    let http = builder.build().map_err(|error| {
-        crate::errors::coded(
-            "link_preview_client",
-            crate::protocol::RpcCode::Unavailable,
-            &error,
-        )
-    })?;
-    let response = http.get(endpoint).send().await.map_err(|error| {
-        tracing::warn!("soliditas preview failed: {}", error.without_url());
-        crate::protocol::RpcCode::Unavailable
-    })?;
+    let response = service_client()?
+        .get(endpoint)
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!("soliditas preview failed: {}", error.without_url());
+            crate::protocol::RpcCode::Unavailable
+        })?;
 
     let status = response.status();
     if status.is_client_error() {
@@ -108,18 +114,25 @@ fn into_post_view(post: Post) -> PostView {
             url: post.author.url.filter(|url| is_preview_url(url)),
         },
         text: text(post.text),
+        translated_from: text(post.translated_from),
         created_at: post.created_at,
         media: post
             .media
             .into_iter()
             .filter_map(|media| {
-                Some(PostMediaView {
-                    kind: match media.kind {
-                        PostMediaKind::Image => PostMediaKindView::Image,
-                        PostMediaKind::Video => PostMediaKindView::Video,
-                        PostMediaKind::Gif => PostMediaKindView::Gif,
-                    },
-                    source: encrypted_source(media.encrypted).or(media.url)?,
+                let source = encrypted_source(media.encrypted).or(media.url);
+                let poster = encrypted_source(media.poster_encrypted).or(media.poster);
+                let kind = match media.kind {
+                    PostMediaKind::Image => PostMediaKindView::Image,
+                    PostMediaKind::Video => PostMediaKindView::Video,
+                    PostMediaKind::Gif => PostMediaKindView::Gif,
+                };
+                let shown =
+                    source.is_some() || (kind != PostMediaKindView::Image && poster.is_some());
+                shown.then(|| PostMediaView {
+                    kind,
+                    source,
+                    poster,
                     mime: media.mime,
                     width: media.width,
                     height: media.height,
@@ -157,7 +170,7 @@ fn uploaded(image: &PreviewImage) -> (Option<String>, Option<serde_json::Value>,
     }
 }
 
-/// Videos are too large to upload, so a bundle leaves them out.
+/// Videos are too large to upload, so a bundle keeps their poster instead.
 fn bundle_post(post: &PostView, images: &HashMap<String, PreviewImage>) -> Post {
     let (avatar, avatar_encrypted, avatar_size) = post
         .author
@@ -176,15 +189,35 @@ fn bundle_post(post: &PostView, images: &HashMap<String, PreviewImage>) -> Post 
             url: post.author.url.clone(),
         },
         text: post.text.clone(),
+        translated_from: post.translated_from.clone(),
         created_at: post.created_at,
         media: post
             .media
             .iter()
-            .filter(|media| media.kind == PostMediaKindView::Image)
             .filter_map(|media| {
-                let (url, encrypted, size) = uploaded(images.get(&media.source)?);
+                let source = media.source.as_deref();
+                let (url, encrypted, size) = match media.kind {
+                    PostMediaKindView::Image => uploaded(images.get(source?)?),
+                    PostMediaKindView::Video | PostMediaKindView::Gif => (
+                        source
+                            .filter(|source| is_mxc(source))
+                            .map(ToOwned::to_owned),
+                        None,
+                        None,
+                    ),
+                };
+                let (poster, poster_encrypted, poster_size) = media
+                    .poster
+                    .as_deref()
+                    .filter(|_| media.kind != PostMediaKindView::Image)
+                    .and_then(|poster| images.get(poster))
+                    .map_or((None, None, None), uploaded);
                 Some(PostMedia {
-                    kind: PostMediaKind::Image,
+                    kind: match media.kind {
+                        PostMediaKindView::Image => PostMediaKind::Image,
+                        PostMediaKindView::Video => PostMediaKind::Video,
+                        PostMediaKindView::Gif => PostMediaKind::Gif,
+                    },
                     url,
                     encrypted,
                     size,
@@ -192,6 +225,9 @@ fn bundle_post(post: &PostView, images: &HashMap<String, PreviewImage>) -> Post 
                     width: media.width,
                     height: media.height,
                     alt: media.alt.clone(),
+                    poster,
+                    poster_encrypted,
+                    poster_size,
                 })
             })
             .collect(),
@@ -221,7 +257,7 @@ pub(crate) fn url_preview(url: String, data: &serde_json::Value) -> Option<UrlPr
     preview_view(url, &PreviewData::read(data)?, is_mxc)
 }
 
-fn preview_view(
+pub(crate) fn preview_view(
     url: String,
     data: &PreviewData,
     media: impl Fn(&str) -> bool,
@@ -259,103 +295,6 @@ fn preview_view(
         return None;
     }
     Some(preview)
-}
-
-#[cfg(not(target_family = "wasm"))]
-mod local {
-    use std::sync::LazyLock;
-    use std::time::Duration;
-
-    use sable_link_preview::{
-        Fetch as _, MAX_DIRECT_VIDEO_BYTES, PostMediaKind, ReqwestFetch, Response as _,
-    };
-
-    use crate::protocol::{RpcCode, RpcError, UrlPreviewView};
-
-    const USER_AGENT: &str = concat!(
-        "Sable/",
-        env!("SABLE_APP_VERSION"),
-        " (link preview; +https://sable.moe)"
-    );
-
-    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
-
-    const MAX_SCRAPED_MEDIA: usize = 512;
-
-    /// The media URLs a scrape handed out, with how many bytes each may take.
-    /// Only these reach the web, so an event naming a web URL as its media
-    /// cannot make the client fetch it.
-    static SCRAPED: LazyLock<parking_lot::Mutex<hashlink::LruCache<String, usize>>> =
-        LazyLock::new(|| parking_lot::Mutex::new(hashlink::LruCache::new(MAX_SCRAPED_MEDIA)));
-
-    fn client(timeout: Duration) -> Result<ReqwestFetch, RpcError> {
-        let builder = crate::tls::apply(matrix_sdk::reqwest::Client::builder())
-            .user_agent(USER_AGENT)
-            .timeout(timeout);
-        ReqwestFetch::new(builder).map_err(|error| {
-            crate::errors::coded("link_preview_fetcher", RpcCode::Unavailable, &error)
-        })
-    }
-
-    pub(crate) async fn scrape(
-        url: &str,
-        options: &sable_link_preview::ScrapeOptions,
-    ) -> Result<Option<UrlPreviewView>, RpcError> {
-        let Some(target) = sable_link_preview::parse_public_url(url, None) else {
-            return Ok(None);
-        };
-        let fetch = client(Duration::from_secs(10))?;
-        let Some(preview) = sable_link_preview::scrape(&fetch, &target, options).await else {
-            return Ok(None);
-        };
-        {
-            let video_cap = usize::try_from(MAX_DIRECT_VIDEO_BYTES).unwrap_or(usize::MAX);
-            let mut scraped = SCRAPED.lock();
-            for (url, kind) in preview.media_urls() {
-                let cap = match kind {
-                    PostMediaKind::Image => MAX_IMAGE_BYTES,
-                    PostMediaKind::Video | PostMediaKind::Gif => video_cap,
-                };
-                scraped.insert(url.into(), cap);
-            }
-        }
-        let data = serde_json::Value::Object(preview.to_matrix(ToString::to_string));
-        Ok(sable_link_preview::PreviewData::read(&data)
-            .and_then(|data| super::preview_view(url.to_owned(), &data, |_| true)))
-    }
-
-    pub(super) async fn scraped_media(
-        source: &str,
-        limit: usize,
-    ) -> Option<Result<Vec<u8>, RpcError>> {
-        let cap = SCRAPED.lock().get(source).copied()?;
-        Some(download(source, limit.min(cap)).await)
-    }
-
-    async fn download(source: &str, limit: usize) -> Result<Vec<u8>, RpcError> {
-        let url = url::Url::parse(source).map_err(|_| RpcCode::InvalidMedia)?;
-        let fetch = client(Duration::from_secs(60))?;
-        let response = fetch
-            .get(&url, "image/*,video/*;q=0.9,*/*;q=0.5")
-            .await
-            .ok_or(RpcCode::Unavailable)?;
-        let body = response
-            .body(limit.saturating_add(1))
-            .await
-            .ok_or(RpcCode::Unavailable)?;
-        if body.is_empty() || body.len() > limit {
-            return Err(RpcCode::InvalidMedia.into());
-        }
-        Ok(body)
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub(crate) use local::scrape as scrape_locally;
-
-#[cfg(not(target_family = "wasm"))]
-pub(crate) async fn scraped_media(source: &str) -> Option<Result<Vec<u8>, RpcError>> {
-    local::scraped_media(source, usize::MAX).await
 }
 
 const MAX_PREVIEW_IMAGE_BYTES: usize = 1024 * 1024;
@@ -431,26 +370,19 @@ pub(crate) fn bundled_link_previews(
 
 impl Core {
     async fn preview_image_bytes(
+        &self,
         client: &matrix_sdk::Client,
         image: &str,
-        #[cfg_attr(
-            target_family = "wasm",
-            expect(unused_variables, reason = "the web fetches no scraped media")
-        )]
         max_bytes: usize,
     ) -> Option<Vec<u8>> {
-        if is_mxc(image) {
-            let request = MediaRequestParameters {
-                source: MediaSource::Plain(OwnedMxcUri::from(image)),
-                format: MediaFormat::File,
-            };
-            return client.media().get_media_content(&request, false).await.ok();
+        if !is_mxc(image) {
+            return self.tunnel_media(image, max_bytes).await?.ok();
         }
-        #[cfg(not(target_family = "wasm"))]
-        if let Some(bytes) = local::scraped_media(image, max_bytes).await {
-            return bytes.ok();
-        }
-        None
+        let request = MediaRequestParameters {
+            source: MediaSource::Plain(OwnedMxcUri::from(image)),
+            format: MediaFormat::File,
+        };
+        client.media().get_media_content(&request, false).await.ok()
     }
 
     /// Keyed by the source they replace.
@@ -460,7 +392,7 @@ impl Core {
         previews: &[UrlPreviewView],
     ) -> HashMap<String, PreviewImage> {
         let mut images = HashMap::new();
-        let mut wanted: Vec<WantedImage> = Vec::new();
+        let mut wanted: Vec<WantedImage<'_>> = Vec::new();
         for preview in previews {
             for image in preview_images(preview) {
                 if let Some(known) = wanted.iter_mut().find(|known| known.source == image.source) {
@@ -486,7 +418,7 @@ impl Core {
             max_bytes,
         } in wanted
         {
-            let Some(data) = Self::preview_image_bytes(&client, image, max_bytes).await else {
+            let Some(data) = self.preview_image_bytes(&client, image, max_bytes).await else {
                 continue;
             };
             if data.is_empty() || data.len() > max_bytes {
@@ -520,7 +452,7 @@ struct WantedImage<'a> {
     max_bytes: usize,
 }
 
-/// The main image, then the avatars and images of the post and its quote.
+/// The main image, then the avatars, images and posters of the post and its quote.
 fn preview_images(preview: &UrlPreviewView) -> Vec<WantedImage<'_>> {
     fn post_images<'a>(post: &'a PostView, images: &mut Vec<WantedImage<'a>>) {
         images.extend(post.author.avatar.as_deref().map(|avatar| WantedImage {
@@ -528,16 +460,21 @@ fn preview_images(preview: &UrlPreviewView) -> Vec<WantedImage<'_>> {
             mime: None,
             max_bytes: MAX_PREVIEW_IMAGE_BYTES,
         }));
-        images.extend(
-            post.media
-                .iter()
-                .filter(|media| media.kind == PostMediaKindView::Image)
-                .map(|media| WantedImage {
-                    source: &media.source,
+        images.extend(post.media.iter().filter_map(|media| {
+            if media.kind == PostMediaKindView::Image {
+                Some(WantedImage {
+                    source: media.source.as_deref()?,
                     mime: media.mime.as_deref(),
                     max_bytes: MAX_POST_IMAGE_BYTES,
-                }),
-        );
+                })
+            } else {
+                Some(WantedImage {
+                    source: media.poster.as_deref()?,
+                    mime: None,
+                    max_bytes: MAX_PREVIEW_IMAGE_BYTES,
+                })
+            }
+        }));
         if let Some(quote) = &post.quote {
             post_images(quote, images);
         }
@@ -567,7 +504,7 @@ mod tests {
         let images = std::collections::HashMap::from([(
             previews[0].image.clone().unwrap(),
             super::PreviewImage {
-                source: matrix_sdk::ruma::events::room::MediaSource::Plain(
+                source: ruma::events::room::MediaSource::Plain(
                     "mxc://example.org/persistent".into(),
                 ),
                 size: 42,
@@ -701,7 +638,22 @@ mod tests {
     }
 
     #[test]
-    fn a_post_keeps_only_mxc_media_and_bundles_only_uploaded_images() {
+    fn a_translated_post_names_the_language_it_came_from() {
+        let data = serde_json::json!({
+            "og:type": "note",
+            "note:content": "Hello",
+            "note:content:translated_from": "ja",
+        });
+        let post = super::url_preview("https://x.com/ran/status/1".to_owned(), &data)
+            .and_then(|preview| preview.post);
+        assert_eq!(
+            post.and_then(|post| post.translated_from).as_deref(),
+            Some("ja")
+        );
+    }
+
+    #[test]
+    fn a_post_keeps_only_mxc_media_and_bundles_only_hosted_media() {
         let data = serde_json::json!({
             "og:title": "Alice (@alice.test)",
             "og:type": "note",
@@ -730,7 +682,7 @@ mod tests {
         assert_eq!(post.author.avatar, None);
         assert_eq!(post.author.url, None);
         assert_eq!(post.media.len(), 1);
-        assert_eq!(post.media[0].source, "mxc://s/cat");
+        assert_eq!(post.media[0].source.as_deref(), Some("mxc://s/cat"));
         assert_eq!(
             post.sensitivity,
             Some(crate::protocol::PostSensitivityView::Spoiler)
@@ -741,7 +693,7 @@ mod tests {
             Some("https://bsky.app/profile/bob.test/post/1")
         );
         assert_eq!(quote.media[0].kind, crate::protocol::PostMediaKindView::Gif);
-        assert_eq!(quote.media[0].source, "mxc://s/gif");
+        assert_eq!(quote.media[0].source.as_deref(), Some("mxc://s/gif"));
 
         let bundles =
             super::bundled_link_previews(&[preview], &std::collections::HashMap::new(), true)
@@ -761,13 +713,15 @@ mod tests {
                 "related:1:og:type": "note",
                 "related:1:og:url": "https://bsky.app/profile/bob.test/post/1",
                 "related:1:note:content": "quoted",
+                "related:1:og:video": "mxc://s/gif",
+                "related:1:og:video:com.sable.gif": true,
             })
         );
     }
 
     #[test]
     fn a_bundled_post_carries_its_uploaded_images_like_og_image() {
-        let file: matrix_sdk::ruma::events::room::EncryptedFile =
+        let file: ruma::events::room::EncryptedFile =
             serde_json::from_value(encrypted_file("mxc://example.org/face")).unwrap();
         let mut preview = preview("https://bsky.app/x");
         preview.post = Some(crate::protocol::PostView {
@@ -785,10 +739,13 @@ mod tests {
                     crate::protocol::PostMediaKindView::Image,
                     "https://cdn/dog.png",
                 ),
-                post_media(
-                    crate::protocol::PostMediaKindView::Video,
-                    "https://cdn/clip.mp4",
-                ),
+                crate::protocol::PostMediaView {
+                    poster: Some("https://cdn/still.jpg".to_owned()),
+                    ..post_media(
+                        crate::protocol::PostMediaKindView::Video,
+                        "https://cdn/clip.mp4",
+                    )
+                },
             ],
             ..Default::default()
         });
@@ -796,17 +753,24 @@ mod tests {
             (
                 "https://cdn/face.jpg".to_owned(),
                 super::PreviewImage {
-                    source: matrix_sdk::ruma::events::room::MediaSource::Encrypted(Box::new(file)),
+                    source: ruma::events::room::MediaSource::Encrypted(Box::new(file)),
                     size: 5,
                 },
             ),
             (
                 "https://cdn/cat.png".to_owned(),
                 super::PreviewImage {
-                    source: matrix_sdk::ruma::events::room::MediaSource::Plain(
-                        "mxc://example.org/cat".into(),
-                    ),
+                    source: ruma::events::room::MediaSource::Plain("mxc://example.org/cat".into()),
                     size: 9,
+                },
+            ),
+            (
+                "https://cdn/still.jpg".to_owned(),
+                super::PreviewImage {
+                    source: ruma::events::room::MediaSource::Plain(
+                        "mxc://example.org/still".into(),
+                    ),
+                    size: 4,
                 },
             ),
         ]);
@@ -829,6 +793,9 @@ mod tests {
                 "og:image": "mxc://example.org/cat",
                 "og:image:alt": "alt",
                 "matrix:image:size": 9,
+                "og:video:alt": "alt",
+                "og:video:com.sable.poster": "mxc://example.org/still",
+                "matrix:video:com.sable.poster:size": 4,
             })
         );
 
@@ -838,7 +805,19 @@ mod tests {
             .unwrap();
         let avatar = read.author.avatar.unwrap();
         assert!(avatar.starts_with('{') && avatar.contains("mxc://example.org/face"));
-        assert_eq!(read.media[0].source, "mxc://example.org/cat");
+        assert_eq!(
+            read.media[0].source.as_deref(),
+            Some("mxc://example.org/cat")
+        );
+        assert_eq!(
+            read.media[1].kind,
+            crate::protocol::PostMediaKindView::Video
+        );
+        assert_eq!(read.media[1].source, None);
+        assert_eq!(
+            read.media[1].poster.as_deref(),
+            Some("mxc://example.org/still")
+        );
     }
 
     fn note_keys(bundle: &serde_json::Value) -> serde_json::Value {
@@ -854,6 +833,7 @@ mod tests {
                     "og:image",
                     "og:video",
                     "matrix:image",
+                    "matrix:video",
                 ]
                 .iter()
                 .any(|prefix| key.starts_with(prefix))
@@ -869,7 +849,8 @@ mod tests {
     ) -> crate::protocol::PostMediaView {
         crate::protocol::PostMediaView {
             kind,
-            source: source.to_owned(),
+            source: Some(source.to_owned()),
+            poster: None,
             mime: None,
             width: None,
             height: None,
@@ -895,36 +876,6 @@ mod tests {
         let data = serde_json::json!({ "og:type": "note", "note:content": "just text" });
         let preview = super::url_preview("https://e".to_owned(), &data).unwrap();
         assert_eq!(preview.post.unwrap().text.as_deref(), Some("just text"));
-    }
-
-    #[tokio::test]
-    async fn only_scraped_media_reaches_the_web() {
-        assert!(
-            super::scraped_media("https://tracker.example/pixel.png")
-                .await
-                .is_none()
-        );
-        assert!(
-            super::scraped_media("mxc://example.org/media")
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_local_scrape_refuses_non_public_urls() {
-        for url in [
-            "http://localhost/",
-            "http://192.168.1.1/",
-            "ftp://files.example/",
-        ] {
-            assert!(
-                super::scrape_locally(url, &sable_link_preview::ScrapeOptions::default())
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-        }
     }
 
     #[tokio::test]

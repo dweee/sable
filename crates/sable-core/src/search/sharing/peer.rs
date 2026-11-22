@@ -30,7 +30,7 @@ use crate::search::now_ms;
 
 mod transfer;
 
-use transfer::{Download, Saved, Transfer};
+use transfer::{ReceiverState, Saved, Transfer};
 
 const MAX_ASKED: usize = 32;
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -42,7 +42,7 @@ const INACTIVE_DEVICE: Duration = Duration::from_hours(90 * 24);
 const SESSION_ID_LEN: usize = 32;
 /// Devices only talk to devices using the same copy protocol. Events from
 /// releases before this field existed fail to parse and are ignored.
-const PROTOCOL_VERSION: u32 = 4;
+const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Deserialize, Serialize, EventContent)]
 #[ruma_event(type = "moe.sable.search_peer.v1", kind = ToDevice)]
@@ -181,7 +181,8 @@ struct State {
     /// devices with more are copied from.
     own: (u64, u64),
     outcome: Option<SearchPeerOutcome>,
-    rooms: usize,
+    transferred_rooms: usize,
+    total_rooms: usize,
     /// Loaded from the store on first use.
     saved: Option<Saved>,
     /// Bumped when `saved` is wiped, so a copy that started before does not
@@ -207,7 +208,8 @@ impl State {
         self.asked.clear();
         self.candidates.clear();
         self.outcome = None;
-        self.rooms = 0;
+        self.transferred_rooms = 0;
+        self.total_rooms = 0;
         true
     }
 
@@ -303,7 +305,7 @@ impl State {
                 .all(|candidate| candidate.documents == 0 || candidate.score() <= own)
             {
                 SearchPeerOutcome::NothingToCopy
-            } else if self.rooms > 0 {
+            } else if self.transferred_rooms > 0 {
                 SearchPeerOutcome::Interrupted
             } else {
                 SearchPeerOutcome::Failed
@@ -323,7 +325,7 @@ impl State {
             session: Session::new(
                 session,
                 device.clone(),
-                Transfer::Receiving(Download::default()),
+                Transfer::Receiving(ReceiverState::new(self.epoch)),
                 now,
             ),
             until: now + CONNECT_TIMEOUT,
@@ -381,7 +383,7 @@ impl SearchSharing {
         };
     }
 
-    pub(crate) fn restoring(&self, room: &matrix_sdk::ruma::RoomId) -> bool {
+    pub(crate) fn restoring(&self, room: &ruma::RoomId) -> bool {
         self.state
             .lock()
             .restoring
@@ -400,8 +402,6 @@ impl Core {
             Some(SearchPeerPause::Offline)
         } else if !self.search_network.allows_crawl() {
             Some(SearchPeerPause::Metered)
-        } else if !self.search_foreground.load(Ordering::Relaxed) {
-            Some(SearchPeerPause::Background)
         } else {
             None
         }
@@ -455,7 +455,8 @@ impl Core {
                 device_id: device.to_string(),
                 name: state.name_of(device),
             }),
-            rooms_copied: state.rooms,
+            transferred_rooms: state.transferred_rooms,
+            total_rooms: state.total_rooms,
             last_copy: state
                 .saved
                 .as_ref()
@@ -476,9 +477,15 @@ impl Core {
         }
     }
 
-    pub(crate) fn refresh_search_peers(&self) {
+    pub(crate) async fn refresh_search_peers(&self) {
         if self.search_peer_pause().is_some() {
             self.cancel_search_peers();
+        } else if self.app_in_foreground.load(Ordering::Relaxed) && {
+            let state = self.search_sharing.state.lock();
+            matches!(state.phase, Phase::Idle)
+                && state.outcome == Some(SearchPeerOutcome::Interrupted)
+        } {
+            let _ = self.find_search_peers().await;
         } else {
             self.update_sharing(|_| {});
         }
@@ -540,6 +547,7 @@ impl Core {
                 loop {
                     matrix_sdk::sleep::sleep(Duration::from_secs(1)).await;
                     let Some(core) = weak.upgrade() else { return };
+                    core.wait_until_active().await;
                     if !core.is_current(generation) {
                         return;
                     }
@@ -869,7 +877,7 @@ impl Core {
                 device_id: device.to_string(),
                 name: state.name_of(&device),
                 at_ms: now_ms(),
-                rooms: state.rooms,
+                rooms: state.transferred_rooms,
             })
         });
         let Some(copy) = copy else { return };

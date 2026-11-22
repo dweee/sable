@@ -13,6 +13,8 @@
   import UsersIcon from 'phosphor-svelte/lib/UsersIcon';
   import WarningCircleIcon from 'phosphor-svelte/lib/WarningCircleIcon';
   import { onDestroy, onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { resolve } from '$app/paths';
   import type { MemberView } from '#src/generated/protocol';
 
   import { memberIdentity, type MemberIdentity } from '#lib/features/room/members/members.js';
@@ -42,6 +44,7 @@
     type CallTile,
   } from './call-layout';
   import type { CallSession } from './call-session.svelte.js';
+  import { collectCallSnapshot, holdCallSnapshot } from './call-snapshot';
   import { callFailureKey, callStatusKey } from './call-status';
   import { callFullscreen } from './call-fullscreen.svelte.js';
 
@@ -65,6 +68,8 @@
       })
     )
   );
+
+  let backendUnreachable = $derived((session.transport.unreachableBackends?.length ?? 0) > 0);
 
   let byIdentity = $derived(
     new Map(session.members.map((member) => [member.identity, member.user_id]))
@@ -209,6 +214,12 @@
     onOpenSettings?.(event);
   }
 
+  async function reportProblem(): Promise<void> {
+    holdCallSnapshot(await collectCallSnapshot(session));
+    fullscreen.exit();
+    await goto(resolve('bugreport'));
+  }
+
   onDestroy(() => clearTimeout(idleTimer));
 
   onMount(() => {
@@ -336,6 +347,7 @@
         audioRoutes={session.audioRoutes}
         audioInputs={session.audioInputs}
         onOpenSettings={onOpenSettings ? openCallSettings : undefined}
+        onReportProblem={() => void reportProblem()}
       />
       {#if busy}
         <p class="securing">{i18n.t('call.controlsLocked')}</p>
@@ -347,11 +359,21 @@
     {#if session.desktopShortcutStatus === 'error'}
       <Alert variant="warning" class="notice">
         <p>{i18n.t('call.desktopShortcutsUnavailable')}</p>
+        <div class="notice-actions">
+          <Button variant="ghost" onclick={() => (session.desktopShortcutStatus = 'inactive')}>
+            {i18n.t('common.dismiss')}
+          </Button>
+        </div>
       </Alert>
     {/if}
     {#if session.listenOnly}
       <Alert variant="warning" class="notice">
         <p>{i18n.t('call.listenOnly')}</p>
+      </Alert>
+    {/if}
+    {#if backendUnreachable}
+      <Alert variant="warning" class="notice">
+        <p>{i18n.t('call.backendUnreachable')}</p>
       </Alert>
     {/if}
     {#if session.deviceError}
@@ -386,7 +408,14 @@
   <div
     class={[
       'media',
-      { 'with-notice': session.deviceError !== null || session.listenOnly, locked: busy },
+      {
+        'with-notice':
+          session.deviceError !== null ||
+          session.desktopShortcutStatus === 'error' ||
+          session.listenOnly ||
+          backendUnreachable,
+        locked: busy,
+      },
     ]}
     style:--tile-aspect={aspect}
     style:--notice-height="{noticeHeight}px"
@@ -396,6 +425,9 @@
       <div class="failed" role="alert">
         <EmptyState title={i18n.t('call.failed')} description={i18n.t(callFailureKey(failure))}>
           {#snippet actions()}
+            <Button variant="ghost" onclick={() => void reportProblem()}>
+              {i18n.t('call.reportProblem')}
+            </Button>
             <Button variant="secondary" onclick={() => session.clearFailure()}>
               {i18n.t('call.leave')}
             </Button>
@@ -662,10 +694,7 @@
     flex: 1;
     min-height: 0;
     padding: calc(var(--space-200) + var(--control-height-300) + var(--space-200)) var(--space-300)
-      calc(
-        var(--control-height-500) + var(--space-150) * 2 + var(--border-width) * 2 +
-          var(--space-300) * 2
-      );
+      var(--space-300);
   }
 
   .media.with-notice {
@@ -679,6 +708,10 @@
       var(--control-height-500) + var(--space-150) * 3 + var(--border-width) * 2 +
         var(--space-300) * 2 + var(--space-500)
     );
+  }
+
+  .resting .media:not(.with-notice) {
+    padding-block-start: var(--space-300);
   }
 
   .failed {

@@ -20,12 +20,13 @@ const NEEDS_KEY_QUIETLY: &str = "needs-key-quietly";
 pub(crate) extern "system" fn Java_moe_sable_push_PushPayloadDecryptor_nativePreviewBody<'frame>(
     mut unowned_env: EnvUnowned<'frame>,
     _class: JClass<'frame>,
-    body: JString<'frame>,
-    formatted: JString<'frame>,
+    content: JString<'frame>,
 ) -> JString<'frame> {
     let result = unowned_env.with_env(|env: &mut Env<'frame>| -> Result<_, jni::errors::Error> {
-        let preview =
-            sable_core::matrix_html::preview_body(&body.to_string(), Some(&formatted.to_string()));
+        let preview = serde_json::from_str(&content.to_string())
+            .ok()
+            .and_then(|content| sable_core::notifications::push_preview(&content))
+            .unwrap_or_default();
         JString::from_str(env, preview)
     });
     result.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
@@ -173,8 +174,7 @@ async fn bounded<T>(
 
 /// The cached push client's background tasks need a runtime that outlives each call.
 fn cold_runtime() -> Option<&'static tokio::runtime::Runtime> {
-    static RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
-        std::sync::OnceLock::new();
+    static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
     RUNTIME
         .get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
@@ -285,7 +285,7 @@ pub(crate) extern "system" fn Java_moe_sable_push_PushPayloadDecryptor_nativeRea
     result.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// An empty `sender` skips the avatars, an empty `content` the message's image.
+/// An empty `sender` skips the avatars, an empty `content` the message's profile and image.
 #[unsafe(no_mangle)]
 #[expect(unsafe_code, reason = "JNI entry point")]
 pub(crate) extern "system" fn Java_moe_sable_push_PushPayloadDecryptor_nativePushMedia<'frame>(
@@ -297,6 +297,7 @@ pub(crate) extern "system" fn Java_moe_sable_push_PushPayloadDecryptor_nativePus
     room_id: JString<'frame>,
     sender: JString<'frame>,
     payload_name: JString<'frame>,
+    payload_avatar: JString<'frame>,
     content: JString<'frame>,
 ) -> JString<'frame> {
     let result = unowned_env.with_env(|env: &mut Env<'frame>| -> Result<_, jni::errors::Error> {
@@ -304,24 +305,39 @@ pub(crate) extern "system" fn Java_moe_sable_push_PushPayloadDecryptor_nativePus
         let sender = sender.to_string();
         let sender = Some(sender.as_str()).filter(|sender| !sender.is_empty());
         let payload_name = payload_name.to_string();
+        let payload_avatar = payload_avatar.to_string();
+        let payload_avatar = Some(payload_avatar.as_str()).filter(|avatar| !avatar.is_empty());
         let content = serde_json::from_str::<serde_json::Value>(&content.to_string()).ok();
         let fallback = sable_core::notifications::PushMedia {
-            sender_name: sable_core::notifications::push_sender_name(sender, Some(&payload_name)),
-            ..Default::default()
-        };
-        let media = args.run(
-            Duration::from_secs(5),
-            fallback,
-            sable_core::notifications::cold_push_media(
-                args.store(),
-                &args.user_id,
-                &args.device_id,
-                &args.room_id,
+            sender_name: sable_core::notifications::push_sender_name(
                 sender,
                 Some(&payload_name),
                 content.as_ref(),
             ),
-        );
+            ..Default::default()
+        };
+        let media = args.run(Duration::from_secs(5), fallback, async {
+            match args.session().await {
+                Some(session) => {
+                    session
+                        .media(
+                            sender,
+                            Some(&payload_name),
+                            payload_avatar,
+                            content.as_ref(),
+                        )
+                        .await
+                }
+                None => sable_core::notifications::PushMedia {
+                    sender_name: sable_core::notifications::push_sender_name(
+                        sender,
+                        Some(&payload_name),
+                        content.as_ref(),
+                    ),
+                    ..Default::default()
+                },
+            }
+        });
 
         JString::from_str(env, serde_json::to_string(&media).unwrap_or_default())
     });
@@ -342,22 +358,21 @@ pub(crate) extern "system" fn Java_moe_sable_push_PushPayloadDecryptor_nativeRep
     transaction_id: JString<'frame>,
     event_id: JString<'frame>,
     private_receipt: jni::sys::jboolean,
-) -> jni::sys::jboolean {
-    let result = unowned_env.with_env(|_: &mut Env<'frame>| -> Result<_, jni::errors::Error> {
+) -> JString<'frame> {
+    let result = unowned_env.with_env(|env: &mut Env<'frame>| -> Result<_, jni::errors::Error> {
         let args = ColdArgs::new(&store_dir, &user_id, &device_id, &room_id);
         let (text, transaction_id, event_id) = (
             text.to_string(),
             transaction_id.to_string(),
             event_id.to_string(),
         );
-        Ok(args.run(Duration::from_secs(20), false, async {
-            let Some(session) = args.session().await else {
-                return false;
-            };
-            session
+        let sent = args.run(Duration::from_secs(20), None, async {
+            args.session()
+                .await?
                 .reply(&text, &transaction_id, &event_id, private_receipt)
                 .await
-        }))
+        });
+        sent.map_or_else(|| Ok(JString::null()), |sent| JString::from_str(env, sent))
     });
     result.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

@@ -30,7 +30,15 @@ export function sectionsUpdate(
   sections: readonly RoomSectionView[],
   extra: Partial<Omit<RoomSectionsUpdate, 'sections'>> = {}
 ): RoomSectionsUpdate {
-  return { sections: [...sections], removed: [], badges: null, quiet_rooms: null, ...extra };
+  return {
+    sections: [...sections],
+    removed: [],
+    badges: null,
+    quiet_rooms: null,
+    app_badge: null,
+    room_spaces: null,
+    ...extra,
+  };
 }
 
 export function badgeView(room_id: string, counts: Partial<RoomUnreadView>): RoomBadgeView {

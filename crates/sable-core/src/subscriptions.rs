@@ -3,7 +3,7 @@ use crate::api::timeline::TimelineFocusView;
 use crate::api::timeline::WarmRoomsParams;
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
@@ -16,6 +16,7 @@ use matrix_sdk::ruma::push::Ruleset;
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId};
 use matrix_sdk::send_queue::RoomSendQueueUpdate;
 use matrix_sdk_base::event_cache::Event;
+use matrix_sdk_base::sticky::StickyEventsUpdate;
 use matrix_sdk_ui::eyeball_im::VectorDiff;
 use matrix_sdk_ui::room_list_service::RoomListItem;
 use matrix_sdk_ui::room_list_service::filters::new_filter_non_left;
@@ -24,6 +25,7 @@ use matrix_sdk_ui::timeline::{
 };
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio_stream::{StreamMap, wrappers::BroadcastStream};
 use web_time::Instant;
 
 use crate::ResultExt;
@@ -38,7 +40,7 @@ use crate::room_list_batch::DiffBatch;
 use crate::room_list_rows::{DmSpaceLinks, RoomListRows};
 use crate::room_sections::RoomSections;
 use crate::space_parents::{ParentResult, ParentTracker};
-use crate::timeline_overlay::{ReplyFallback, TimelineOverlay};
+use crate::timeline_overlay::{BanRedaction, ReplyFallback, TimelineOverlay};
 use crate::timelines::{
     AggregationScope, aggregation_items, build_room_timeline, fill_sender_profiles,
 };
@@ -53,7 +55,7 @@ enum Wake {
 }
 
 async fn next_queue_update(
-    updates: &mut Option<tokio::sync::broadcast::Receiver<RoomSendQueueUpdate>>,
+    updates: &mut Option<broadcast::Receiver<RoomSendQueueUpdate>>,
 ) -> Option<RoomSendQueueUpdate> {
     let Some(receiver) = updates.as_mut() else {
         return future::pending().await;
@@ -100,6 +102,7 @@ struct RoomListWorker {
     rules: Ruleset,
     /// Refreshed from each diff before constructing synchronous summaries.
     room_cache: HashMap<OwnedRoomId, view::RoomInfo>,
+    voice_updates: StreamMap<OwnedRoomId, BroadcastStream<StickyEventsUpdate>>,
     rows: RoomListRows,
     sections: RoomSections,
     options: watch::Receiver<RoomListOptionsView>,
@@ -126,9 +129,7 @@ impl RoomListWorker {
     ) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let handle = self.client.add_event_handler(
-            move |raw: matrix_sdk::ruma::serde::Raw<
-                matrix_sdk::ruma::events::AnySyncStateEvent,
-            >,
+            move |raw: ruma::serde::Raw<ruma::events::AnySyncStateEvent>,
                   room: matrix_sdk::Room| {
                 let sender = sender.clone();
                 async move {
@@ -171,9 +172,7 @@ impl RoomListWorker {
     ) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let handle = self.client.add_event_handler(
-            move |raw: matrix_sdk::ruma::serde::Raw<
-                matrix_sdk::ruma::events::AnyRoomAccountDataEvent,
-            >,
+            move |raw: ruma::serde::Raw<ruma::events::AnyRoomAccountDataEvent>,
                   room: matrix_sdk::Room| {
                 let sender = sender.clone();
                 async move {
@@ -252,17 +251,10 @@ impl RoomListWorker {
                 }
                 change = state_changes.recv() => {
                     let Some(change) = change else { break; };
-                    let mut rooms = HashSet::new();
-                    let mut spaces = HashSet::new();
-                    let mut members = HashSet::new();
-                    for change in std::iter::once(change).chain(std::iter::from_fn(|| state_changes.try_recv().ok())) {
-                        match change {
-                            ParentStateChange::Room(id) => { rooms.insert(id); }
-                            ParentStateChange::Space(id) => { spaces.insert(id); }
-                            ParentStateChange::Member(id, user) => { members.insert((id, user)); }
-                        }
-                    }
-                    self.refresh_changed_parents(&rooms, &spaces, &members).await;
+                    let changes = std::iter::once(change)
+                        .chain(std::iter::from_fn(|| state_changes.try_recv().ok()))
+                        .collect();
+                    self.on_parent_state_changes(changes).await;
                     self.rows.relink(&self.room_cache, &self.dm_spaces, &self.parents.links)
                 }
                 room_id = avatar_overrides.recv() => {
@@ -284,6 +276,12 @@ impl RoomListWorker {
                 diffs = stream.next() => {
                     let Some(diffs) = diffs else { break };
                     self.on_entries(diffs).await
+                }
+                Some((room_id, update)) = self.voice_updates.next(), if !self.voice_updates.is_empty() && *stores_open.borrow() => {
+                    if update.is_ok_and(|update| !crate::calls::affects_voice_roster(&update)) {
+                        continue;
+                    }
+                    self.on_voice_update(&room_id).await
                 }
                 changed = self.nicknames.changed() => {
                     if changed.is_err() {
@@ -313,7 +311,15 @@ impl RoomListWorker {
     }
 
     fn emit(&mut self, diffs: Vec<crate::protocol::VectorDiff<RoomListItemView>>) {
-        let next = RoomSections::build(self.rows.rows(), &self.options.borrow_and_update());
+        let options = self.options.borrow_and_update();
+        let next = RoomSections::rebuild(self.rows.rows(), &options, &self.sections);
+        #[cfg(target_os = "ios")]
+        let defaults = (options.badge_default_direct, options.badge_default_group);
+        drop(options);
+        #[cfg(target_os = "ios")]
+        if next.push_badge() != self.sections.push_badge() {
+            self.save_push_badge(next.push_badge(), defaults);
+        }
         let sections = self.sections.update(next);
         if diffs.is_empty() && sections.is_none() {
             return;
@@ -325,8 +331,57 @@ impl RoomListWorker {
         });
     }
 
+    #[cfg(target_os = "ios")]
+    fn save_push_badge(
+        &self,
+        rooms: &std::collections::BTreeMap<String, notifications::badge::PushBadgeRoom>,
+        (direct, group): (
+            crate::protocol::BadgeModeView,
+            crate::protocol::BadgeModeView,
+        ),
+    ) {
+        use crate::protocol::BadgeModeView;
+        let Some(user_id) = self.client.user_id() else {
+            return;
+        };
+        let badge = notifications::badge::PushBadge {
+            user_id: user_id.to_string(),
+            rooms: rooms.clone(),
+            direct_every: direct == BadgeModeView::All,
+            group_every: group == BadgeModeView::All,
+            counted: std::collections::VecDeque::new(),
+        };
+        let root = std::path::PathBuf::from(&self.core.store_id);
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = badge.save(&root) {
+                tracing::warn!("push badge not saved: {error}");
+            }
+        });
+    }
+
     async fn load_dm_spaces(&self) -> DmSpaceLinks {
         crate::account_documents::synced_dm_spaces(&self.client).await
+    }
+
+    async fn on_parent_state_changes(&mut self, changes: Vec<ParentStateChange>) {
+        let mut rooms = HashSet::new();
+        let mut spaces = HashSet::new();
+        let mut members = HashSet::new();
+        for change in changes {
+            match change {
+                ParentStateChange::Room(id) => {
+                    rooms.insert(id);
+                }
+                ParentStateChange::Space(id) => {
+                    spaces.insert(id);
+                }
+                ParentStateChange::Member(id, user) => {
+                    members.insert((id, user));
+                }
+            }
+        }
+        self.refresh_changed_parents(&rooms, &spaces, &members)
+            .await;
     }
 
     async fn refresh_changed_parents(
@@ -383,7 +438,18 @@ impl RoomListWorker {
         diffs: Vec<VectorDiff<RoomListItem>>,
     ) -> Vec<crate::protocol::VectorDiff<RoomListItemView>> {
         view::prime_display_names(&diffs).await;
-        view::enrich_room_batch(&diffs, &mut self.room_cache).await;
+        let rooms = view::latest_items(&diffs);
+        // Sticky-only joins, leaves and expirations do not produce SDK room-list diffs.
+        // Subscribe before reading the roster so an update cannot fall between the two.
+        for room in &rooms {
+            if room.is_call() && !self.voice_updates.contains_key(room.room_id()) {
+                self.voice_updates.insert(
+                    room.room_id().to_owned(),
+                    BroadcastStream::new(room.sticky_events().subscribe()),
+                );
+            }
+        }
+        view::enrich_rooms(rooms, &mut self.room_cache).await;
         let mut diffs: Vec<_> = diffs
             .into_iter()
             .map(|diff| {
@@ -397,7 +463,7 @@ impl RoomListWorker {
                 })
             })
             .collect();
-        let previous: std::collections::HashSet<_> = self
+        let previous: HashSet<_> = self
             .rows
             .rows()
             .iter()
@@ -407,6 +473,15 @@ impl RoomListWorker {
             self.rows.apply(diff);
         }
         self.rows.evict(&mut self.room_cache);
+        let removed: Vec<_> = self
+            .voice_updates
+            .keys()
+            .filter(|id| !self.room_cache.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in removed {
+            self.voice_updates.remove(&id);
+        }
         let current: HashSet<_> = self
             .rows
             .rows()
@@ -424,15 +499,43 @@ impl RoomListWorker {
         diffs
     }
 
+    async fn on_voice_update(
+        &mut self,
+        room_id: &RoomId,
+    ) -> Vec<crate::protocol::VectorDiff<RoomListItemView>> {
+        let Some(room) = self.client.get_room(room_id) else {
+            return Vec::new();
+        };
+        let Some(cached) = self
+            .room_cache
+            .get_mut(room_id)
+            .and_then(|info| info.voice_roster.as_mut())
+        else {
+            return Vec::new();
+        };
+        let roster = crate::calls::voice_room_roster(&room).await;
+        if roster == *cached {
+            return Vec::new();
+        }
+        *cached = roster;
+        self.rows.refresh(
+            &[room.into()],
+            &self.room_cache,
+            &self.rules,
+            &self.nicknames.borrow(),
+        )
+    }
+
     async fn on_rules_changed(
         &mut self,
     ) -> Option<Vec<crate::protocol::VectorDiff<RoomListItemView>>> {
         self.rules = self.push_rules.snapshot().await;
         let client = &self.client;
-        let diffs = self.rows.renotify(&self.rules, |room_id| {
+        let rules = &self.rules;
+        let diffs = self.rows.renotify(rules, |room_id| {
             client
                 .get_room(room_id)
-                .is_some_and(|room| notifications::uses_direct_push_rules(&room))
+                .is_some_and(|room| notifications::uses_direct_push_rules(rules, &room))
         });
         (!diffs.is_empty()).then_some(diffs)
     }
@@ -446,7 +549,7 @@ struct TimelineWorker {
     overlay: Arc<parking_lot::Mutex<TimelineOverlay>>,
     user_id: Option<OwnedUserId>,
     content: view::LocalContent,
-    queue_updates: Option<tokio::sync::broadcast::Receiver<RoomSendQueueUpdate>>,
+    queue_updates: Option<broadcast::Receiver<RoomSendQueueUpdate>>,
 }
 
 impl TimelineWorker {
@@ -565,6 +668,7 @@ impl Core {
                 push_rules,
                 rules,
                 room_cache: HashMap::new(),
+                voice_updates: StreamMap::new(),
                 rows: RoomListRows::default(),
                 sections: RoomSections::default(),
                 options: core.room_list_options.subscribe(),
@@ -649,6 +753,8 @@ impl Core {
         if stored_bridge {
             overlay.lock().set_bridged();
         }
+        let bans = BanRedaction::in_room(&room).await;
+        overlay.lock().seed_ban_redactions(bans);
         // Seeded before the stream starts, so its diffs apply to this snapshot.
         let items = overlay.lock().reset(items);
         let task = spawn(
@@ -881,7 +987,7 @@ impl Core {
     pub(crate) async fn overlay_timeline_nicknames(
         &self,
         nicknames: &crate::nicknames::Nicknames,
-        users: &[matrix_sdk::ruma::OwnedUserId],
+        users: &[OwnedUserId],
     ) {
         let subscriptions = self.subscriptions.lock().await;
         for (subscription, entry) in subscriptions.iter() {
@@ -909,6 +1015,41 @@ impl Core {
             overlay.set_redaction_reason(redacted.to_owned(), reason.to_owned())
         })
         .await;
+    }
+
+    /// Hides or shows again `user_id`'s messages in every open timeline of the room.
+    pub(crate) async fn overlay_ban_redaction(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+        ban: Option<BanRedaction>,
+    ) {
+        self.overlay_room(room_id, |overlay| {
+            overlay.set_ban_redaction(user_id, ban.clone())
+        })
+        .await;
+    }
+
+    /// What a ban hides of `event_id` in an open timeline of the room.
+    pub(crate) async fn ban_hidden_content(
+        &self,
+        room_id: &RoomId,
+        event_id: &OwnedEventId,
+    ) -> Option<crate::protocol::TimelineItemContentView> {
+        let subscriptions = self.subscriptions.lock().await;
+        subscriptions.values().find_map(|entry| {
+            let (SubscriptionKind::LiveTimeline(room) | SubscriptionKind::FocusedTimeline(room)) =
+                &entry.kind
+            else {
+                return None;
+            };
+            entry
+                .overlay
+                .as_ref()
+                .filter(|_| room == room_id)?
+                .lock()
+                .hidden_content(event_id)
+        })
     }
 
     /// Fills in the replies to `replied` in every open timeline of the room.
@@ -1109,6 +1250,24 @@ impl Core {
         warm.push_back(room_id);
         while warm.len() > MAX_WARM_ROOMS {
             warm.pop_front();
+        }
+    }
+
+    /// Call when the page that owns the subscriptions goes away: nothing else unsubscribes for
+    /// it. Only what exists now is dropped, whenever the returned future runs, so the page that
+    /// replaces it keeps what it has subscribed to by then.
+    pub fn drop_open_subscriptions(self: &Arc<Self>) -> impl Future<Output = ()> + use<> {
+        let core = self.clone();
+        let end = self.next_subscription.load(Ordering::Relaxed);
+        async move {
+            let mut subscribed = core.room_subscriptions.lock().await;
+            core.subscriptions
+                .lock()
+                .await
+                .retain(|subscription, _| subscription.0 >= end);
+            if let Err(error) = core.sync_timeline_rooms_locked(&mut subscribed).await {
+                tracing::debug!(?error, "room subscriptions not released");
+            }
         }
     }
 

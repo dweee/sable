@@ -205,6 +205,8 @@ for (const context of ['desktop', 'mobile'] as const) {
       if (surface === 'forum') await page.goto('/rooms/!room%3Aexample.test');
       else await app.openRoom('!room:example.test');
       const parent = page.locator(surface === 'forum' ? '.forum-main' : '.room-view > .timeline');
+      if (surface === 'forum')
+        await parent.getByRole('button', { name: en.forum.newThread }).click();
       const editor = parent.locator('[contenteditable="true"]').first();
       await expect(editor).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
@@ -225,9 +227,13 @@ for (const context of ['desktop', 'mobile'] as const) {
         },
       ]);
       const opener = parent
-        .locator(surface === 'forum' ? '.forum-thread-meta' : '.thread-summary')
+        .locator(surface === 'forum' ? '.forum-thread-open' : '.thread-summary')
         .last();
       await opener.scrollIntoViewIfNeeded();
+      if (surface === 'forum') {
+        await expect(parent.locator('.forum-thread-list-more')).toHaveCount(0);
+        await opener.scrollIntoViewIfNeeded();
+      }
       await expect(opener).toBeVisible();
       await opener.focus();
       const positionBefore = await opener.evaluate((node) => node.getBoundingClientRect().top);
@@ -311,6 +317,8 @@ for (const context of ['desktop', 'mobile'] as const) {
       else await app.openRoom('!room:example.test');
       const parent = page.locator(surface === 'forum' ? '.forum-main' : '.room-view > .timeline');
       if (surface === 'room') await page.locator('.room-view .members-button').click();
+      if (surface === 'forum')
+        await parent.getByRole('button', { name: en.forum.newThread }).click();
       await expect(parent.locator('[contenteditable="true"]').first()).toBeVisible();
       await core.emitTimelineDiff(await core.subscription(), [
         {
@@ -327,7 +335,10 @@ for (const context of ['desktop', 'mobile'] as const) {
           ],
         },
       ]);
-      const opener = parent.locator(surface === 'forum' ? '.forum-thread-meta' : '.thread-summary');
+      const opener =
+        surface === 'forum'
+          ? parent.getByRole('button', { name: /Discussion about the next release/ })
+          : parent.locator('.thread-summary');
       await expect(opener).toHaveCount(1);
       await opener.click();
       const thread = page.getByRole('region', { name: en.timeline.thread, exact: true });
@@ -524,6 +535,6 @@ for (const threadPresentation of ['timeline', 'panel']) {
       )
       .toContain('backward');
     expect(await page.evaluate(() => window.__e2ePaginationDirections)).not.toContain('forward');
-    await expect(thread.getByText(en.timeline.loadFailed)).toHaveCount(0);
+    await expect(thread.getByRole('alert')).toHaveCount(0);
   });
 }

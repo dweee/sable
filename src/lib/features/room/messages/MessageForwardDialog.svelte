@@ -9,12 +9,11 @@
 
   interface Props {
     open?: boolean;
-    fromRoomId: string;
     metadataLocked?: boolean;
     onForward: (toRoomIds: string[], includeMetadata: boolean) => void;
   }
 
-  let { open = $bindable(false), fromRoomId, metadataLocked = false, onForward }: Props = $props();
+  let { open = $bindable(false), metadataLocked = false, onForward }: Props = $props();
   const roomList = useRoomList();
   let search = $state('');
   let includeMetadata = $state(true);
@@ -24,10 +23,7 @@
 
   let targets = $derived(
     roomList.rooms
-      .filter(
-        (room) =>
-          room.state === 'joined' && room.room_kind !== 'space' && room.room_id !== fromRoomId
-      )
+      .filter((room) => room.state === 'joined' && room.room_kind !== 'space')
       .filter((room) => room.display_name.toLowerCase().includes(search.trim().toLowerCase()))
   );
 
@@ -57,7 +53,7 @@
       aria-label={i18n.t('common.searchRooms')}
     />
     {#if targets.length === 0}
-      <p class="empty">{i18n.t('common.noRoomsMatch')}</p>
+      <p class="empty-text">{i18n.t('common.noRoomsMatch')}</p>
     {:else}
       <RoomChecklist
         class="targets"
@@ -76,7 +72,7 @@
       />
     </div>
     {#if metadataLocked}
-      <p class="empty">{i18n.t('timeline.forwardMetadataPreserved')}</p>
+      <p class="empty-text">{i18n.t('timeline.forwardMetadataPreserved')}</p>
     {/if}
 
     <div class="actions">
@@ -106,12 +102,6 @@
     margin: 0;
   }
 
-  .empty {
-    color: var(--surface-var-on-container);
-    font-size: var(--font-size-small);
-    margin: 0;
-  }
-
   .metadata {
     align-items: center;
     display: flex;
@@ -129,6 +119,6 @@
   .count {
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
-    margin-right: auto;
+    margin-inline-end: auto;
   }
 </style>

@@ -143,17 +143,14 @@
 }
 
 @media (pointer: fine) {
-  .composer-formatting .formatting {
-    flex-wrap: wrap;
-    height: auto;
-    justify-content: end;
-    overflow: visible;
+  .composer-formatting .formatting > :first-child {
+    margin-inline-start: auto;
   }
 }
 
 .composer-separator {
   align-self: center;
-  border-left: var(--border-width-500) solid var(--surface-var-container-line);
+  border-inline-start: var(--border-width-500) solid var(--surface-var-container-line);
   border-radius: var(--radius-pill);
   height: var(--size-x400);
   margin-inline: var(--space-100);
@@ -249,7 +246,7 @@
     transition: transform var(--motion-fast) var(--motion-easing-standard);
   }
 
-  .composer-send[data-pressing] svg {
+  html:not([data-reduced-motion='on']) .composer-send[data-pressing] svg {
     transform: scale(1.3);
     transition: transform var(--press-ms) linear;
   }

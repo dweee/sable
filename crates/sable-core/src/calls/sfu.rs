@@ -57,11 +57,16 @@ pub(crate) struct Provisioned {
     pub(crate) can_publish: bool,
 }
 
-fn http_client() -> Option<matrix_sdk::reqwest::Client> {
-    let builder = crate::tls::apply(matrix_sdk::reqwest::Client::builder());
+fn http_client() -> Option<reqwest::Client> {
+    let builder = crate::tls::apply(reqwest::Client::builder());
     #[cfg(not(target_family = "wasm"))]
     let builder = builder.timeout(PROVISION_TIMEOUT);
     builder.build().ok()
+}
+
+fn focus_unreachable(error: impl std::fmt::Display) -> ProvisionError {
+    tracing::warn!(%error, "call focus request failed");
+    ProvisionError::Unreachable
 }
 
 pub(crate) async fn provision(
@@ -100,7 +105,7 @@ pub(crate) async fn provision(
         .body(payload)
         .send()
         .await
-        .map_err(|_| ProvisionError::Unreachable)?;
+        .map_err(focus_unreachable)?;
 
     if !response.status().is_success() {
         return Err(ProvisionError::Refused(response.status().as_u16()));
@@ -177,7 +182,7 @@ pub(crate) async fn provision_stable(
         .client()
         .send(request)
         .await
-        .map_err(|_| ProvisionError::Unreachable)?;
+        .map_err(focus_unreachable)?;
     let (identity, can_publish) = jwt_claims(&response.jwt)?;
     Ok(Provisioned {
         url: url.to_owned(),
@@ -224,7 +229,7 @@ async fn provision_request<T: Serialize>(
         .body(payload)
         .send()
         .await
-        .map_err(|_| ProvisionError::Unreachable)?;
+        .map_err(focus_unreachable)?;
     if !response.status().is_success() {
         return Err(ProvisionError::Refused(response.status().as_u16()));
     }

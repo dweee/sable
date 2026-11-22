@@ -5,9 +5,9 @@ import Intents
 import os
 import StoreKit
 import UniformTypeIdentifiers
-import UserNotifications
+@preconcurrency import UserNotifications
 
-final class NotificationService: UNNotificationServiceExtension {
+final class NotificationService: UNNotificationServiceExtension, @unchecked Sendable {
     private let lock = NSLock()
     private var completion: ((UNNotificationContent) -> Void)?
     private var fallback: UNMutableNotificationContent?
@@ -20,6 +20,7 @@ final class NotificationService: UNNotificationServiceExtension {
     private static let inviteCategory = "sable-invite"
     private static let alertedAtKey = "sable_alerted_at"
     private static let notifyOnceWindow: TimeInterval = 5 * 60
+    private static let expiredReportWait: TimeInterval = 1
     private static let log = Logger(subsystem: "moe.sable.app.notifications", category: "push")
 
     override func didReceive(
@@ -103,9 +104,10 @@ final class NotificationService: UNNotificationServiceExtension {
                    let user = rendered["user_id"] as? String {
                     self?.clearReadRooms(rooms, user: user)
                 }
+                let badge = rendered["badge"] as? Int
                 if rendered["discard"] as? Bool == true {
                     Self.log.info("discarded by push rules")
-                    self?.suppress()
+                    self?.suppress(badge: badge)
                     return
                 }
                 if let ring = rendered["ring"] as? [String: Any], let room = rendered["room_id"] as? String,
@@ -114,7 +116,7 @@ final class NotificationService: UNNotificationServiceExtension {
                     return
                 }
                 if let read = rendered["read"] as? [String: Any], let user = rendered["user_id"] as? String {
-                    self?.clearRead(read, user: user)
+                    self?.clearRead(read, user: user, badge: badge ?? 0)
                     return
                 }
                 guard let body = rendered["body"] as? String,
@@ -235,9 +237,9 @@ final class NotificationService: UNNotificationServiceExtension {
         return INImage(imageData: data)
     }
 
-    private func clearRead(_ read: [String: Any], user: String) {
+    private func clearRead(_ read: [String: Any], user: String, badge: Int) {
         guard read["clear"] as? Bool == true else {
-            suppress(badge: 0)
+            suppress(badge: badge)
             return
         }
         let room = read["room_id"] as? String
@@ -250,7 +252,7 @@ final class NotificationService: UNNotificationServiceExtension {
             if !identifiers.isEmpty {
                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
             }
-            self?.suppress(badge: 0)
+            self?.suppress(badge: badge)
         }
     }
 
@@ -469,7 +471,15 @@ final class NotificationService: UNNotificationServiceExtension {
         let root = policyRoot
         communication = nil
         lock.unlock()
+        // iOS may suspend the extension once the handler runs.
+        if let root {
+            let reported = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                Self.report("expired", root: root)
+                reported.signal()
+            }
+            _ = reported.wait(timeout: .now() + Self.expiredReportWait)
+        }
         if let content { complete(content) }
-        if let root { Self.report("expired", root: root) }
     }
 }
