@@ -4,6 +4,8 @@ import { render } from 'vitest-browser-svelte';
 
 import { core } from '#lib/core/__mocks__/context.js';
 
+import en from '../../../locales/en.json' with { type: 'json' };
+
 vi.mock('#lib/core/context.js', async () => {
   const mock = await import('#lib/core/__mocks__/context.js');
   return { useCoreClient: () => mock.core, provideCoreClient: vi.fn() };
