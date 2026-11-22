@@ -4,29 +4,49 @@ name: Sync upstream
     - cron: '17 */6 * * *'
   workflow_dispatch: {}
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+concurrency:
+  group: fork-upstream-sync
+  cancel-in-progress: false
 jobs:
   sync:
-    if: ${{ github.server_url == 'https://git.monke.fail' && vars.FORK_CI_ENABLED == 'true' && github.repository == 'd/sable' && (github.ref == 'main' || github.ref == 'refs/heads/main') }}
+    if: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'schedule' && github.ref == 'main') }}
     runs-on: nix-light
+    timeout-minutes: 30
     container:
-      image: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+      image: sha256:7c3a57c9ca61aab9d1c743f1af773f3cd65e3c68a0ae447e2cca6d4838de5b0a
     env:
-      TOKEN: ${{ secrets.UPDATE_TOKEN || github.token }}
-      API_URL: ${{ github.api_url }}
+      ENABLED: ${{ vars.FORK_CI_ENABLED }}
       AUTO: ${{ vars.FORK_CI_AUTO_MERGE }}
+      UPDATE_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+      CHECKOUT_TOKEN: ${{ github.token }}
     steps:
       - name: Prepare candidate or merge checked pull request
         run: |
           set -eu
-          test -n "$TOKEN"
+          test "$GITHUB_REPOSITORY" = 'd/sable'
+          if [ "${ENABLED:-false}" != true ]; then
+            echo 'Upstream sync is disabled'
+            exit 0
+          fi
+          export AUTO="${AUTO:-false}"
+          export TOKEN="${UPDATE_TOKEN:-$CHECKOUT_TOKEN}"
+          test -n "$CHECKOUT_TOKEN"
           git init -q .
           git remote add origin https://git.monke.fail/d/sable.git
-          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
-          git config http.https://git.monke.fail/.extraheader "Authorization: Basic $basic"
-          trap 'git config --unset-all http.https://git.monke.fail/.extraheader' EXIT
-          git fetch --no-tags origin main
+          git config http.version HTTP/1.1
+          basic=$(printf 'x-access-token:%s' "$CHECKOUT_TOKEN" | base64 | tr -d '\n')
+          git -c http.https://git.monke.fail/.extraheader="Authorization: Basic $basic" fetch --no-tags origin main
           git checkout -q --detach FETCH_HEAD
+          if [ -n "$UPDATE_TOKEN" ]; then
+            basic=$(printf 'x-access-token:%s' "$UPDATE_TOKEN" | base64 | tr -d '\n')
+            git config http.https://git.monke.fail/.extraheader "Authorization: Basic $basic"
+            trap 'git config --unset-all http.https://git.monke.fail/.extraheader' EXIT
+          fi
+          unset basic CHECKOUT_TOKEN
           # Use tools and policy from the trusted base throughout this invocation.
-          nix --extra-experimental-features 'nix-command flakes' shell github:NixOS/nixpkgs/1d060086d60cb76a40cf37109f979d88a5bd6396#python3 -c python3 -B ci/sync-upstream.py
+          env -u NIX_REMOTE nix-daemon > /tmp/nix-daemon.log 2>&1 &
+          daemon=$!
+          for n in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; kill -0 "$daemon"; sleep 1; done
+          test -S /nix/var/nix/daemon-socket/socket
+          NIX_REMOTE=daemon nix --extra-experimental-features 'nix-command flakes' shell --option accept-flake-config false github:NixOS/nixpkgs/1d060086d60cb76a40cf37109f979d88a5bd6396#python3 -c python3 -B ci/sync-upstream.py
