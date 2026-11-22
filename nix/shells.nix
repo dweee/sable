@@ -119,6 +119,8 @@ let
       pkgs.cocoapods
       pkgs.xcodegen
     ];
+    CC_wasm32_unknown_unknown = lib.getExe pkgs.llvmPackages.clang-unwrapped;
+    AR_wasm32_unknown_unknown = lib.getExe' pkgs.llvmPackages.bintools-unwrapped "llvm-ar";
     LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
     shellHook = ''
       export PATH="$PWD/node_modules/.bin:$PATH"
