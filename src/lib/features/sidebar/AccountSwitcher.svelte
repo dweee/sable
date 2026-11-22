@@ -6,7 +6,10 @@
   import type { SessionInfo } from '#src/generated/protocol';
   import { runtimeConfig } from '#lib/config/runtime-config.js';
   import { useCoreClient } from '#lib/core/context.js';
-  import { defaultSettingsSection } from '#lib/features/settings/settings-navigation.js';
+  import {
+    defaultSettingsSection,
+    settingsState,
+  } from '#lib/features/settings/settings-navigation.js';
   import { pushOverride } from '#lib/notifications/push-config.js';
   import { logoutWithPush } from '#lib/features/notifications/web-push.js';
   import { i18n } from '#lib/i18n.js';
@@ -19,6 +22,7 @@
   import { usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import PresenceDot from '#lib/ui/primitives/PresenceDot.svelte';
   import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { ownPresence } from '#lib/rooms/presence-override.svelte.js';
   import { resolveUserStatus } from '#lib/rooms/user-status.js';
   import ProfileCard from '#lib/ui/primitives/ProfileCard.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
@@ -55,7 +59,7 @@
     resolveUserStatus(activeProfile, presenceStore.get(core.session?.user_id ?? ''))
   );
   let avatarUrl = $derived(activeProfile?.avatar_url ?? null);
-  let ownPresence = $derived(preferences.sendPresence ? preferences.presence : null);
+  let presence = $derived(preferences.sendPresence ? ownPresence() : null);
 
   onMount(() => {
     void runtimeConfig().then((config) => {
@@ -93,7 +97,7 @@
       return;
     }
 
-    void goto(resolve(`settings/${section}`), { shallow: true, state: { settings: { section } } });
+    void goto(resolve(`settings/${section}`), { shallow: true, state: settingsState(section) });
   }
 
   function linkDevice(): void {
@@ -133,17 +137,17 @@
   function openStatusEdit(): void {
     void goto(resolve('settings/account?editStatus'), {
       shallow: true,
-      state: { settings: { section: 'account' } },
+      state: settingsState('account'),
     });
   }
 </script>
 
 {#snippet ownAvatar()}
   <Avatar size="small" src={avatarUrl} name={displayName} alt={displayName} refreshOnResume />
-  {#if ownPresence}
+  {#if presence}
     <PresenceDot
-      presence={ownPresence}
-      label={i18n.t(`presence.${ownPresence}`)}
+      {presence}
+      label={i18n.t(`presence.${presence}`)}
       class="account-presence"
       size="medium"
     />
@@ -284,9 +288,9 @@
   }
 
   :global(.quick-tool > .account-presence) {
+    inset-inline-end: -0.125rem;
     bottom: -0.125rem;
     position: absolute;
-    right: -0.125rem;
   }
 
   .logout-dialog {

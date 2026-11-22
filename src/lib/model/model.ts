@@ -8,6 +8,7 @@ import type {
   CalendarRsvpView,
   ComposerContent,
   ComposerPill,
+  ChildOrder,
   ChildOrderOverride,
   DropInstruction,
   LayoutRef,
@@ -29,11 +30,12 @@ import type {
   ParsedQuery,
   PushAlert,
   PushContent,
-  PackImageDraftView,
   PermissionGroup,
   PowerLevelLocation,
   PushNotification,
   ResolvedQuery,
+  RoomSpacesView,
+  RoomListItemView,
   RoomPowerLevelsView,
   SearchDirectory,
   SearchPerson,
@@ -45,6 +47,9 @@ import type {
   SearchOperator,
   SectionInputs as SectionInputsView,
   SlashParse,
+  SpaceChildEdge,
+  SpaceLeaveOrder,
+  SpaceRoomInput,
   SuggestedOverride,
   TargetSuggestion,
   ViaSplit,
@@ -84,6 +89,20 @@ export function loadModel(source?: Promise<Response>): Promise<unknown> {
   return pending;
 }
 
+/** Whether an image has more than one frame, or null for bytes it cannot read. */
+export function imageIsAnimated(bytes: Uint8Array): boolean | null {
+  return wasm.imageIsAnimated(bytes) ?? null;
+}
+
+/** Whether a video will be sent as a GIF: short, small and without sound. */
+export function playsAsGif(bytes: Uint8Array, durationMs: number | null): boolean {
+  return wasm.playsAsGif(bytes, durationMs ?? undefined);
+}
+
+export function gifMaxBytes(): number {
+  return wasm.gifMaxBytes();
+}
+
 export function parseSearchQuery(input: string): ParsedQuery {
   return JSON.parse(wasm.parseSearchQuery(input)) as ParsedQuery;
 }
@@ -100,6 +119,15 @@ export function visibleName(name: string): string | null {
   return wasm.visibleName(name) ?? null;
 }
 
+export function proxyBody(
+  prefix: string | null,
+  suffix: string | null,
+  keepTrigger: boolean,
+  body: string
+): string | null {
+  return wasm.proxyBody(prefix ?? undefined, suffix ?? undefined, keepTrigger, body) ?? null;
+}
+
 export function searchOperators(): SearchOperator[] {
   return JSON.parse(wasm.searchOperators()) as SearchOperator[];
 }
@@ -110,6 +138,10 @@ export function parseMatrixLink(href: string): MatrixLink | null {
 
 export function parseJoinAddress(input: string): JoinAddress | null {
   return JSON.parse(wasm.parseJoinAddress(input)) as JoinAddress | null;
+}
+
+export function mentionUri(id: string, via: readonly string[]): string | undefined {
+  return wasm.mentionUri(id, [...via]);
 }
 
 export function splitVia(href: string): ViaSplit {
@@ -292,6 +324,76 @@ export function mergeHierarchyRooms(
   return JSON.parse(
     wasm.mergeHierarchyRooms(JSON.stringify(local), JSON.stringify(fetched))
   ) as HierarchyRoomView[];
+}
+
+export function toSpaceRoom(room: RoomListItemView): SpaceRoomInput {
+  return {
+    room_id: room.room_id,
+    display_name: room.display_name,
+    is_space: room.room_kind === 'space',
+    joined: room.state === 'joined',
+    tombstoned: room.is_tombstoned,
+    children: room.space_children,
+    canonical_alias: room.canonical_alias,
+    name: room.name,
+    topic: room.topic,
+    avatar_url: room.avatar_url,
+    join_rule: room.join_rule,
+  };
+}
+
+/** The space and what this account's own room list says it holds. */
+export function localHierarchyRooms(
+  rooms: readonly RoomListItemView[],
+  rootId: string
+): HierarchyRoomView[] {
+  return JSON.parse(
+    wasm.localHierarchyRooms(JSON.stringify(rooms.map(toSpaceRoom)), rootId)
+  ) as HierarchyRoomView[];
+}
+
+export function spaceLeaveOrder(
+  rooms: readonly RoomListItemView[],
+  rootId: string
+): SpaceLeaveOrder {
+  return JSON.parse(
+    wasm.spaceLeaveOrder(JSON.stringify(rooms.map(toSpaceRoom)), rootId)
+  ) as SpaceLeaveOrder;
+}
+
+/** What the core ships with the room list sections, for a painted snapshot and fixtures. */
+export function roomSpaces(rooms: readonly RoomListItemView[]): RoomSpacesView[] {
+  return JSON.parse(wasm.roomSpaces(JSON.stringify(rooms.map(toSpaceRoom)))) as RoomSpacesView[];
+}
+
+export function reorderChildren(
+  children: readonly ChildOrder[],
+  roomId: string,
+  targetIndex: number
+): ChildOrder[] {
+  return JSON.parse(
+    wasm.reorderChildren(JSON.stringify(children), roomId, targetIndex)
+  ) as ChildOrder[];
+}
+
+export function mergeSettings(
+  base: unknown,
+  local: unknown,
+  remote: unknown,
+  version: number
+): unknown {
+  return JSON.parse(
+    wasm.mergeSettings(
+      JSON.stringify(base ?? null),
+      JSON.stringify(local ?? null),
+      JSON.stringify(remote ?? null),
+      version
+    )
+  ) as unknown;
+}
+
+export function sortEdges(edges: readonly SpaceChildEdge[]): SpaceChildEdge[] {
+  return JSON.parse(wasm.sortEdges(JSON.stringify(edges))) as SpaceChildEdge[];
 }
 
 /** Every level counts as loaded unless `loaded` says otherwise. */
@@ -513,8 +615,8 @@ export function uniqueShortcode(shortcode: string, taken: Iterable<string>): str
 }
 
 export function invalidShortcode(
-  images: readonly PackImageDraftView[],
-  original: readonly PackImageDraftView[]
+  images: readonly { shortcode: string }[],
+  original: readonly { shortcode: string }[]
 ): string | null {
   return (
     wasm.invalidShortcode(

@@ -104,6 +104,12 @@
     position: fixed;
   }
 
+  :global(.dialog-backdrop[data-state='closed']),
+  :global(.dialog-content[data-state='closed']) {
+    /* stylelint-disable-next-line declaration-no-important -- bits-ui sets inline pointer-events: auto */
+    pointer-events: none !important;
+  }
+
   :global(.dialog-content) {
     box-sizing: border-box;
     position: fixed;
@@ -115,7 +121,8 @@
 
   :global(.dialog-content-drawer) {
     border: 0;
-    inset: var(--safe-top) var(--safe-right) var(--safe-bottom) auto;
+    inset-block: var(--safe-top) var(--safe-bottom);
+    inset-inline: auto var(--safe-inline-end);
     max-width: min(22rem, 85%);
     padding: 0;
     width: 100%;
@@ -138,7 +145,7 @@
     box-shadow: var(--shadow-dialog);
     color: var(--bg-on-container);
     height: 100dvh;
-    left: 0;
+    inset-inline-start: 0;
     max-width: 68rem;
     overflow: hidden;
     padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
@@ -188,6 +195,7 @@
     :global(.dialog-content-verification) {
       border-radius: var(--radius);
       bottom: auto;
+      /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
       left: calc(50% + (var(--safe-left) - var(--safe-right)) / 2);
       max-width: min(
         var(--dialog-max-width, 34rem),
@@ -208,6 +216,8 @@
       border: var(--border-width) solid var(--surface-container-line);
       border-radius: var(--radius);
       height: min(52rem, calc(100dvh - 3rem - var(--safe-top) - var(--safe-bottom)));
+      inset-inline-start: auto;
+      /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
       left: calc(50% + (var(--safe-left) - var(--safe-right)) / 2);
       padding: 0;
       top: calc(50% + (var(--safe-top) - var(--safe-bottom)) / 2);
@@ -260,13 +270,13 @@
   @keyframes drawer-in {
     from {
       filter: blur(var(--blur-small));
-      transform: translateX(var(--space-400));
+      transform: translateX(calc(var(--space-400) * var(--inline-sign)));
     }
   }
 
   @keyframes drawer-out {
     to {
-      transform: translateX(var(--space-400));
+      transform: translateX(calc(var(--space-400) * var(--inline-sign)));
     }
   }
 

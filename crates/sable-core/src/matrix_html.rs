@@ -13,10 +13,11 @@ use matrix_sdk::ruma::html::{
 use matrix_sdk::ruma::{MatrixUri, MxcUri};
 use regex_lite::Regex;
 use sable_model::color::is_hex_color;
+pub use sable_model::html::link_scheme_allowed;
 use sable_model::html::nests_too_deeply;
 use sable_model::jumbo;
 
-pub use sable_model::html::preview_body;
+pub use sable_model::html::{PreviewEmote, preview_body, preview_emotes};
 
 const ALLOWED_TAGS: [&str; 41] = [
     "a",
@@ -129,16 +130,23 @@ fn is_language_class(value: &str) -> bool {
 
 /// Built once: the policy allocates a dozen hash containers, and `display_html`
 /// runs for every message row.
-static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(sanitizer);
+static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(&[]));
 
-fn sanitizer() -> Builder<'static> {
+/// ammonia only takes a closed set of schemes, so the ones a message links to
+/// beyond `URL_SCHEMES` are passed in once `link_scheme_allowed` has cleared them.
+fn sanitizer(link_schemes: &[String]) -> Builder<'_> {
     let mut builder = Builder::new();
     builder
         .tags(HashSet::from(ALLOWED_TAGS))
         .tag_attributes(tag_attributes())
         .generic_attributes(HashSet::new())
         .clean_content_tags(HashSet::from(STRIPPED_CONTENT_TAGS))
-        .url_schemes(HashSet::from(URL_SCHEMES))
+        .url_schemes(
+            URL_SCHEMES
+                .into_iter()
+                .chain(link_schemes.iter().map(String::as_str))
+                .collect(),
+        )
         .url_relative(UrlRelative::Deny)
         .link_rel(Some("noreferrer noopener"))
         .attribute_filter(|element, attribute, value| match (element, attribute) {
@@ -222,23 +230,15 @@ static MATRIX_POLICY: LazyLock<SanitizerConfig> = LazyLock::new(|| {
             ListBehavior::Add,
         )
         .allow_schemes(
-            [
-                ElementAttributesSchemes {
-                    element: "img",
-                    attr_schemes: &[PropertiesNames {
-                        parent: "src",
-                        properties: &["mxc"],
-                    }],
-                },
-                ElementAttributesSchemes {
-                    element: "a",
-                    attr_schemes: &[PropertiesNames {
-                        parent: "href",
-                        properties: &["tauri", "sable-app"],
-                    }],
-                },
-            ],
-            ListBehavior::Add,
+            // Link schemes are left to `SANITIZER`, which parses them as the webview will.
+            [ElementAttributesSchemes {
+                element: "img",
+                attr_schemes: &[PropertiesNames {
+                    parent: "src",
+                    properties: &["mxc"],
+                }],
+            }],
+            ListBehavior::Override,
         )
 });
 
@@ -344,46 +344,10 @@ fn ipv6_url_spans(text: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-fn msc_spans(text: &str) -> Vec<(usize, usize)> {
-    const MAX_DIGITS: usize = 5;
-    let is_word = |character: char| character.is_alphanumeric() || character == '_';
-    let bytes = text.as_bytes();
-    // ASCII-only lowercasing keeps byte offsets aligned with `text`.
-    let lowercase = text.to_ascii_lowercase();
-    let mut spans = Vec::new();
-    let mut search = 0;
-    while let Some(start) = lowercase
-        .get(search..)
-        .and_then(|rest| rest.find("msc"))
-        .map(|offset| search + offset)
-    {
-        let digits_at = start + "msc".len();
-        let digits = bytes.get(digits_at..).map_or(0, |rest| {
-            rest.iter().take_while(|byte| byte.is_ascii_digit()).count()
-        });
-        let end = digits_at + digits;
-        let bounded = text
-            .get(..start)
-            .and_then(|before| before.chars().next_back())
-            .is_none_or(|character| !is_word(character))
-            && text
-                .get(end..)
-                .and_then(|after| after.chars().next())
-                .is_none_or(|character| !is_word(character));
-        if (1..=MAX_DIGITS).contains(&digits) && bounded {
-            spans.push((start, end));
-        }
-        search = end.max(digits_at);
-    }
-    spans
-}
-
 fn anchor(href: &str, text: &str) -> String {
-    let allowed = href.split_once(':').is_some_and(|(scheme, _)| {
-        URL_SCHEMES
-            .iter()
-            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
-    }) && !has_scheme(href, "mxc:")
+    let allowed = href
+        .split_once(':')
+        .is_some_and(|(scheme, _)| link_scheme_allowed(scheme))
         && (!has_scheme(href, "tauri:") || has_scheme(href, DESKTOP_APP_ORIGIN))
         && (!has_scheme(href, "sable-app:") || has_scheme(href, ELECTRON_APP_ORIGIN));
     if !allowed {
@@ -400,7 +364,6 @@ fn anchor(href: &str, text: &str) -> String {
 enum SpanKind {
     Url,
     Email,
-    Msc,
     RoomMention,
 }
 
@@ -457,11 +420,6 @@ fn render_plain_text(text: &str) -> String {
                 .map(|(start, end)| (start, end, SpanKind::Url)),
         )
         .chain(
-            msc_spans(text)
-                .into_iter()
-                .map(|(start, end)| (start, end, SpanKind::Msc)),
-        )
-        .chain(
             room_mention_spans(text)
                 .into_iter()
                 .map(|(start, end)| (start, end, SpanKind::RoomMention)),
@@ -482,13 +440,6 @@ fn render_plain_text(text: &str) -> String {
         match kind {
             SpanKind::Email => html.push_str(&anchor(&format!("mailto:{link}"), link)),
             SpanKind::Url => html.push_str(&anchor(link, link)),
-            SpanKind::Msc => {
-                let number = link.get("msc".len()..).unwrap_or_default();
-                html.push_str(&anchor(
-                    &format!("https://github.com/matrix-org/matrix-spec-proposals/pull/{number}"),
-                    link,
-                ));
-            }
             SpanKind::RoomMention => html.push_str("<span data-mx-room-mention>@room</span>"),
         }
         offset = end;
@@ -565,7 +516,38 @@ fn sanitize(formatted: &str) -> String {
     }
     let html = rewrite_markup(formatted);
     html.sanitize_with(&MATRIX_POLICY);
-    SANITIZER.clean(&html.to_string()).to_string()
+    let link_schemes = extra_link_schemes(&html);
+    let markup = html.to_string();
+    if link_schemes.is_empty() {
+        SANITIZER.clean(&markup).to_string()
+    } else {
+        sanitizer(&link_schemes).clean(&markup).to_string()
+    }
+}
+
+fn extra_link_schemes(html: &Html) -> Vec<String> {
+    let mut schemes = Vec::new();
+    let mut pending: Vec<_> = html.children().collect();
+    while let Some(node) = pending.pop() {
+        pending.extend(node.children());
+        let Some(element) = node.as_element() else {
+            continue;
+        };
+        if element.name.local.as_ref() != "a" {
+            continue;
+        }
+        let attrs = element.attrs.borrow();
+        let scheme = attrs
+            .iter()
+            .find(|attr| attr.name.local.as_ref() == "href")
+            .and_then(|attr| url::Url::parse(&attr.value).ok())
+            .map(|url| url.scheme().to_owned())
+            .filter(|scheme| {
+                link_scheme_allowed(scheme) && !URL_SCHEMES.contains(&scheme.as_str())
+            });
+        schemes.extend(scheme);
+    }
+    schemes
 }
 
 /// The HTML the UI renders for a message: the sender's `formatted_body` once
@@ -603,7 +585,7 @@ fn render_html(body: &str, formatted: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_html, escape_html, preview_body, render_plain_text, rewrite_markup,
+        display_html, escape_html, preview_body, preview_emotes, render_plain_text, rewrite_markup,
         strip_profile_fallback_body, strip_profile_fallback_html,
     };
 
@@ -753,6 +735,23 @@ mod tests {
         }
         assert_eq!(preview_body("plain **literal**", None), "plain **literal**");
         assert_eq!(preview_body("fallback", Some("")), "fallback");
+    }
+
+    #[test]
+    fn preview_emotes_are_the_visible_emoticons_in_order() {
+        let formatted = "<mx-reply><img data-mx-emoticon src=\"mxc://x/quoted\" alt=\":q:\"></mx-reply>\
+             <img data-mx-emoticon src=\"mxc://x/a\" alt=\":a:\"> and \
+             <span data-mx-spoiler><img data-mx-emoticon src=\"mxc://x/s\" alt=\":s:\"></span>\
+             <img src=\"mxc://x/photo\" alt=\"photo\"><img data-mx-emoticon src=\"mxc://x/b\" alt=\":b:\">";
+        let emotes = preview_emotes(Some(formatted));
+        assert_eq!(
+            emotes
+                .iter()
+                .map(|emote| (emote.alt.as_str(), emote.source.as_str()))
+                .collect::<Vec<_>>(),
+            [(":a:", "mxc://x/a"), (":b:", "mxc://x/b")]
+        );
+        assert_eq!(preview_emotes(None), []);
     }
 
     #[test]
@@ -1131,10 +1130,10 @@ mod tests {
     }
 
     #[test]
-    fn a_magnet_link_never_becomes_an_anchor() {
+    fn a_magnet_link_is_kept_but_never_autolinked() {
         let markup = "<a href=\"magnet:?xt=urn:btih:abc\">torrent</a>";
         let html = display_html("", Some(markup));
-        assert!(!html.contains("magnet:"), "magnet href survived: {html}");
+        assert!(html.contains("href=\"magnet:?xt=urn:btih:abc\""), "{html}");
 
         let plain = display_html("magnet:?xt=urn:btih:abc", None);
         assert!(!plain.contains("<a "), "magnet was autolinked: {plain}");
@@ -1167,6 +1166,23 @@ mod tests {
         }
 
         assert!(display_html("see https://example.org/a", None).contains("<a href="));
+    }
+
+    #[test]
+    fn links_to_other_apps_survive_and_script_links_do_not() {
+        assert!(
+            display_html("call discord://-/channels/1/2 now", None)
+                .contains("<a href=\"discord://-/channels/1/2\"")
+        );
+        let html = display_html(
+            "",
+            Some(
+                "<a href=\"Spotify:track:1\">song</a> <a href=\"java\tscript:alert(1)\">x</a> \
+                 <a href=\"file:///etc/passwd\">y</a> <a href=\"ms-msdt:/id\">z</a>",
+            ),
+        );
+        assert!(html.contains("href=\"Spotify:track:1\""), "{html}");
+        assert_eq!(html.matches("href=").count(), 1, "{html}");
     }
 
     #[test]
@@ -1297,10 +1313,10 @@ mod tests {
                 "https://example.org",
                 "mailto:alice@example.org",
                 "matrix:u/alice:example.org",
-                "https://github.com/matrix-org/matrix-spec-proposals/pull/4144",
             ] {
                 assert!(html.contains(&format!("href=\"{href}\"")), "{html}");
             }
+            assert!(!html.contains("msc.sable.moe"), "{html}");
             assert!(html.contains("data-mx-room-mention"));
             assert!(html.contains(">@room</span>"));
             assert_eq!(preview_body(body, Some(&html)), body);
@@ -1383,27 +1399,6 @@ mod tests {
         assert!(display_html(href, None).contains(&format!("href=\"{escaped}\"")));
         let markup = format!("<a href=\"{escaped}\">settings</a>");
         assert!(display_html("", Some(&markup)).contains(&format!("href=\"{escaped}\"")));
-    }
-
-    #[test]
-    fn linkifies_msc_references_in_plain_and_formatted_bodies() {
-        let pull = "https://github.com/matrix-org/matrix-spec-proposals/pull";
-
-        let plain = display_html("see MSC4144 and msc2545, not xMSC1 or MSC123456", None);
-        assert!(plain.contains(&format!(
-            "<a href=\"{pull}/4144\" rel=\"noreferrer noopener\">MSC4144</a>"
-        )));
-        assert!(plain.contains(&format!("href=\"{pull}/2545\"")));
-        assert!(!plain.contains("/pull/1\""));
-        assert!(!plain.contains("/pull/123456"));
-
-        let formatted = display_html(
-            "",
-            Some("<strong>MSC3391</strong> <code>MSC1</code> <a href=\"https://x.org\">MSC2</a>"),
-        );
-        assert!(formatted.contains(&format!("href=\"{pull}/3391\"")));
-        assert!(!formatted.contains("/pull/1\""));
-        assert!(!formatted.contains("/pull/2\""));
     }
 
     #[test]

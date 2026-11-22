@@ -1,24 +1,17 @@
 import type { ImagePackView, MemberView, RoomListItemView } from '#src/generated/protocol';
 import { expect, test } from 'vitest';
 
+import { roomSpaces } from '#lib/model/model.js';
+
+import { memberView } from '#lib/test-support/room-views.js';
+
 import type { AutocompleteQuery } from './autocomplete';
 import { parseBotCommand } from './bot-commands';
 import { rememberSuggestion } from './suggestion-usage';
 import { suggestionsFor, type PackEmote } from './suggestions';
 
 function member(userId: string, displayName: string | null): MemberView {
-  return {
-    user_id: userId,
-    display_name: displayName,
-    real_name: displayName,
-    real_avatar_url: null,
-    avatar_url: null,
-    power_level: 0,
-    membership: 'join' as const,
-    member_ts: null,
-    kicked: false,
-    service: false,
-  };
+  return memberView({ user_id: userId, display_name: displayName, real_name: displayName });
 }
 
 function emote(shortcode: string, name = 'Pack'): PackEmote {
@@ -201,11 +194,18 @@ test('rooms with the same name show the space they are in', () => {
     ],
   } as RoomListItemView;
 
+  const rooms = [space, room('!one:example.org', 'General'), room('!two:example.org', 'General')];
+  const spaces = new Map(roomSpaces(rooms).map((entry) => [entry.room_id, entry]));
   const suggestions = suggestionsFor(
     roomQuery('gen'),
     [],
     [],
-    [space, room('!one:example.org', 'General'), room('!two:example.org', 'General')]
+    rooms,
+    undefined,
+    null,
+    null,
+    [],
+    (roomId) => spaces.get(roomId)
   );
 
   expect(suggestions.map((item) => item.detail)).toEqual(['Community', null]);

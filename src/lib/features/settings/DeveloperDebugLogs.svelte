@@ -17,6 +17,7 @@
   import { exportDiagnosticsBundle } from '#lib/observability/export-diagnostics.js';
   import '#lib/ui/primitives/settings-row.css';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
+  import { reportSave } from '#lib/ui/download.js';
 
   const categories: DebugLogCategory[] = [
     'sync',
@@ -42,7 +43,7 @@
   );
 
   async function download(entries = filtered): Promise<void> {
-    await exportDiagnosticsBundle(entries);
+    reportSave(await exportDiagnosticsBundle(entries));
   }
 
   async function copy(entries = filtered): Promise<void> {
@@ -96,7 +97,7 @@
     </div>
 
     {#if filtered.length === 0}
-      <p class="empty">{i18n.t('settings.developerLogsEmpty')}</p>
+      <p class="empty-text">{i18n.t('settings.developerLogsEmpty')}</p>
     {:else}
       <div class="entries" aria-live="polite" {@attach scrollHint}>
         {#each filtered.slice(-200).reverse() as entry (entry.id)}
@@ -138,12 +139,8 @@
   }
 
   p {
-    margin: 0;
-  }
-
-  p,
-  .empty {
     color: var(--surface-var-on-container);
+    margin: 0;
   }
 
   .filters > :global(*) {

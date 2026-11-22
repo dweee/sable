@@ -31,6 +31,7 @@
   import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
+  import { scrollHintX } from '#lib/ui/scroll-hint.js';
 
   import ComposerColorButton from './ComposerColorButton.svelte';
   import type { ActiveColors, ColorKind, FormatAction } from './editor/formatting';
@@ -100,7 +101,8 @@
 </script>
 
 <div
-  class="formatting"
+  {@attach scrollHintX}
+  class="formatting scrollbar-hidden"
   role="group"
   aria-label={i18n.t('composer.formatting')}
   onwheel={scrollSideways}
@@ -170,11 +172,6 @@
     min-width: 0;
     overflow-x: auto;
     overscroll-behavior-x: contain;
-    scrollbar-width: none;
-  }
-
-  .formatting::-webkit-scrollbar {
-    display: none;
   }
 
   :global(.format-button) {

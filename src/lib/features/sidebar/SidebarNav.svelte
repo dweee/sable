@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import { i18n } from '#lib/i18n.js';
   import { readText, writeText } from '#lib/platform/local-json.js';
   import type { RoomListItemView } from '#src/generated/protocol';
@@ -10,7 +11,7 @@
   import { useCallSession } from '#lib/features/call/call-session.svelte.js';
   import { roomSectionPath } from '#lib/rooms/permalink.js';
   import { findRoomByPathId, useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { addUnread, spacesContaining, spacesContainingRoom } from '#lib/rooms/spaces.js';
+  import { addUnread, spacesContaining } from '#lib/rooms/spaces.js';
   import { hasUnread, NO_UNREAD } from '#lib/rooms/unread.js';
   import {
     applyDrop,
@@ -24,6 +25,7 @@
     setFolderIcon,
     ungroupFolder,
     withoutSpace,
+    withSpace,
     type DropInstruction,
     type LayoutRef,
     type SidebarFolder,
@@ -37,6 +39,7 @@
   import UserQuickTools from './UserQuickTools.svelte';
   import { isActiveSpace, markRoomsRead } from './nav-rooms.js';
   import CoreHealthBanner from '#lib/ui/CoreHealthBanner.svelte';
+  import AlertDrawer from './AlertDrawer.svelte';
 
   interface Props {
     mobile?: boolean;
@@ -104,6 +107,7 @@
     )
   );
   let callRoom = $derived(roomList.byId(call.roomId));
+  let callParticipants = $derived(call.active ? call.members.map((member) => member.user_id) : []);
   let spaceUnread = $derived(
     new Map(
       spaces.flatMap((space) => {
@@ -113,12 +117,20 @@
     )
   );
   let callSpaces = $derived(
-    call.active ? spacesContainingRoom(spaces, roomList.rooms, call.roomId) : new Set<string>()
+    call.active
+      ? spacesContaining(
+          spaces,
+          roomList.rooms,
+          roomList.roomSpaces,
+          (room) => room.room_id === call.roomId
+        )
+      : new Set<string>()
   );
   let voiceSpaces = $derived(
     spacesContaining(
       spaces,
       roomList.rooms,
+      roomList.roomSpaces,
       (room) => room.state === 'joined' && room.call_participants.length > 0
     )
   );
@@ -171,7 +183,7 @@
   });
 
   function clampRoomNavWidth(width: number) {
-    const clamped = Math.max(MIN_ROOM_NAV_WIDTH, Math.min(MAX_ROOM_NAV_WIDTH, width));
+    const clamped = clamp(width, MIN_ROOM_NAV_WIDTH, MAX_ROOM_NAV_WIDTH);
 
     if (clamped > MIN_ROOM_NAV_WIDTH && clamped < COLLAPSED_ROOM_NAV_WIDTH) {
       return clamped - MIN_ROOM_NAV_WIDTH < COLLAPSED_ROOM_NAV_WIDTH - clamped
@@ -188,6 +200,12 @@
 
   function folderLabel(folder: SidebarFolder): string {
     return folderName(folder, (roomId) => roomList.byId(roomId)?.name ?? null) ?? '';
+  }
+
+  function togglePin(roomId: string): void {
+    spaceSidebar.write(
+      pinnedSpaceIds.has(roomId) ? withoutSpace(entries, roomId) : withSpace(entries, roomId)
+    );
   }
 
   const railProps = {
@@ -293,7 +311,10 @@
           {roomId}
           {onNavigate}
           callRoomId={call.active ? call.roomId : null}
+          {callParticipants}
           callVoiceStates={call.voiceStates}
+          {pinnedSpaceIds}
+          onTogglePin={togglePin}
         />
       </div>
       {@render callBar()}
@@ -323,23 +344,29 @@
           width={roomNavWidth}
           {collapsed}
           callRoomId={call.active ? call.roomId : null}
+          {callParticipants}
           callVoiceStates={call.voiceStates}
+          {pinnedSpaceIds}
+          onTogglePin={togglePin}
         />
-        <ResizeHandle
-          value={roomNavWidth}
-          min={MIN_ROOM_NAV_WIDTH}
-          max={MAX_ROOM_NAV_WIDTH}
-          label={i18n.t('nav.resizeRooms')}
-          grow="right"
-          step={ROOM_NAV_WIDTH_STEP}
-          onResize={(next) => (roomNavWidth = clampRoomNavWidth(next))}
-          onCommit={persistRoomNavWidth}
-        />
+        {#if !collapsed}
+          <AlertDrawer />
+        {/if}
       </div>
       {@render callBar()}
       {#if !collapsed}
         <UserQuickTools />
       {/if}
+      <ResizeHandle
+        value={roomNavWidth}
+        min={MIN_ROOM_NAV_WIDTH}
+        max={MAX_ROOM_NAV_WIDTH}
+        label={i18n.t('nav.resizeRooms')}
+        grow="right"
+        step={ROOM_NAV_WIDTH_STEP}
+        onResize={(next) => (roomNavWidth = clampRoomNavWidth(next))}
+        onCommit={persistRoomNavWidth}
+      />
     </nav>
   {/if}
   <FolderRenameDialog
@@ -364,12 +391,14 @@
   .desktop-navigation {
     display: none;
     flex-direction: column;
+    position: relative;
   }
 
   .desktop-navigation-main {
     display: flex;
     flex: 1;
     min-height: 0;
+    position: relative;
   }
 
   .mobile-navigation,
@@ -398,8 +427,8 @@
   @media (--app-layout) {
     .sidebar {
       height: 100dvh;
-      left: 0;
-      padding-left: var(--safe-left);
+      inset-inline-start: 0;
+      padding-inline-start: var(--safe-left);
       padding-top: var(--safe-top);
       position: fixed;
       top: 0;
@@ -411,8 +440,8 @@
       display: flex;
     }
 
-    .desktop-navigation-main :global(.resize-handle) {
-      right: -0.25rem;
+    .desktop-navigation :global(.resize-handle) {
+      inset-inline-end: -0.25rem;
     }
   }
 </style>

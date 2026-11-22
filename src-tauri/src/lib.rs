@@ -190,23 +190,17 @@ impl Carried for Request<'_> {
     }
 }
 
-async fn carried_attachment(
-    core: &sable_core::Core,
-    request: &impl Carried,
-) -> Result<(), RpcError> {
+async fn carried_attachment(core: &Core, request: &impl Carried) -> Result<(), RpcError> {
     core.send_attachment(request.metadata()?, request.bytes()?)
         .await
 }
 
-async fn carried_upload(
-    core: &sable_core::Core,
-    request: &impl Carried,
-) -> Result<String, RpcError> {
+async fn carried_upload(core: &Core, request: &impl Carried) -> Result<String, RpcError> {
     let mime = request.header("mime").ok_or(RpcCode::InvalidMedia)?;
     core.upload_media(mime, request.bytes()?).await
 }
 
-async fn carried_gallery(core: &sable_core::Core, request: &impl Carried) -> Result<(), RpcError> {
+async fn carried_gallery(core: &Core, request: &impl Carried) -> Result<(), RpcError> {
     core.send_gallery(request.metadata()?, request.bytes()?)
         .await
 }
@@ -349,6 +343,7 @@ struct NotificationPolicy {
     clear_on_read: bool,
     private_receipts: bool,
     quiet_when_active_elsewhere: bool,
+    in_app_banners: bool,
 }
 
 #[tauri::command]
@@ -368,6 +363,7 @@ async fn set_notification_policy(
             clear_on_read,
             private_receipts,
             quiet_when_active_elsewhere,
+            in_app_banners,
         } = policy;
         app.sable_push()
             .set_policy(tauri_plugin_sable_push::Policy {
@@ -379,6 +375,7 @@ async fn set_notification_policy(
                 clear_on_read,
                 private_receipts,
                 quiet_when_active_elsewhere,
+                in_app_banners,
             })
             .await
             .map_err(|_| RpcCode::Unavailable)?;
@@ -528,6 +525,7 @@ fn setup(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Err
     #[cfg(target_os = "ios")]
     if let Some(window) = app.get_webview_window("main") {
         ios::hide_form_accessory_bar(&window);
+        ios::relayout_on_keyboard_hide(&window);
     }
 
     map_tiles::cleanup_cache(app.handle());
@@ -575,7 +573,10 @@ fn session_store(data_dir: &std::path::Path) -> Box<dyn sable_core::store::Sessi
 
 #[cfg(mobile)]
 fn set_mobile_activity(core: Arc<Core>, active: bool) {
-    core.update_app_in_foreground(active);
+    tauri::async_runtime::spawn({
+        let core = core.clone();
+        async move { core.update_app_in_foreground(active).await }
+    });
     let revision = core.set_app_active(active);
     #[cfg(target_os = "ios")]
     let background_task = (!active).then(|| ios::BackgroundTask::begin("Pause sync"));
@@ -657,7 +658,10 @@ async fn dismiss_read_room_notifications(
 )]
 fn open_external_url(app: AppHandle<tauri::Wry>, url: String) -> Result<(), RpcError> {
     let parsed = tauri::Url::parse(&url).map_err(|_| RpcCode::Denied)?;
-    if !matches!(parsed.scheme(), "http" | "https" | "mailto" | "tel") {
+    let scheme = parsed.scheme();
+    if !sable_core::matrix_html::link_scheme_allowed(scheme)
+        || matches!(scheme, "tauri" | "sable-app")
+    {
         return Err(RpcCode::Denied.into());
     }
 
@@ -761,7 +765,9 @@ fn with_platform_plugins(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
     #[cfg(feature = "geolocation")]
     let builder = builder.plugin(tauri_plugin_geolocation::init());
 
-    let builder = builder.plugin(tauri_plugin_sharekit::init());
+    let builder = builder
+        .plugin(tauri_plugin_sharekit::init())
+        .plugin(tauri_plugin_native_audio::init());
 
     #[cfg(target_os = "android")]
     let builder = builder.plugin(tauri_plugin_android_fs::init());
@@ -773,7 +779,15 @@ fn app_builder(sentry_client: Option<&::sentry::Client>) -> tauri::Builder<tauri
     let builder = tauri::Builder::<tauri::Wry>::new();
     #[cfg(target_os = "ios")]
     let builder = builder.on_web_content_process_terminate(|webview| {
-        tracing::error!("webview content process terminated");
+        // iOS reclaims a suspended app's page, which is routine.
+        let visible = webview
+            .try_state::<AppState>()
+            .is_some_and(|state| state.core.is_app_active());
+        if visible {
+            tracing::error!("webview content process terminated");
+        } else {
+            tracing::warn!("webview content process terminated in the background");
+        }
         // WebKit leaves the page blank until reloaded.
         if let Err(error) = webview.reload() {
             tracing::error!(%error, "webview reload failed");
@@ -810,13 +824,21 @@ fn app_builder(sentry_client: Option<&::sentry::Client>) -> tauri::Builder<tauri
                 && state.event_sink.detach()
             {
                 let core = state.core.clone();
-                tauri::async_runtime::spawn(async move { core.end_all_calls().await });
+                let dropping = core.drop_open_subscriptions();
+                tauri::async_runtime::spawn(async move {
+                    dropping.await;
+                    core.end_all_calls().await;
+                });
             }
         })
         .setup(setup)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the command list grows with each native command"
+)]
 pub fn run() {
     // Before the threads Tauri spawns, so they inherit the panic handler.
     let sentry_guard = sentry::init();
@@ -862,6 +884,12 @@ pub fn run() {
             #[cfg(target_os = "ios")]
             ios::save_media_to_photos,
             #[cfg(target_os = "ios")]
+            ios::recent_media,
+            #[cfg(target_os = "ios")]
+            ios::recent_media_thumbnail,
+            #[cfg(target_os = "ios")]
+            ios::recent_media_file,
+            #[cfg(target_os = "ios")]
             ios::h264_from_hevc,
             #[cfg(target_os = "ios")]
             ios::open_in_app_auth_url,
@@ -876,11 +904,17 @@ pub fn run() {
             #[cfg(target_os = "ios")]
             ios::haptic_feedback,
             #[cfg(target_os = "ios")]
+            ios::play_notification_chime,
+            #[cfg(target_os = "ios")]
             ios::set_system_bars_hidden,
+            #[cfg(target_os = "ios")]
+            ios::set_keep_screen_on,
             #[cfg(target_os = "ios")]
             ios::set_badge_count,
             #[cfg(target_os = "android")]
             mobile::copy_image_to_clipboard,
+            #[cfg(target_os = "android")]
+            mobile::recent_media,
             #[cfg(target_os = "android")]
             mobile::haptic_feedback,
             #[cfg(target_os = "android")]
@@ -889,6 +923,8 @@ pub fn run() {
             mobile::set_navigation_bar_light,
             #[cfg(target_os = "android")]
             mobile::set_system_bars_hidden,
+            #[cfg(target_os = "android")]
+            mobile::set_keep_screen_on,
             #[cfg(target_os = "android")]
             mobile::set_window_background
         ])
@@ -903,8 +939,19 @@ pub fn run() {
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             hang_up_before_exit(app);
+            #[cfg(target_os = "android")]
+            exit_without_destructors();
         }
     });
+}
+
+/// tao's `exit()` would run C++ static destructors under live binder and
+/// webview threads, aborting on a destroyed mutex.
+#[cfg(target_os = "android")]
+#[expect(unsafe_code, reason = "libc::_exit has no safe wrapper")]
+fn exit_without_destructors() -> ! {
+    // SAFETY: `_exit` takes no pointers and never returns.
+    unsafe { libc::_exit(0) }
 }
 
 const EXIT_HANGUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);

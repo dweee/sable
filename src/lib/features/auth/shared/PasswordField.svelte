@@ -9,6 +9,7 @@
     id?: string;
     value?: string;
     disabled?: boolean;
+    readonly?: boolean;
     invalid?: boolean;
     describedBy?: string;
     autocomplete?: HTMLInputAttributes['autocomplete'];
@@ -20,6 +21,7 @@
     id = 'password',
     value = $bindable(''),
     disabled = false,
+    readonly = false,
     invalid = false,
     describedBy,
     autocomplete = 'current-password',
@@ -36,6 +38,7 @@
     {autocomplete}
     required
     {disabled}
+    {readonly}
     aria-invalid={invalid}
     aria-describedby={describedBy}
     {oninput}
@@ -46,7 +49,6 @@
     type="button"
     {disabled}
     aria-label={showPassword ? i18n.t('auth.hidePassword') : i18n.t('auth.showPassword')}
-    aria-pressed={showPassword}
     onclick={() => {
       showPassword = !showPassword;
     }}
@@ -77,10 +79,10 @@
     cursor: pointer;
     display: flex;
     height: 100%;
+    inset-inline-end: 0;
     justify-content: center;
     padding: 0;
     position: absolute;
-    right: 0;
     top: 0;
     width: 2.75rem;
   }

@@ -1,5 +1,13 @@
-//! A typed message to Matrix content, as the web composer's plain mode sends it, checked
-//! against `fixtures/markdown.json`.
+//! A typed message to Matrix content, checked against `fixtures/markdown.json`.
+//!
+//! The flavour is comrak's reading of GitHub markdown, with:
+//!
+//! - tables, `~~strike~~` (a single `~` strikes nothing) and `-# subtext`;
+//! - `$math$`, `$$math$$` and math in backticks inside the dollars;
+//! - `||spoiler||`, which may run across paragraphs, and `$[fn …]` functions;
+//! - `>` opening a quote only before a space;
+//! - a bare address staying text, with its `_` and `*` as written;
+//! - links to allowed schemes only, and HTML shown as the text it is.
 
 mod blocks;
 mod doc;
@@ -12,8 +20,10 @@ use linkify::{LinkFinder, LinkKind};
 use serde::{Deserialize, Serialize};
 
 use self::blocks::Block;
-use self::inline::{Inline, Mark, Token, add_mark, fold, formats, merged, sable_syntax};
-use crate::text::{head, is_space, span, tail, trim};
+use self::inline::{
+    Inline, Mark, Token, add_mark, delimiters_across, fold, formats, merged, sable_syntax,
+};
+use crate::text::{head, is_space, tail, trim};
 
 /// The placeholder a client writes where a pill sits in the typed text.
 pub const PILL: char = '\u{FFFC}';
@@ -113,7 +123,7 @@ fn mentions(text: &str, pills: &[ComposerPill], blocks: &[Block<Vec<Inline>>]) -
         .into_iter()
         .flatten()
         .filter_map(|node| match node {
-            Inline::Pill(index) => Some(*index),
+            Inline::Pill(index, _) => Some(*index),
             _ => None,
         })
     {
@@ -130,8 +140,8 @@ fn mentions(text: &str, pills: &[ComposerPill], blocks: &[Block<Vec<Inline>>]) -
     }
 }
 
-/// The pills put back where their placeholders were. A pill keeps none of the
-/// marks around it; inside a code block it is its text.
+/// The pills put back where their placeholders were. Emotes keep emphasis;
+/// inside a code block a pill is its text.
 fn splice_pills(nodes: Vec<Inline>, next: &mut usize, pills: &[ComposerPill]) -> Vec<Inline> {
     let mut out = Vec::with_capacity(nodes.len());
     for node in nodes {
@@ -147,8 +157,15 @@ fn splice_pills(nodes: Vec<Inline>, next: &mut usize, pills: &[ComposerPill]) ->
                         out.push(Inline::Text(pill.text(), marks.clone()));
                         *next += 1;
                     }
-                    Some(_) => {
-                        out.push(Inline::Pill(*next));
+                    Some(pill) => {
+                        let emphasis = if matches!(pill, ComposerPill::Emote { .. })
+                            && marks.contains(&Mark::Em)
+                        {
+                            vec![Mark::Em]
+                        } else {
+                            Vec::new()
+                        };
+                        out.push(Inline::Pill(*next, emphasis));
                         *next += 1;
                     }
                     None => out.push(Inline::Text(PILL.to_string(), marks.clone())),
@@ -201,70 +218,6 @@ fn splice_blocks(
         .collect()
 }
 
-fn word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-/// The byte ranges of `MSC1234`-style references in `text`.
-fn msc_references(text: &str) -> Vec<(usize, usize, String)> {
-    let mut found = Vec::new();
-    let lower = text.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(offset) = tail(&lower, from).find("msc") {
-        let at = from + offset;
-        from = at + 3;
-        if head(text, at).chars().next_back().is_some_and(word_char) {
-            continue;
-        }
-        let digits = tail(text, at + 3)
-            .bytes()
-            .take_while(u8::is_ascii_digit)
-            .count();
-        let end = at + 3 + digits;
-        if (1..=5).contains(&digits) && !tail(text, end).chars().next().is_some_and(word_char) {
-            found.push((at, end, span(text, at + 3, end).to_owned()));
-            from = end;
-        }
-    }
-    found
-}
-
-fn link_mscs(nodes: Vec<Inline>) -> Vec<Inline> {
-    let mut out = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        match node {
-            Inline::Text(text, marks)
-                if !marks
-                    .iter()
-                    .any(|mark| matches!(mark, Mark::Link(_) | Mark::Code)) =>
-            {
-                let mut from = 0;
-                for (start, end, number) in msc_references(&text) {
-                    if start > from {
-                        out.push(Inline::Text(
-                            span(&text, from, start).to_owned(),
-                            marks.clone(),
-                        ));
-                    }
-                    let href = format!(
-                        "https://github.com/matrix-org/matrix-spec-proposals/pull/{number}"
-                    );
-                    out.push(Inline::Text(
-                        span(&text, start, end).to_owned(),
-                        add_mark(&marks, Mark::Link(href)),
-                    ));
-                    from = end;
-                }
-                if from < text.len() {
-                    out.push(Inline::Text(tail(&text, from).to_owned(), marks));
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// The top-level domains markdown-it's linkify accepts besides the two-letter ones.
 const GENERIC_TLDS: [&str; 16] = [
     "biz", "com", "edu", "gov", "net", "org", "pro", "web", "xxx", "aero", "asia", "coop", "info",
@@ -278,10 +231,7 @@ fn bare_href(address: &str, kind: &LinkKind) -> Option<String> {
         return Some(format!("mailto:{address}"));
     }
     if let Some((scheme, _)) = address.split_once("://") {
-        return ["http", "https", "ftp"]
-            .iter()
-            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
-            .then(|| address.to_owned());
+        return crate::html::link_scheme_allowed(scheme).then(|| address.to_owned());
     }
     let host = address.split(['/', '?', '#', ':']).next()?;
     let tld = host.rsplit('.').next()?;
@@ -342,8 +292,32 @@ fn plain_text(blocks: &[Block<Vec<Inline>>]) -> Option<String> {
     Some(paragraphs.join("\n\n"))
 }
 
+fn delimiters_across_paragraphs(blocks: &mut [Block<Vec<Token>>]) {
+    let mut run = Vec::new();
+    for block in blocks {
+        match block {
+            Block::Paragraph(tokens) => run.push(tokens),
+            other => {
+                delimiters_across(&mut std::mem::take(&mut run));
+                match other {
+                    Block::Quote(children) => delimiters_across_paragraphs(children),
+                    Block::List { items, .. } => {
+                        for item in items {
+                            delimiters_across_paragraphs(item);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    delimiters_across(&mut run);
+}
+
 fn token_blocks(source: &str) -> Vec<Block<Vec<Token>>> {
-    blocks::parse(source)
+    let mut blocks = blocks::parse(source);
+    delimiters_across_paragraphs(&mut blocks);
+    blocks
         .into_iter()
         .map(|block| block.map(&mut sable_syntax))
         .collect()
@@ -368,9 +342,6 @@ fn parse(source: &str, pills: &[ComposerPill]) -> Vec<Block<Vec<Inline>>> {
         .collect();
     let spliced = splice_blocks(parsed, &mut 0, pills);
     without_trailing_paragraphs(spliced)
-        .into_iter()
-        .map(|block| block.map(&mut |nodes| merged(link_mscs(nodes))))
-        .collect()
 }
 
 fn line_feeds(markdown: &str) -> String {
@@ -469,10 +440,12 @@ mod tests {
         ] {
             assert!(!topic_to_html(topic).contains("<a"), "{topic}");
         }
-        assert!(
-            topic_to_html("FTP://files.example.org/a")
-                .contains("href=\"FTP://files.example.org/a\"")
-        );
+        for topic in ["FTP://files.example.org/a", "discord://-/channels/1/2"] {
+            assert!(
+                topic_to_html(topic).contains(&format!("href=\"{topic}\"")),
+                "{topic}"
+            );
+        }
     }
 
     #[test]
@@ -555,12 +528,6 @@ mod tests {
             ),
             ("[javascript](javascript:alert(1))", None),
             ("<script>alert(1)</script>", None),
-            (
-                "MSC1234",
-                Some(
-                    "<a href=\"https://github.com/matrix-org/matrix-spec-proposals/pull/1234\">MSC1234</a>",
-                ),
-            ),
             ("-# small", Some("<sub data-md=\"-#\">small</sub>")),
             (
                 "$[fg.color=f00 red]",
@@ -617,6 +584,135 @@ mod tests {
     }
 
     #[test]
+    fn a_spoiler_runs_across_paragraphs() {
+        let p = |inner: &str| format!("<p>{inner}</p>");
+        let s = |inner: &str| format!("<span data-mx-spoiler=\"\">{inner}</span>");
+        for (markdown, formatted) in [
+            ("||one\n\ntwo||", p(&s("one")) + &p(&s("two"))),
+            ("||one\ntwo||", s("one<br>two")),
+            (
+                "a ||one\n\n**two**\n\nthree|| b",
+                p(&format!("a {}", s("one")))
+                    + &p(&s("<strong>two</strong>"))
+                    + &p(&format!("{} b", s("three"))),
+            ),
+            (
+                "||one\n\ntwo|| ||three\n\nfour||",
+                p(&s("one")) + &p(&format!("{} {}", s("two"), s("three"))) + &p(&s("four")),
+            ),
+            (
+                "> ||one\n>\n> two||",
+                format!("<blockquote>{}{}</blockquote>", p(&s("one")), p(&s("two"))),
+            ),
+        ] {
+            let content = markdown_to_content(markdown, &[]);
+            assert_eq!(content.formatted_body, Some(formatted), "{markdown}");
+            assert!(
+                !content.body.contains("one"),
+                "{markdown}: {}",
+                content.body
+            );
+        }
+        for markdown in [
+            "||one\n\ntwo",
+            "|| one\n\ntwo||",
+            "||one\n\ntwo ||",
+            "||one\n\n# two||",
+        ] {
+            let html = markdown_to_content(markdown, &[])
+                .formatted_body
+                .unwrap_or_default();
+            assert!(!html.contains("data-mx-spoiler"), "{markdown}: {html}");
+        }
+    }
+
+    #[test]
+    fn a_table_can_end_a_paragraph() {
+        for markdown in ["a | b\n|-|-|", "a | b\\\n|-|-|", "text\n| a |\n|---|"] {
+            let html = markdown_to_content(markdown, &[])
+                .formatted_body
+                .unwrap_or_default();
+            assert!(html.contains("<table>"), "{markdown}: {html}");
+        }
+    }
+
+    #[test]
+    fn a_table_inside_a_quote_or_list_stays_a_table() {
+        for markdown in [
+            "> | a |\n> | - |\n> | b |",
+            "* * x\n\n    | a |\n    | - |\n    | b |",
+        ] {
+            let html = markdown_to_content(markdown, &[]).formatted_body;
+            assert!(html.unwrap_or_default().contains("<table>"), "{markdown}");
+        }
+    }
+
+    #[test]
+    fn an_escaped_ampersand_in_a_title_keeps_its_entity() {
+        assert_eq!(
+            markdown_to_content("![a](mxc://a.b/c \"\\&amp; \\\\\")", &[])
+                .formatted_body
+                .as_deref(),
+            Some("<img src=\"mxc://a.b/c\" alt=\"a\" title=\"&amp;amp; \\\">")
+        );
+        assert_eq!(
+            markdown_to_content("[a](javascript:\\&amp;)", &[]).body,
+            "[a](javascript:\\&amp;)"
+        );
+    }
+
+    #[test]
+    fn a_backslash_before_a_pipe_stays_in_its_cell() {
+        assert_eq!(
+            markdown_to_content("| `\\\\|!` |\n| - |", &[])
+                .formatted_body
+                .as_deref(),
+            Some("<table><tbody><tr><th><code>\\|!</code></th></tr></tbody></table>")
+        );
+        assert_eq!(
+            markdown_to_content("`a\\\\|b` c", &[])
+                .formatted_body
+                .as_deref(),
+            Some("<code>a\\\\|b</code> c")
+        );
+    }
+
+    #[test]
+    fn a_title_that_is_a_backslash_ends_at_its_quote() {
+        let html = markdown_to_content("![a](mxc://a.b/c \"\\\\\") ![b](mxc://a.b/d \"e\")", &[])
+            .formatted_body
+            .unwrap_or_default();
+        assert_eq!(
+            html,
+            "<img src=\"mxc://a.b/c\" alt=\"a\" title=\"\\\"> <img src=\"mxc://a.b/d\" alt=\"b\" title=\"e\">"
+        );
+    }
+
+    #[test]
+    fn a_list_marker_alone_is_an_empty_item() {
+        assert_eq!(
+            markdown_to_content("1.", &[]).formatted_body.as_deref(),
+            Some("<ol><li></li></ol>")
+        );
+        assert_eq!(
+            markdown_to_content("-", &[]).formatted_body.as_deref(),
+            Some("<ul><li></li></ul>")
+        );
+    }
+
+    #[test]
+    fn an_entity_inside_a_spoiler_keeps_the_spoiler() {
+        assert_eq!(
+            markdown_to_content("||a &amp; b||", &[])
+                .formatted_body
+                .as_deref(),
+            Some("<span data-mx-spoiler=\"\">a &amp; b</span>")
+        );
+        let written = markdown_to_content("&#124;&#124;a&#124;&#124;", &[]).formatted_body;
+        assert!(!written.unwrap_or_default().contains("data-mx-spoiler"));
+    }
+
+    #[test]
     fn a_tilde_run_opens_a_fence_whatever_follows() {
         for markdown in [
             "~~~) &amp;~~ ![](mxc://a.b/0)",
@@ -645,6 +741,31 @@ mod tests {
                 "<strong>hey</strong> <img data-mx-emoticon=\"\" src=\"mxc://example.org/wave\" alt=\"wave\" title=\"wave\" height=\"32\">"
             )
         );
+    }
+
+    #[test]
+    fn an_emote_keeps_italics_in_html_and_the_editor_doc() {
+        let pills = [ComposerPill::Emote {
+            shortcode: "wave".to_owned(),
+            url: "mxc://example.org/wave".to_owned(),
+            body: None,
+        }];
+        for source in ["*\u{fffc}*", "_\u{fffc}_", "***\u{fffc}***"] {
+            let content = markdown_to_content(source, &pills);
+            assert_eq!(
+                content.formatted_body.as_deref(),
+                Some(
+                    "<em><img data-mx-emoticon=\"\" src=\"mxc://example.org/wave\" alt=\"wave\" title=\"wave\" height=\"32\"></em>"
+                ),
+                "{source}"
+            );
+            let doc = markdown_to_doc(source, &pills);
+            assert_eq!(
+                doc["content"][0]["content"][0]["marks"],
+                serde_json::json!([{ "type": "em" }]),
+                "{source}"
+            );
+        }
     }
 
     #[test]
@@ -739,11 +860,30 @@ mod tests {
     }
 
     #[test]
-    fn functions_take_the_dollar_signs_math_would_pair() {
+    fn a_function_and_math_share_a_message() {
         let content = markdown_to_content("$[fg.color=f00 a]$[bg.color=000 b] $x$", &[]);
-        let html = content.formatted_body.unwrap_or_default();
-        assert!(html.contains("data-mx-color") && html.contains("data-mx-bg-color"));
-        assert!(!html.contains("data-mx-maths"));
+        assert_eq!(
+            content.formatted_body.as_deref(),
+            Some(
+                "<span data-mx-color=\"#ff0000\">a</span><span data-mx-bg-color=\"#000000\">b</span> \
+                 <span data-mx-maths=\"x\"><code>x</code></span>"
+            )
+        );
+    }
+
+    #[test]
+    fn math_in_backticks_is_read() {
+        for (markdown, latex) in [("$`a\\`$", "a\\"), ("$`x`$5", "x"), ("$`a~b`$", "a~b")] {
+            let html = markdown_to_content(markdown, &[])
+                .formatted_body
+                .unwrap_or_default();
+            assert!(
+                html.contains(&format!("data-mx-maths=\"{latex}\"")),
+                "{markdown}: {html}"
+            );
+        }
+        let cell = markdown_to_content("| $a\\|b$ |\n| - |", &[]).formatted_body;
+        assert!(cell.unwrap_or_default().contains("data-mx-maths=\"a|b\""));
     }
 
     #[test]

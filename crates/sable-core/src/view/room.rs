@@ -8,7 +8,7 @@ use matrix_sdk::room::{Room, RoomMember};
 use matrix_sdk::ruma::events::room::avatar::RoomAvatarEventContent;
 use matrix_sdk::ruma::events::room::join_rules::JoinRule;
 use matrix_sdk::ruma::events::room::member::MembershipState;
-use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
 use matrix_sdk::ruma::events::room::topic::PossiblyRedactedRoomTopicEventContent;
 use matrix_sdk::ruma::events::sticker::StickerEventContent;
 use matrix_sdk::ruma::events::{
@@ -21,13 +21,14 @@ use matrix_sdk_ui::{eyeball_im, room_list_service::RoomListItem};
 
 use crate::api::rooms::RoomKind;
 use crate::protocol::{
-    BridgeView, LatestEventView, NotificationModeView, NotificationSettingsView,
+    BridgeView, LatestEventKind, LatestEventView, NotificationModeView, NotificationSettingsView,
     PredecessorRoomView, RoomJoinRuleView, RoomListItemView, RoomTag, RoomUnreadView,
     SpaceChildEdge,
 };
 
 use super::diff::diff_values;
 use super::space::{kept_children, space_children};
+use super::{authored_body, per_message_profile};
 
 // Independent room capabilities.
 #[expect(
@@ -46,14 +47,23 @@ pub struct RoomInfo {
     /// `None` for direct rooms, whose avatar can change through a member.
     pub avatar_source: Option<AvatarSource>,
     pub direct_name: Option<String>,
+    pub explicit_name: bool,
     pub children: Vec<SpaceChildEdge>,
     /// The last read of `children` failed, so they are the previous ones.
     pub children_stale: bool,
     pub tags: Vec<RoomTag>,
-    pub screen_sharers: Vec<OwnedUserId>,
+    pub(crate) voice_roster: Option<crate::calls::VoiceRoomRoster>,
     pub avatar_override: Option<String>,
     /// Read once per row, as a bridge sets it when it creates the room.
     pub bridge: Option<BridgeView>,
+    pub latest_sender: Option<LatestSender>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatestSender {
+    pub user_id: OwnedUserId,
+    pub own: bool,
+    pub name: Option<String>,
 }
 
 pub(crate) fn apply_avatar_override(view: &mut RoomListItemView, info: Option<&RoomInfo>) {
@@ -70,7 +80,11 @@ pub fn room_list_item<S: BuildHasher>(
     nicknames: &crate::nicknames::Nicknames,
 ) -> RoomListItemView {
     let info = room_cache.get(item.room_id());
-    let latest_event = latest_event(item);
+    let voice_roster = info.and_then(|info| info.voice_roster.as_ref());
+    let mut latest_event = latest_event(item);
+    if let Some(event) = &mut latest_event {
+        apply_latest_sender(event, info.and_then(|info| info.latest_sender.as_ref()));
+    }
     let latest_event_id = latest_event
         .as_ref()
         .and_then(|event| event.event_id.as_deref());
@@ -81,7 +95,7 @@ pub fn room_list_item<S: BuildHasher>(
     let notification = crate::push_rules::room_settings(
         rules,
         item.room_id(),
-        crate::notifications::uses_direct_push_rules(item),
+        crate::notifications::uses_direct_push_rules(rules, item),
     );
     let mut view = RoomListItemView {
         room_id: item.room_id().to_owned(),
@@ -113,8 +127,13 @@ pub fn room_list_item<S: BuildHasher>(
         state: item.state().into(),
         is_tombstoned: info.is_some_and(|i| i.is_tombstoned),
         room_kind: RoomKind::from_room_type(item.room_type().as_ref()),
-        call_participants: item.active_room_call_participants(),
-        screen_sharers: info.map(|i| i.screen_sharers.clone()).unwrap_or_default(),
+        call_participants: voice_roster.map_or_else(
+            || item.active_room_call_participants(),
+            |roster| roster.participants.clone(),
+        ),
+        screen_sharers: voice_roster
+            .map(|roster| roster.screen_sharers.clone())
+            .unwrap_or_default(),
         supports_knock: info.is_some_and(|i| i.supports_knock),
         supports_restricted: info.is_some_and(|i| i.supports_restricted),
         supports_knock_restricted: info.is_some_and(|i| i.supports_knock_restricted),
@@ -130,7 +149,7 @@ pub fn room_list_item<S: BuildHasher>(
         display_name: String::new(),
         display_avatar_url: None,
     };
-    nicknames.apply_room(&mut view);
+    nicknames.apply_room(&mut view, info.is_some_and(|info| info.explicit_name));
     apply_avatar_override(&mut view, info);
     view
 }
@@ -194,7 +213,7 @@ pub(crate) fn unread_counts(
         count(item.num_unread_mentions()),
     );
 
-    if latest_event_id == Some(&*receipt.event_id) {
+    if latest_event_id == Some(&*receipt.event_id) || local.0 == 0 {
         return local;
     }
 
@@ -224,6 +243,7 @@ pub(crate) fn notifying_count(
 
     let local = count(item.num_unread_notifications());
     if latest_event_id == Some(&*receipt.event_id)
+        || item.num_unread_messages() == 0
         || (every_encrypted && item.encryption_state().is_encrypted())
     {
         local
@@ -244,96 +264,204 @@ const fn join_rule_view(rule: Option<&JoinRule>) -> RoomJoinRuleView {
     }
 }
 
-/// Cached, so this costs one deserialization and no request.
-pub(super) fn latest_event(item: &RoomListItem) -> Option<LatestEventView> {
-    match item.latest_event() {
-        LatestEventValue::None => None,
-
-        LatestEventValue::Remote(event) => Some(LatestEventView {
-            sender: event.sender(),
-            body: remote_preview(&event).unwrap_or_default(),
-            timestamp: event.timestamp().map(|at| at.0.into()),
-            sending: false,
-            event_id: event.event_id().map(ToOwned::to_owned),
-        }),
-
-        LatestEventValue::RemoteInvite {
-            timestamp, inviter, ..
-        } => Some(LatestEventView {
-            sender: inviter,
-            body: "invited you".to_owned(),
-            timestamp: Some(timestamp.0.into()),
-            sending: false,
-            event_id: None,
-        }),
-
-        // `LocalHasBeenSent` is accepted already. These two are pending.
-        LatestEventValue::LocalIsSending(local) | LatestEventValue::LocalCannotBeSent(local) => {
-            Some(LatestEventView {
-                sender: None,
-                body: local_preview(&local).unwrap_or_default(),
-                timestamp: Some(local.timestamp.0.into()),
-                sending: true,
-                event_id: None,
-            })
+fn apply_latest_sender(event: &mut LatestEventView, sender: Option<&LatestSender>) {
+    match (&event.sender, sender) {
+        (None, _) => event.own = true,
+        (Some(id), Some(sender)) if *id == sender.user_id => {
+            event.own = sender.own;
+            event.sender_label.clone_from(&sender.name);
         }
-
-        LatestEventValue::LocalHasBeenSent { value, event_id } => Some(LatestEventView {
-            sender: None,
-            body: local_preview(&value).unwrap_or_default(),
-            timestamp: Some(value.timestamp.0.into()),
-            sending: false,
-            event_id: Some(event_id),
-        }),
+        _ => {}
     }
 }
 
-fn remote_preview(event: &RemoteLatestEventValue) -> Option<String> {
-    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(event.raw().json().get())
-        && let Some(preview) = forwarded_room_preview(&raw)
-    {
+async fn latest_sender(room: &Room) -> Option<LatestSender> {
+    let LatestEventValue::Remote(event) = room.latest_event() else {
+        return None;
+    };
+    let user_id = event.sender()?;
+    let own = user_id == room.own_user_id();
+    let content = event
+        .raw()
+        .get_field::<serde_json::Value>("content")
+        .ok()
+        .flatten();
+    let profile_name =
+        per_message_profile(content.as_ref()).and_then(|profile| profile.display_name);
+    let name = if own || is_one_to_one(room) {
+        None
+    } else if profile_name.is_some() {
+        profile_name
+    } else {
+        Some(match room.get_member_no_sync(&user_id).await {
+            Ok(Some(member)) => member.name().to_owned(),
+            _ => user_id.to_string(),
+        })
+    };
+    Some(LatestSender { user_id, own, name })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Preview {
+    kind: LatestEventKind,
+    body: String,
+}
+
+impl Preview {
+    fn text(body: &str) -> Self {
+        Self {
+            kind: LatestEventKind::Text,
+            body: body.to_owned(),
+        }
+    }
+
+    fn labelled(kind: LatestEventKind, body: Option<&str>) -> Self {
+        Self {
+            kind,
+            body: body.unwrap_or_default().to_owned(),
+        }
+    }
+}
+
+fn message_preview(msgtype: &MessageType, content: Option<&serde_json::Value>) -> Preview {
+    match msgtype {
+        MessageType::Image(image) => Preview::labelled(LatestEventKind::Image, image.caption()),
+        MessageType::Video(video) => Preview::labelled(LatestEventKind::Video, video.caption()),
+        MessageType::Audio(audio) => Preview::labelled(
+            if audio.voice.is_some() {
+                LatestEventKind::Voice
+            } else {
+                LatestEventKind::Audio
+            },
+            audio.caption(),
+        ),
+        MessageType::File(file) => Preview::labelled(LatestEventKind::File, file.caption()),
+        MessageType::Location(_) => Preview::labelled(LatestEventKind::Location, None),
+        other => Preview::text(&authored_body(other.body(), content)),
+    }
+}
+
+/// Cached, so this costs one deserialization and no request.
+pub(super) fn latest_event(item: &RoomListItem) -> Option<LatestEventView> {
+    let view = |sender, preview: Option<Preview>, timestamp: Option<u64>, sending, event_id| {
+        let preview = preview.unwrap_or_else(|| Preview::text(""));
+        LatestEventView {
+            sender,
+            own: false,
+            sender_label: None,
+            kind: preview.kind,
+            body: preview.body,
+            timestamp,
+            sending,
+            event_id,
+        }
+    };
+    match item.latest_event() {
+        LatestEventValue::None => None,
+
+        LatestEventValue::Remote(event) => Some(view(
+            event.sender(),
+            remote_preview(&event),
+            event.timestamp().map(|at| at.0.into()),
+            false,
+            event.event_id().map(ToOwned::to_owned),
+        )),
+
+        LatestEventValue::RemoteInvite {
+            timestamp, inviter, ..
+        } => Some(view(
+            inviter,
+            Some(Preview::text("invited you")),
+            Some(timestamp.0.into()),
+            false,
+            None,
+        )),
+
+        // `LocalHasBeenSent` is accepted already. These two are pending.
+        LatestEventValue::LocalIsSending(local) | LatestEventValue::LocalCannotBeSent(local) => {
+            Some(view(
+                None,
+                local_preview(&local),
+                Some(local.timestamp.0.into()),
+                true,
+                None,
+            ))
+        }
+
+        LatestEventValue::LocalHasBeenSent { value, event_id } => Some(view(
+            None,
+            local_preview(&value),
+            Some(value.timestamp.0.into()),
+            false,
+            Some(event_id),
+        )),
+    }
+}
+
+fn remote_preview(event: &RemoteLatestEventValue) -> Option<Preview> {
+    let raw = serde_json::from_str::<serde_json::Value>(event.raw().json().get()).ok();
+    if let Some(preview) = raw.as_ref().and_then(forwarded_room_preview) {
         return Some(preview);
     }
+    let content = raw.as_ref().and_then(|raw| raw.get("content"));
     let any = event.raw().deserialize().ok()?;
 
-    let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(message)) = any
-    else {
+    let AnySyncTimelineEvent::MessageLike(message) = any else {
         return None;
     };
 
     match message {
-        SyncMessageLikeEvent::Original(original) => Some(original.content.body().to_owned()),
-        SyncMessageLikeEvent::Redacted(_) => None,
+        AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(original)) => {
+            Some(message_preview(&original.content.msgtype, content))
+        }
+        AnySyncMessageLikeEvent::Sticker(SyncMessageLikeEvent::Original(_)) => {
+            Some(Preview::labelled(LatestEventKind::Sticker, None))
+        }
+        AnySyncMessageLikeEvent::UnstablePollStart(SyncMessageLikeEvent::Original(original)) => {
+            Some(Preview::labelled(
+                LatestEventKind::Poll,
+                Some(&original.content.poll_start().question.text),
+            ))
+        }
+        _ => None,
     }
 }
 
-fn local_preview(local: &LocalLatestEventValue) -> Option<String> {
+fn local_preview(local: &LocalLatestEventValue) -> Option<Preview> {
     let (raw, _) = local.content.raw();
-    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(raw.json().get())
-        && let Some(preview) = forwarded_room_preview(&raw)
-    {
+    let raw = serde_json::from_str::<serde_json::Value>(raw.json().get()).ok();
+    if let Some(preview) = raw.as_ref().and_then(forwarded_room_preview) {
         return Some(preview);
     }
     let content = local.content.deserialize().ok()?;
 
     match content {
-        AnyMessageLikeEventContent::RoomMessage(message) => Some(message.body().to_owned()),
+        AnyMessageLikeEventContent::RoomMessage(message) => {
+            Some(message_preview(&message.msgtype, raw.as_ref()))
+        }
+        AnyMessageLikeEventContent::Sticker(_) => {
+            Some(Preview::labelled(LatestEventKind::Sticker, None))
+        }
+        AnyMessageLikeEventContent::UnstablePollStart(poll) => Some(Preview::labelled(
+            LatestEventKind::Poll,
+            Some(&poll.poll_start().question.text),
+        )),
         _ => None,
     }
 }
 
-fn forwarded_room_preview(event: &serde_json::Value) -> Option<String> {
+fn forwarded_room_preview(event: &serde_json::Value) -> Option<Preview> {
     let content = event.get("content").unwrap_or(event);
     let forwarded = content
         .get("org.matrix.msc4553.forwarded")?
         .get("content")?
         .clone();
     if let Ok(message) = serde_json::from_value::<RoomMessageEventContent>(forwarded.clone()) {
-        return Some(message.msgtype.body().to_owned());
+        return Some(message_preview(&message.msgtype, Some(&forwarded)));
     }
     serde_json::from_value::<StickerEventContent>(forwarded)
         .ok()
-        .map(|sticker| sticker.body)
+        .map(|_| Preview::labelled(LatestEventKind::Sticker, None))
 }
 
 /// Resolve current room fields for every emitted item, including reordered rooms.
@@ -359,7 +487,7 @@ pub(crate) async fn enrich_rooms<'a, S: BuildHasher>(
     }
 }
 
-pub(super) fn latest_items(diffs: &[eyeball_im::VectorDiff<RoomListItem>]) -> Vec<&RoomListItem> {
+pub(crate) fn latest_items(diffs: &[eyeball_im::VectorDiff<RoomListItem>]) -> Vec<&RoomListItem> {
     let mut latest: HashMap<&RoomId, &RoomListItem> = HashMap::new();
     for item in diffs.iter().flat_map(diff_values) {
         latest.insert(item.room_id(), item);
@@ -416,9 +544,7 @@ fn bridge_view(event: &str) -> Option<BridgeView> {
         network: text("protocol", "displayname")
             .or_else(|| text("protocol", "id"))?
             .to_owned(),
-        avatar_url: avatar("protocol")
-            .or_else(|| avatar("network"))
-            .map(str::to_owned),
+        avatar_url: avatar("protocol").map(str::to_owned),
     })
 }
 
@@ -489,6 +615,7 @@ async fn room_info(room: &Room, previous: Option<&RoomInfo>) -> RoomInfo {
         avatar_url,
         avatar_source,
         direct_name,
+        explicit_name: room.name().is_some(),
         children,
         children_stale,
         tags: room_tags(room),
@@ -496,12 +623,13 @@ async fn room_info(room: &Room, previous: Option<&RoomInfo>) -> RoomInfo {
             Some(previous) => previous.bridge.clone(),
             None => room_bridge(room).await,
         },
-        screen_sharers: if room.is_call() {
-            crate::calls::screen_sharers(room).await
+        voice_roster: if room.is_call() {
+            Some(crate::calls::voice_room_roster(room).await)
         } else {
-            Vec::new()
+            None
         },
         avatar_override,
+        latest_sender: latest_sender(room).await,
     }
 }
 
@@ -521,7 +649,7 @@ impl AvatarSource {
     }
 }
 
-async fn room_avatar_url(room: &Room) -> Option<String> {
+pub(crate) async fn room_avatar_url(room: &Room) -> Option<String> {
     let avatar = if let Ok(Some(event)) = room
         .get_state_event_static::<RoomAvatarEventContent>()
         .await
@@ -542,6 +670,29 @@ async fn room_avatar_url(room: &Room) -> Option<String> {
     }
 }
 
+/// An `m.direct` room that grew past two people is a group, even if the
+/// `m.direct` entry still names one of them.
+pub(crate) fn is_one_to_one(room: &Room) -> bool {
+    let service = room.active_service_members_count().unwrap_or_else(|| {
+        room.service_members()
+            .map_or(0, |members| members.len() as u64)
+    });
+    room.active_members_count().saturating_sub(service) <= 2
+}
+
+pub(crate) const DIRECT_PARTNER_EVENT: &str = "moe.sable.direct_partner";
+
+/// The person `/converttodm` was given, so a direct room with more people in it
+/// still goes by them.
+pub(crate) async fn chosen_partner(room: &Room) -> Option<OwnedUserId> {
+    let raw = room
+        .account_data(DIRECT_PARTNER_EVENT.into())
+        .await
+        .ok()??;
+    let content = raw.get_field::<serde_json::Value>("content").ok()??;
+    OwnedUserId::try_from(content.get("user_id")?.as_str()?).ok()
+}
+
 async fn direct_peer(room: &Room) -> Option<RoomMember> {
     let service_members = room.service_members().unwrap_or_default();
     let targets: Vec<OwnedUserId> = room
@@ -553,6 +704,9 @@ async fn direct_peer(room: &Room) -> Option<RoomMember> {
     let [target] = targets.as_slice() else {
         return None;
     };
+    if !is_one_to_one(room) && chosen_partner(room).await.as_ref() != Some(target) {
+        return None;
+    }
     room.get_member_no_sync(target)
         .await
         .ok()
@@ -654,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_without_a_protocol_image_borrows_the_network_one() {
+    fn a_bridge_without_a_protocol_image_shows_none() {
         let event = serde_json::json!({"type": "m.bridge", "content": {
             "protocol": {"id": "discord", "avatar_url": "https://example.org/logo.png"},
             "network": {"id": "1234", "avatar_url": "mxc://example.org/guild"}
@@ -663,7 +817,7 @@ mod tests {
             bridge_view(&event.to_string()),
             Some(BridgeView {
                 network: "discord".to_owned(),
-                avatar_url: Some("mxc://example.org/guild".to_owned()),
+                avatar_url: None,
             })
         );
     }
@@ -678,8 +832,119 @@ mod tests {
                     "content": { "msgtype": "m.text", "body": "original" }
                 }
             })),
-            Some("original".to_owned())
+            Some(Preview::text("original"))
         );
+    }
+
+    fn message_kind(content: serde_json::Value) -> (LatestEventKind, String) {
+        let message: RoomMessageEventContent = serde_json::from_value(content).unwrap();
+        let preview = message_preview(&message.msgtype, None);
+        (preview.kind, preview.body)
+    }
+
+    #[test]
+    fn a_message_preview_names_its_kind_and_keeps_only_a_caption() {
+        use LatestEventKind::{Audio, File, Image, Location, Text, Video, Voice};
+        let mxc = "mxc://example.org/a";
+        let cases = [
+            (
+                serde_json::json!({"msgtype": "m.text", "body": "hi"}),
+                (Text, "hi"),
+            ),
+            (
+                serde_json::json!({"msgtype": "m.notice", "body": "done"}),
+                (Text, "done"),
+            ),
+            (
+                serde_json::json!({"msgtype": "m.image", "body": "cat.png", "url": mxc}),
+                (Image, ""),
+            ),
+            (
+                serde_json::json!({
+                    "msgtype": "m.image", "body": "look at this", "filename": "cat.png", "url": mxc
+                }),
+                (Image, "look at this"),
+            ),
+            (
+                serde_json::json!({"msgtype": "m.video", "body": "a.mp4", "url": mxc}),
+                (Video, ""),
+            ),
+            (
+                serde_json::json!({"msgtype": "m.audio", "body": "a.mp3", "url": mxc}),
+                (Audio, ""),
+            ),
+            (
+                serde_json::json!({
+                    "msgtype": "m.audio", "body": "voice.ogg", "url": mxc,
+                    "org.matrix.msc3245.voice": {}
+                }),
+                (Voice, ""),
+            ),
+            (
+                serde_json::json!({"msgtype": "m.file", "body": "a.pdf", "url": mxc}),
+                (File, ""),
+            ),
+            (
+                serde_json::json!({
+                    "msgtype": "m.location", "body": "Place", "geo_uri": "geo:1,2"
+                }),
+                (Location, ""),
+            ),
+        ];
+        for (content, (kind, body)) in cases {
+            assert_eq!(
+                message_kind(content.clone()),
+                (kind, body.to_owned()),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_preview_drops_the_per_message_profile_fallback() {
+        let content = serde_json::json!({
+            "msgtype": "m.text", "body": "Cat: hi",
+            "com.beeper.per_message_profile": {"displayname": "Cat", "has_fallback": true}
+        });
+        let message: RoomMessageEventContent = serde_json::from_value(content.clone()).unwrap();
+        assert_eq!(
+            message_preview(&message.msgtype, Some(&content)),
+            Preview::text("hi")
+        );
+    }
+
+    #[test]
+    fn a_latest_sender_is_applied_only_to_the_event_it_sent() {
+        let event = |sender: Option<&str>| LatestEventView {
+            sender: sender.map(|id| OwnedUserId::try_from(id).unwrap()),
+            own: false,
+            sender_label: None,
+            kind: LatestEventKind::Text,
+            body: String::new(),
+            timestamp: None,
+            sending: false,
+            event_id: None,
+        };
+        let bob = LatestSender {
+            user_id: OwnedUserId::try_from("@bob:example.org").unwrap(),
+            own: false,
+            name: Some("Bob".to_owned()),
+        };
+
+        let mut local = event(None);
+        apply_latest_sender(&mut local, None);
+        assert!(local.own);
+
+        let mut matching = event(Some("@bob:example.org"));
+        apply_latest_sender(&mut matching, Some(&bob));
+        assert_eq!(
+            (matching.own, matching.sender_label.as_deref()),
+            (false, Some("Bob"))
+        );
+
+        let mut stale = event(Some("@carol:example.org"));
+        apply_latest_sender(&mut stale, Some(&bob));
+        assert_eq!((stale.own, stale.sender_label), (false, None));
     }
 
     const fn under(mode: NotificationModeView) -> NotificationSettingsView {

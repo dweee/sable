@@ -7,11 +7,21 @@
     width?: number;
     collapsed?: boolean;
     roomId?: string;
+    height?: number;
+    pinnedSpaceIds?: ReadonlySet<string>;
+    onTogglePin?: (roomId: string) => void;
   }
 
-  let { onNavigate, width, collapsed, roomId }: Props = $props();
+  let { onNavigate, width, collapsed, roomId, height, pinnedSpaceIds, onTogglePin }: Props =
+    $props();
 </script>
 
 <TooltipProvider>
-  <RoomNav {onNavigate} {width} {collapsed} {roomId} />
+  {#if height === undefined}
+    <RoomNav {onNavigate} {width} {collapsed} {roomId} {pinnedSpaceIds} {onTogglePin} />
+  {:else}
+    <div style:display="flex" style:flex-direction="column" style:height="{height}px">
+      <RoomNav {onNavigate} {width} {collapsed} {roomId} />
+    </div>
+  {/if}
 </TooltipProvider>

@@ -2,8 +2,7 @@ use crate::errors::CoreError;
 use matrix_sdk::ruma::RoomId;
 use matrix_sdk::ruma::push::{
     Action, AnyPushRuleRef, HighlightTweakValue, NewConditionalPushRule, NewPushRule,
-    NewSimplePushRule, PredefinedUnderrideRuleId, PushCondition, RuleKind, Ruleset,
-    SoundTweakValue, Tweak,
+    NewSimplePushRule, PushCondition, RuleKind, Ruleset, SoundTweakValue, Tweak,
 };
 
 use crate::protocol::{
@@ -12,13 +11,14 @@ use crate::protocol::{
 };
 
 mod alignment;
+mod authored;
 mod categories;
-mod direct;
 mod keywords;
 mod related;
 mod store;
 
-pub use alignment::plan_cleanup;
+pub use alignment::{plan_cleanup, plan_suppressions};
+pub use authored::authored_event;
 pub use categories::{
     event_notifications, master_muted, mention_notifications, plan_event, plan_master,
     plan_membership, plan_mention, pushes_every_encrypted_event,
@@ -134,29 +134,41 @@ pub fn dm_notifies(rules: &Ruleset, room_id: &RoomId) -> bool {
     match room_mode(rules, room_id) {
         Some(NotificationModeView::Mute | NotificationModeView::Mentions) => false,
         Some(NotificationModeView::All) => true,
-        None => direct::inherited_mode(rules, room_id).map_or_else(
-            || {
-                rules
-                    .get(RuleKind::Underride, message_rule(true).as_str())
-                    .is_none_or(rule_notifies)
-            },
-            |mode| mode == NotificationModeView::All,
-        ),
+        None => rules
+            .get(RuleKind::Underride, message_rule(rules, true))
+            .is_none_or(rule_notifies),
     }
 }
 
-const fn message_rule(direct: bool) -> PredefinedUnderrideRuleId {
-    if direct {
-        PredefinedUnderrideRuleId::RoomOneToOne
+const DIRECT: &str = ".eu.cyrneko.msc4563.direct";
+const ONE_TO_ONE: &str = ".m.rule.room_one_to_one";
+
+fn served(rules: &Ruleset, rule_id: &str) -> bool {
+    rules.get(RuleKind::Underride, rule_id).is_some()
+}
+
+/// MSC4563 covers the rooms listed in `m.direct`, the one-to-one rule those with two members.
+#[must_use]
+pub fn direct_defaults(rules: &Ruleset, listed: bool, two_members: bool) -> bool {
+    (listed && served(rules, DIRECT)) || (two_members && served(rules, ONE_TO_ONE))
+}
+
+fn message_rule(rules: &Ruleset, direct: bool) -> &'static str {
+    if !direct {
+        ".m.rule.message"
+    } else if served(rules, DIRECT) {
+        DIRECT
     } else {
-        PredefinedUnderrideRuleId::Message
+        ONE_TO_ONE
     }
 }
 
-const fn default_family(direct: bool) -> [&'static str; 6] {
+const fn default_family(direct: bool) -> &'static [&'static str] {
     if direct {
-        [
-            ".m.rule.room_one_to_one",
+        &[
+            DIRECT,
+            ".eu.cyrneko.msc4563.encrypted_direct",
+            ONE_TO_ONE,
             ".m.rule.encrypted_room_one_to_one",
             ".m.rule.poll_start_one_to_one",
             ".m.rule.poll_end_one_to_one",
@@ -164,7 +176,7 @@ const fn default_family(direct: bool) -> [&'static str; 6] {
             ".org.matrix.msc3930.rule.poll_end_one_to_one",
         ]
     } else {
-        [
+        &[
             ".m.rule.message",
             ".m.rule.encrypted",
             ".m.rule.poll_start",
@@ -189,7 +201,7 @@ fn spec_actions(direct: bool) -> Vec<Action> {
 #[must_use]
 pub fn default_mode(rules: &Ruleset, direct: bool) -> NotificationModeView {
     if rules
-        .get(RuleKind::Underride, message_rule(direct).as_str())
+        .get(RuleKind::Underride, message_rule(rules, direct))
         .is_some_and(rule_notifies)
     {
         NotificationModeView::All
@@ -203,6 +215,7 @@ pub fn default_modes(rules: &Ruleset) -> DefaultNotificationModesView {
     DefaultNotificationModesView {
         direct: default_mode(rules, true),
         group: default_mode(rules, false),
+        direct_rule: served(rules, DIRECT),
     }
 }
 
@@ -210,8 +223,7 @@ pub fn default_modes(rules: &Ruleset) -> DefaultNotificationModesView {
 pub fn room_settings(rules: &Ruleset, room_id: &RoomId, direct: bool) -> NotificationSettingsView {
     NotificationSettingsView {
         room: room_mode(rules, room_id),
-        default: direct::inherited_mode(rules, room_id)
-            .unwrap_or_else(|| default_mode(rules, direct)),
+        default: default_mode(rules, direct),
     }
 }
 
@@ -237,11 +249,7 @@ pub fn new_rule(
 }
 
 #[must_use]
-pub fn plan_room_mode(
-    room_id: &RoomId,
-    direct: bool,
-    mode: Option<NotificationModeView>,
-) -> Vec<RuleWrite> {
+pub fn plan_room_mode(room_id: &RoomId, mode: Option<NotificationModeView>) -> Vec<RuleWrite> {
     let kept = match mode {
         Some(NotificationModeView::Mute) => Some(RuleKind::Override),
         Some(_) => Some(RuleKind::Room),
@@ -253,7 +261,7 @@ pub fn plan_room_mode(
             NewConditionalPushRule::new(
                 room_id.to_string(),
                 vec![PushCondition::EventMatch(
-                    matrix_sdk::ruma::push::EventMatchConditionData::new(
+                    ruma::push::EventMatchConditionData::new(
                         "room_id".to_owned(),
                         room_id.to_string(),
                     ),
@@ -264,7 +272,7 @@ pub fn plan_room_mode(
         Some(NotificationModeView::All) => {
             writes.push(RuleWrite::Put(NewPushRule::Room(NewSimplePushRule::new(
                 room_id.to_owned(),
-                spec_actions(direct),
+                level_actions(MentionNotificationModeView::Loud, false),
             ))));
         }
         Some(NotificationModeView::Mentions) => {
@@ -294,6 +302,19 @@ pub fn plan_room_mode(
     writes
 }
 
+#[must_use]
+pub fn plan_direct_default(rules: &Ruleset, room_id: &RoomId) -> Vec<RuleWrite> {
+    let direct = default_mode(rules, true);
+    if room_mode(rules, room_id).is_some() || direct == default_mode(rules, false) {
+        return Vec::new();
+    }
+    let mut writes = plan_room_mode(room_id, Some(direct));
+    if direct == NotificationModeView::All {
+        writes.extend(plan_suppressions(rules));
+    }
+    writes
+}
+
 /// # Errors
 ///
 /// When the server has no rule for this kind of room.
@@ -302,13 +323,13 @@ pub fn plan_default_mode(
     direct: bool,
     mode: NotificationModeView,
 ) -> Result<Vec<RuleWrite>, CoreError> {
-    let message = message_rule(direct);
-    if rules.get(RuleKind::Underride, message.as_str()).is_none() {
+    let message = message_rule(rules, direct);
+    if !served(rules, message) {
         return Err(format!("the server has no {message} rule").into());
     }
     Ok(default_family(direct)
-        .into_iter()
-        .filter(|rule_id| rules.get(RuleKind::Underride, rule_id).is_some())
+        .iter()
+        .filter(|rule_id| served(rules, rule_id))
         .flat_map(|rule_id| {
             let actions = match mode {
                 NotificationModeView::All => spec_actions(direct),
@@ -317,12 +338,12 @@ pub fn plan_default_mode(
             [
                 RuleWrite::Actions {
                     kind: RuleKind::Underride,
-                    rule_id: rule_id.to_owned(),
+                    rule_id: (*rule_id).to_owned(),
                     actions,
                 },
                 RuleWrite::Enabled {
                     kind: RuleKind::Underride,
-                    rule_id: rule_id.to_owned(),
+                    rule_id: (*rule_id).to_owned(),
                     enabled: true,
                 },
             ]

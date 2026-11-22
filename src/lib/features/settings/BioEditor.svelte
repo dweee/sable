@@ -25,7 +25,13 @@
   import type { FormatAction } from '#lib/features/composer/editor/formatting.js';
   import { composerSchema } from '#lib/features/composer/editor/schema.js';
   import { emoticonNode } from '#lib/features/composer/editor/shortcodes.js';
-  import { serializeComposer, textDoc } from '#lib/features/composer/editor/serialize.js';
+  import {
+    plainEditDoc,
+    serializeComposer,
+    serializePlain,
+    textDoc,
+  } from '#lib/features/composer/editor/serialize.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import { cachedMediaUrl, holdMediaUrl, loadMediaUrl } from '#lib/ui/media-url.js';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import '#lib/ui/primitives/form-control.css';
@@ -36,9 +42,18 @@
   interface Props {
     id: string;
     value: BioContent;
+    label?: string;
+    formattingLabel?: string;
+    placeholder?: string;
   }
 
-  let { id, value = $bindable() }: Props = $props();
+  let {
+    id,
+    value = $bindable(),
+    label = i18n.t('settings.biography'),
+    formattingLabel = i18n.t('settings.bioFormatting'),
+    placeholder = i18n.t('settings.biographyHint'),
+  }: Props = $props();
   const core = useCoreClient();
   const uid = $props.id();
   const listboxId = `bio-suggestions-${uid}`;
@@ -58,13 +73,13 @@
   let spoilerOpen = $state(false);
   let mounted = $state(false);
   let synced: BioContent | undefined;
+  let loading = false;
   let suggestions = $derived(suggestionsFor(query, [], sources.emotes, []));
   let active = $derived(Math.min(activeIndex, Math.max(0, suggestions.length - 1)));
   let panelOpen = $derived(focused && query !== null && !dismissed && !boardOpen);
 
   const editor = new ComposerEditor({
     id: untrack(() => id),
-    richText: true,
     multiline: true,
     maxLength: 5000,
     media: {
@@ -73,7 +88,7 @@
       hold: (url) => holdMediaUrl(core, url, 0, 0),
     },
     emotes: () => sources.emotes,
-    label: () => i18n.t('settings.biography'),
+    label: () => label,
     listboxId,
     activeOptionId: () => (panelOpen && suggestions.length > 0 ? optionId(active) : null),
     editable: () => true,
@@ -81,10 +96,12 @@
     onChange: (change) => {
       showPlaceholder = change.placeholder;
       activeIndex = 0;
-      if (!change.docChanged) return;
+      if (!change.docChanged || loading) return;
       const doc = editor.doc();
       if (!doc) return;
-      const { body, formatted } = serializeComposer(doc);
+      const { body, formatted } = preferences.richTextComposer
+        ? serializeComposer(doc)
+        : serializePlain(doc);
       value = synced = { body, formatted };
     },
     onQuery: (next) => {
@@ -130,8 +147,15 @@
     untrack(() => {
       if (next.body === synced?.body && next.formatted === synced.formatted) return;
       synced = next;
-      if (next.formatted !== null) editor.setHtml(next.formatted);
-      else editor.setDoc(textDoc(next.body));
+      // Read back in another form, a loaded value would look edited.
+      loading = true;
+      try {
+        if (next.formatted === null) editor.setDoc(textDoc(next.body));
+        else if (preferences.richTextComposer) editor.setHtml(next.formatted);
+        else editor.setDoc(plainEditDoc(next.body, next.formatted));
+      } finally {
+        loading = false;
+      }
       editor.clearHistory();
     });
   });
@@ -157,7 +181,7 @@
   ] satisfies { id: string; action: FormatAction; icon: typeof TextBIcon }[];
 </script>
 
-<div class="bio-toolbar" role="toolbar" aria-label={i18n.t('settings.bioFormatting')}>
+<div class="bio-toolbar" role="toolbar" aria-label={formattingLabel}>
   {#each formats as format (format.id)}
     <IconButton
       variant="ghost"
@@ -200,7 +224,7 @@
   }}
 >
   <div class="form-control inline-edit bio-input">
-    <ComposerEditorView {editor} {showPlaceholder} placeholder={i18n.t('settings.biographyHint')} />
+    <ComposerEditorView {editor} {showPlaceholder} {placeholder} />
   </div>
   {#if panelOpen && query}
     <ComposerAutocomplete

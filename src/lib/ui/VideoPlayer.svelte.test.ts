@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 
-import { render } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+
+import { fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import { flushed } from '#lib/ui/flushed.js';
 
@@ -82,4 +84,62 @@ test('a video waiting to be played shows how much it will download', () => {
 
   expect(container.querySelector('.media-play')).not.toBeNull();
   expect(container.querySelector('.media-image-size')?.textContent).toBe('5.0 MB');
+});
+
+test.each([
+  { name: 'hevc.mov', canPlay: '', plays: false },
+  { name: 'hevc.mov', canPlay: 'probably', plays: true },
+  { name: 'h264.mp4', canPlay: '', plays: true },
+])('$name with canPlayType "$canPlay" plays: $plays', async ({ name, canPlay, plays }) => {
+  vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue(canPlay as CanPlayTypeResult);
+  const bytes = new Uint8Array(readFileSync(`src/lib/features/composer/fixtures/${name}`));
+  core.fetchMedia.mockResolvedValue(bytes);
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(bytes));
+  render(VideoPlayer, {
+    source: `mxc://example.org/${name}-${canPlay}`,
+    mime: 'video/mp4',
+    filename: name,
+    playback: gif,
+  });
+
+  await vi.waitFor(() => {
+    if (!document.querySelector('video, .media-unsupported')) throw new Error('not checked yet');
+  });
+  expect(document.querySelector('video') !== null).toBe(plays);
+  expect(screen.queryByText(/can't be played on this device/) !== null).toBe(!plays);
+});
+
+test('a bridged GIF without controls opens the media viewer when clicked', async () => {
+  const onOpen = vi.fn();
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  render(VideoPlayer, {
+    source: 'mxc://example.org/gif-open',
+    mime: 'video/mp4',
+    filename: 'cat.mp4',
+    playback: gif,
+    onOpen,
+  });
+  await vi.waitFor(() => {
+    if (!document.querySelector('video')) throw new Error('no video yet');
+  });
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Open cat.mp4' }));
+
+  expect(onOpen).toHaveBeenCalledOnce();
+});
+
+test('a video with native controls leaves opening to the fullscreen control', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  render(VideoPlayer, {
+    source: 'mxc://example.org/clip-controls',
+    mime: 'video/mp4',
+    filename: 'clip.mp4',
+    playback: { ...gif, hide_controls: false },
+    onOpen: vi.fn(),
+  });
+  await vi.waitFor(() => {
+    if (!document.querySelector('video')) throw new Error('no video yet');
+  });
+
+  expect(screen.queryByRole('button', { name: 'Open clip.mp4' })).toBeNull();
 });

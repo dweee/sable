@@ -3,8 +3,10 @@
 </script>
 
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import { matchesAppLayout } from '#lib/ui/app-layout.svelte.js';
   import { mediaEvents } from '#lib/ui/media-events.js';
+  import { Velocity } from '#lib/ui/velocity.js';
   import { Dialog } from 'bits-ui';
   import { SvelteMap } from 'svelte/reactivity';
   import { flushSync, onDestroy, tick, untrack } from 'svelte';
@@ -14,7 +16,6 @@
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { isEncryptedMedia } from '#lib/ui/media-url.js';
   import { mediaProgress } from '#lib/ui/media-progress.svelte.js';
-  import MediaImage from '#lib/ui/MediaImage.svelte';
   import ImageSpoilerControl from '#lib/ui/ImageSpoilerControl.svelte';
   import { clampPan, type Vector2 } from '#lib/ui/pan-clamp.js';
   import { cursorAnchor, type CursorAnchor } from '#lib/ui/cursor-anchor.js';
@@ -27,42 +28,43 @@
     SWIPE_THRESHOLD,
     VELOCITY_THRESHOLD,
   } from '#lib/ui/swipe-gesture.js';
-  import { savesNatively, sharesNatively, supportsPhotoLibrary } from '#lib/platform/files.js';
+  import { sharesNatively, supportsPhotoLibrary } from '#lib/platform/files.js';
   import { isElectron } from '#lib/platform/electron.js';
   import { setSystemBarsHidden } from '#lib/platform/system-bars.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
   import ActionMenuSeparator from '#lib/ui/primitives/ActionMenuSeparator.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
-  import Spinner from '#lib/ui/primitives/Spinner.svelte';
-  import Button from '#lib/ui/primitives/Button.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
+  import Button from '#lib/ui/primitives/Button.svelte';
   import XIcon from 'phosphor-svelte/lib/XIcon';
-  import ArrowLeftIcon from 'phosphor-svelte/lib/ArrowLeftIcon';
-  import ArrowRightIcon from 'phosphor-svelte/lib/ArrowRightIcon';
   import DownloadSimpleIcon from 'phosphor-svelte/lib/DownloadSimpleIcon';
   import CopyIcon from 'phosphor-svelte/lib/CopyIcon';
   import ShareNetworkIcon from 'phosphor-svelte/lib/ShareNetworkIcon';
-  import PlusIcon from 'phosphor-svelte/lib/PlusIcon';
   import PdfViewer from '#lib/ui/PdfViewer.svelte';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
   import { MediaViewerActions } from './media-viewer-actions';
   import { spoilerVisibility, spoilerVisibilityKey } from './spoiler-visibility.svelte.js';
   import { MediaViewerResource } from './media-viewer-resource.svelte';
+  import MediaViewerNavButton from './MediaViewerNavButton.svelte';
+  import MediaViewerPending from './MediaViewerPending.svelte';
+  import MediaViewerPlayer from './MediaViewerPlayer.svelte';
   import type { MediaItem } from './media-viewer-types';
   import CaretLeftIcon from 'phosphor-svelte/lib/CaretLeftIcon';
   import CaretRightIcon from 'phosphor-svelte/lib/CaretRightIcon';
-  import MinusIcon from 'phosphor-svelte/lib/MinusIcon';
-  import ImageSquareIcon from 'phosphor-svelte/lib/ImageSquareIcon';
   import ImagesIcon from 'phosphor-svelte/lib/ImagesIcon';
   import FileArrowDownIcon from 'phosphor-svelte/lib/FileArrowDownIcon';
   import ArrowClockwiseIcon from 'phosphor-svelte/lib/ArrowClockwiseIcon';
   import ChatCenteredTextIcon from 'phosphor-svelte/lib/ChatCenteredTextIcon';
   import DotsThreeIcon from 'phosphor-svelte/lib/DotsThreeIcon';
   import SquaresFourIcon from 'phosphor-svelte/lib/SquaresFourIcon';
+  import ImageSquareIcon from 'phosphor-svelte/lib/ImageSquareIcon';
+  import MinusIcon from 'phosphor-svelte/lib/MinusIcon';
+  import PlusIcon from 'phosphor-svelte/lib/PlusIcon';
   import ArrowCounterClockwiseIcon from 'phosphor-svelte/lib/ArrowCounterClockwiseIcon';
   import EyeIcon from 'phosphor-svelte/lib/EyeIcon';
   import EyeSlashIcon from 'phosphor-svelte/lib/EyeSlashIcon';
+  import { MediaViewerView } from './media-viewer-view.svelte.js';
   import { mediaViewerState } from './media-viewer-state.svelte.js';
 
   const items = $derived(mediaViewerState.items);
@@ -77,12 +79,7 @@
     () => item !== undefined,
     () => onClose()
   );
-  let index = $derived(
-    Math.max(
-      0,
-      items.findIndex((item) => item.eventId === selectedEventId)
-    )
-  );
+  const index = $derived(items.findIndex((item) => item.eventId === selectedEventId));
   let item = $derived<MediaItem | undefined>(items[index]);
   let spoiler = $derived(item?.kind === 'image' || item?.kind === 'video' ? item.spoiler : null);
   let spoilerKey = $derived(spoilerVisibilityKey(item?.eventId, item?.source, spoiler));
@@ -116,49 +113,23 @@
       : null
   );
   let failed = $derived(resource.failed);
-  let zoom = $derived.by(() => {
+  let view = $derived.by(() => {
     void source;
-    return 1;
-  });
-  let rotation = $derived.by(() => {
-    void source;
-    return 0;
-  });
-  let pan = $derived.by<Vector2>(() => {
-    void source;
-    return { x: 0, y: 0 };
-  });
-  let pixelated = $derived.by(() => {
-    void source;
-    return untrack(() =>
-      item?.kind === 'image' || item?.kind === 'sticker'
-        ? pixelatedImage(preferences.pixelatedImages, item.width, item.height)
-        : false
+    return new MediaViewerView(
+      untrack(() =>
+        item?.kind === 'image' || item?.kind === 'sticker'
+          ? pixelatedImage(preferences.pixelatedImages, item.width, item.height)
+          : false
+      )
     );
   });
   let canSaveToPhotos = $state(false);
   let stageEl: HTMLElement | null = $state(null);
   let imageEl: HTMLImageElement | null = $state(null);
-  let fitRatio = $derived.by(() => {
-    void source;
-    return 1;
-  });
-  let fitsWindow = $derived.by(() => {
-    void source;
-    return true;
-  });
   let dragging = $state(false);
   let instant = $state(false);
-  let imageReady = $derived.by(() => {
-    void source;
-    return false;
-  });
   let imageMenuOpen = $state(false);
   let imageMenuAnchor = $state.raw<CursorAnchor | null>(null);
-  let editingZoom = $derived.by(() => {
-    void source;
-    return false;
-  });
   let zoomInput = $state('100');
   let swipeX = $state(0);
   let swipeY = $state(0);
@@ -170,9 +141,7 @@
     pointerId: number;
     startX: number;
     startY: number;
-    lastY: number;
-    lastTime: number;
-    velocityY: number;
+    velocityY: Velocity;
     axis: 'pending' | 'horizontal' | 'vertical';
   } | null = null;
   const touches = new SvelteMap<number, { x: number; y: number }>();
@@ -191,14 +160,6 @@
   } | null>(null);
   let isImage = $derived(item?.kind === 'image' || item?.kind === 'sticker');
   let isPdf = $derived(item?.kind === 'file');
-  let pdfPages = $derived.by(() => {
-    void source;
-    return 0;
-  });
-  let pdfPage = $derived.by(() => {
-    void source;
-    return 1;
-  });
   let downloadLabel = $derived(
     mediaActions.savesToPhotos
       ? i18n.t('viewer.saveToPhotos')
@@ -216,7 +177,7 @@
 
   function refitOnResize(stage: HTMLElement): () => void {
     const observer = new ResizeObserver(() => {
-      if (fitsWindow && isImage) fitToStage();
+      if (view.fitsWindow && isImage) fitToStage();
     });
     observer.observe(stage);
     return () => {
@@ -256,11 +217,11 @@
   });
 
   function previous(): void {
-    if (index > 0) index -= 1;
+    if (index > 0) mediaViewerState.eventId = items[index - 1].eventId;
   }
 
   function next(): void {
-    if (index < items.length - 1) index += 1;
+    if (index < items.length - 1) mediaViewerState.eventId = items[index + 1].eventId;
   }
 
   const MIN_ZOOM = 0.1;
@@ -270,15 +231,15 @@
   const LENS_MIN_SIZE = 96;
   const LENS_MAX_SIZE = 640;
   let maxZoom = $derived(isPdf ? 5 : 500);
-  let pannable = $derived(zoom > fitRatio * 1.001 || rotation % 360 !== 0);
+  let pannable = $derived(view.zoom > view.fitRatio * 1.001 || view.rotation % 360 !== 0);
 
   function applyZoom(next: number): void {
-    zoom = Math.min(maxZoom, Math.max(MIN_ZOOM, next));
+    view.zoom = clamp(next, MIN_ZOOM, maxZoom);
     void reclampPan();
   }
 
   function setZoom(next: number): void {
-    fitsWindow = false;
+    view.fitsWindow = false;
     applyZoom(next);
   }
 
@@ -293,9 +254,9 @@
   }
 
   function fitToStage(): void {
-    fitRatio = fitZoom();
+    view.fitRatio = fitZoom();
     instant = true;
-    applyZoom(fitRatio);
+    applyZoom(view.fitRatio);
     flushSync();
     if (imageEl) void getComputedStyle(imageEl).transform;
     instant = false;
@@ -303,27 +264,27 @@
 
   function onImageLoad(): void {
     fitToStage();
-    imageReady = true;
+    view.imageReady = true;
   }
 
   function rotateBy(degrees: number): void {
-    rotation += degrees;
+    view.rotation += degrees;
     void reclampPan();
   }
 
   async function reclampPan(): Promise<void> {
     await tick();
-    pan = pannable ? clampCurrentPan(pan) : { x: 0, y: 0 };
+    view.pan = pannable ? clampCurrentPan(view.pan) : { x: 0, y: 0 };
   }
 
   const PAN_STEP = 40;
 
   function panBy(dx: number, dy: number): void {
-    pan = clampCurrentPan({ x: pan.x + dx, y: pan.y + dy });
+    view.pan = clampCurrentPan({ x: view.pan.x + dx, y: view.pan.y + dy });
   }
 
   function handleKeydown(event: KeyboardEvent): void {
-    if (event.defaultPrevented || imageMenuOpen) return;
+    if (event.defaultPrevented || imageMenuOpen || isEditableTarget(event.target)) return;
     if (event.key === 'Escape') onClose();
     if (
       isImage &&
@@ -332,7 +293,6 @@
       !event.altKey &&
       !event.shiftKey &&
       event.key.toLowerCase() === 'c' &&
-      !isEditableTarget(event.target) &&
       (window.getSelection()?.isCollapsed ?? true)
     ) {
       event.preventDefault();
@@ -344,32 +304,33 @@
       if (event.key === 'ArrowUp') return panBy(0, PAN_STEP);
       if (event.key === 'ArrowDown') return panBy(0, -PAN_STEP);
     }
-    if (isPdf && pdfPages > 1) {
-      if (event.key === 'PageDown') return void (pdfPage = Math.min(pdfPages, pdfPage + 1));
-      if (event.key === 'PageUp') return void (pdfPage = Math.max(1, pdfPage - 1));
-      if (event.key === 'Home') return void (pdfPage = 1);
-      if (event.key === 'End') return void (pdfPage = pdfPages);
+    if (isPdf && view.pdfPages > 1) {
+      if (event.key === 'PageDown')
+        return void (view.pdfPage = Math.min(view.pdfPages, view.pdfPage + 1));
+      if (event.key === 'PageUp') return void (view.pdfPage = Math.max(1, view.pdfPage - 1));
+      if (event.key === 'Home') return void (view.pdfPage = 1);
+      if (event.key === 'End') return void (view.pdfPage = view.pdfPages);
     }
     if (event.key === 'ArrowLeft') previous();
     if (event.key === 'ArrowRight') next();
-    if (event.key === '+' || event.key === '=') setZoom(zoom * (1 + ZOOM_STEP));
-    if (event.key === '-') setZoom(zoom / (1 + ZOOM_STEP));
+    if (event.key === '+' || event.key === '=') setZoom(view.zoom * (1 + ZOOM_STEP));
+    if (event.key === '-') setZoom(view.zoom / (1 + ZOOM_STEP));
   }
 
   function offsetFromImageCentre(event: { clientX: number; clientY: number }): Vector2 {
     if (!stageEl) return { x: 0, y: 0 };
     const stage = stageEl.getBoundingClientRect();
     return {
-      x: stage.width / 2 - (event.clientX - stage.x - pan.x),
-      y: stage.height / 2 - (event.clientY - stage.y - pan.y),
+      x: stage.width / 2 - (event.clientX - stage.x - view.pan.x),
+      y: stage.height / 2 - (event.clientY - stage.y - view.pan.y),
     };
   }
 
   function zoomTowards(event: { clientX: number; clientY: number }, next: number): void {
-    const target = Math.min(maxZoom, Math.max(MIN_ZOOM, next));
+    const target = clamp(next, MIN_ZOOM, maxZoom);
     const offset = offsetFromImageCentre(event);
-    const growth = target / zoom - 1;
-    pan = { x: pan.x + offset.x * growth, y: pan.y + offset.y * growth };
+    const growth = target / view.zoom - 1;
+    view.pan = { x: view.pan.x + offset.x * growth, y: view.pan.y + offset.y * growth };
     setZoom(target);
   }
 
@@ -377,7 +338,7 @@
     if (isPdf) {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
-      setZoom(zoom * wheelZoomFactor(event, event.deltaY, window.innerHeight));
+      setZoom(view.zoom * wheelZoomFactor(event, event.deltaY, window.innerHeight));
       return;
     }
     if (!isImage || spoilerHidden) return;
@@ -386,19 +347,13 @@
     const factor = wheelZoomFactor(event, delta, window.innerHeight);
     if (lens) {
       if (event.shiftKey) {
-        lensSettings.size = Math.min(
-          LENS_MAX_SIZE,
-          Math.max(LENS_MIN_SIZE, lensSettings.size * factor)
-        );
+        lensSettings.size = clamp(lensSettings.size * factor, LENS_MIN_SIZE, LENS_MAX_SIZE);
       } else {
-        lensSettings.zoom = Math.min(
-          LENS_MAX_ZOOM,
-          Math.max(LENS_MIN_ZOOM, lensSettings.zoom * factor)
-        );
+        lensSettings.zoom = clamp(lensSettings.zoom * factor, LENS_MIN_ZOOM, LENS_MAX_ZOOM);
       }
       return;
     }
-    zoomTowards(event, zoom * factor);
+    zoomTowards(event, view.zoom * factor);
   }
 
   const DOUBLE_TAP_MS = 300;
@@ -416,13 +371,13 @@
     }
 
     lastTap = 0;
-    if (pannable || pan.x !== 0 || pan.y !== 0) {
-      pan = { x: 0, y: 0 };
-      fitsWindow = true;
+    if (pannable || view.pan.x !== 0 || view.pan.y !== 0) {
+      view.pan = { x: 0, y: 0 };
+      view.fitsWindow = true;
       fitToStage();
       return true;
     }
-    zoomTowards(event, fitRatio * 2);
+    zoomTowards(event, view.fitRatio * 2);
     return true;
   }
 
@@ -446,7 +401,7 @@
 
   function toggleFileZoom(event: MouseEvent): void {
     if (!isPdf || event.button !== 0 || event.target instanceof HTMLButtonElement) return;
-    setZoom(zoom === 1 ? 2 : 1);
+    setZoom(view.zoom === 1 ? 2 : 1);
   }
 
   function startPan(event: PointerEvent): void {
@@ -486,7 +441,7 @@
       touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (touches.size === 2) {
         pinchDistance = distance();
-        pinchZoom = zoom;
+        pinchZoom = view.zoom;
         pinchCenter = center();
         panPointerId = null;
         dragging = true;
@@ -499,16 +454,14 @@
           pointerId: event.pointerId,
           startX: event.clientX,
           startY: event.clientY,
-          lastY: event.clientY,
-          lastTime: event.timeStamp,
-          velocityY: 0,
+          velocityY: new Velocity(),
           axis: 'pending',
         };
       }
     }
     if (panPointerId !== null) return;
     panPointerId = event.pointerId;
-    panOrigin = { ...pan };
+    panOrigin = { ...view.pan };
     panStartPointer = { x: event.clientX, y: event.clientY };
     dragging = true;
   }
@@ -545,7 +498,7 @@
       return;
     }
     if (panPointerId !== event.pointerId) return;
-    pan = clampCurrentPan({
+    view.pan = clampCurrentPan({
       x: panOrigin.x + (event.clientX - panStartPointer.x),
       y: panOrigin.y + (event.clientY - panStartPointer.y),
     });
@@ -560,12 +513,7 @@
         swipe.axis = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
       }
     }
-    const elapsed = event.timeStamp - swipe.lastTime;
-    if (elapsed >= 1) {
-      swipe.velocityY = (event.clientY - swipe.lastY) / elapsed;
-      swipe.lastY = event.clientY;
-      swipe.lastTime = event.timeStamp;
-    }
+    swipe.velocityY.track(event.clientY, event.timeStamp);
     if (swipe.axis === 'vertical') swipeY = dy;
     if (swipe.axis === 'horizontal') swipeX = dx;
   }
@@ -577,9 +525,9 @@
       zoomTowards({ clientX: newPinchCenter.x, clientY: newPinchCenter.y }, nextZoom);
     }
     if (newPinchCenter && pinchCenter) {
-      pan = clampCurrentPan({
-        x: pan.x + (newPinchCenter.x - pinchCenter.x),
-        y: pan.y + (newPinchCenter.y - pinchCenter.y),
+      view.pan = clampCurrentPan({
+        x: view.pan.x + (newPinchCenter.x - pinchCenter.x),
+        y: view.pan.y + (newPinchCenter.y - pinchCenter.y),
       });
     }
     pinchCenter = newPinchCenter;
@@ -598,7 +546,8 @@
     endSwipe();
     if (axis === 'vertical') {
       const travelled = Math.abs(settled.y);
-      const flicked = Math.abs(velocityY) > VELOCITY_THRESHOLD && travelled > SWIPE_THRESHOLD / 2;
+      const flicked =
+        Math.abs(velocityY.value) > VELOCITY_THRESHOLD && travelled > SWIPE_THRESHOLD / 2;
       if (travelled > SWIPE_THRESHOLD || flicked) {
         onClose();
         return true;
@@ -637,14 +586,14 @@
   }
 
   function beginZoomEdit(): void {
-    zoomInput = String(Math.round(zoom * 100));
-    editingZoom = true;
+    zoomInput = String(Math.round(view.zoom * 100));
+    view.editingZoom = true;
   }
 
   function commitZoomEdit(): void {
     const next = Number.parseInt(zoomInput, 10);
     if (!Number.isNaN(next)) setZoom(next / 100);
-    editingZoom = false;
+    view.editingZoom = false;
   }
 
   const nativeShare = sharesNatively();
@@ -672,6 +621,11 @@
         {...overlayLayer()}
         style={`height: calc(100dvh - var(--titlebar-height)); inset: var(--titlebar-height) 0 0; opacity: ${String(1 - Math.min(0.75, Math.abs(swipeY) / 400))}; position: fixed; width: 100vw;`}
         aria-label={i18n.t('viewer.title')}
+        onEscapeKeydown={(event: KeyboardEvent) => {
+          if (!view.editingZoom) return;
+          event.preventDefault();
+          view.editingZoom = false;
+        }}
         onInteractOutside={(event: PointerEvent) => {
           if (event.target instanceof Element && event.target.closest('.titlebar')) {
             event.preventDefault();
@@ -692,7 +646,7 @@
           <div class="actions">
             {#if isImage || isPdf}
               <div class="zoom-controls">
-                {#if isImage && fitRatio !== 1 && zoom !== 1}
+                {#if isImage && view.fitRatio !== 1 && view.zoom !== 1}
                   <IconButton
                     label={i18n.t('viewer.originalSize')}
                     size="small"
@@ -704,9 +658,9 @@
                   label={i18n.t('viewer.zoomOut')}
                   size="small"
                   variant="ghost"
-                  onclick={() => setZoom(zoom / (1 + ZOOM_STEP))}><MinusIcon /></IconButton
+                  onclick={() => setZoom(view.zoom / (1 + ZOOM_STEP))}><MinusIcon /></IconButton
                 >
-                {#if editingZoom}
+                {#if view.editingZoom}
                   <span class="zoom-level">
                     <!-- svelte-ignore a11y_autofocus -->
                     <input
@@ -726,7 +680,7 @@
                   <Tooltip label={zoomLabel}>
                     {#snippet trigger({ props })}
                       <button {...props} class="zoom-level" type="button" onclick={beginZoomEdit}
-                        >{Math.round(zoom * 100)}%</button
+                        >{Math.round(view.zoom * 100)}%</button
                       >
                     {/snippet}
                   </Tooltip>
@@ -735,7 +689,7 @@
                   label={i18n.t('viewer.zoomIn')}
                   size="small"
                   variant="ghost"
-                  onclick={() => setZoom(zoom * (1 + ZOOM_STEP))}><PlusIcon /></IconButton
+                  onclick={() => setZoom(view.zoom * (1 + ZOOM_STEP))}><PlusIcon /></IconButton
                 >
               </div>
             {/if}
@@ -792,7 +746,11 @@
                     <ArrowClockwiseIcon />
                     {i18n.t('viewer.rotate')}
                   </ActionMenuItem>
-                  <ActionMenuItem checked={pixelated} onSelect={() => (pixelated = !pixelated)}>
+                  <ActionMenuItem
+                    kind="checkbox"
+                    checked={view.pixelated}
+                    onSelect={() => (view.pixelated = !view.pixelated)}
+                  >
                     <SquaresFourIcon />
                     {i18n.t('viewer.pixelate')}
                   </ActionMenuItem>
@@ -808,11 +766,11 @@
                 {#if isImage || isPdf}
                   <ActionMenuItem
                     onSelect={() => {
-                      rotation = 0;
-                      pan = { x: 0, y: 0 };
-                      fitsWindow = true;
+                      view.rotation = 0;
+                      view.pan = { x: 0, y: 0 };
+                      view.fitsWindow = true;
                       if (isImage) fitToStage();
-                      else zoom = 1;
+                      else view.zoom = 1;
                     }}
                   >
                     <ArrowCounterClockwiseIcon />
@@ -862,60 +820,35 @@
           onpointercancel={endPan}
         >
           {#if index > 0}
-            <IconButton
-              class="nav previous"
-              label={i18n.t('viewer.previous')}
-              size="large"
-              onclick={previous}><ArrowLeftIcon /></IconButton
-            >
+            <MediaViewerNavButton direction="previous" onclick={previous} />
           {/if}
           {#if spoilerHidden && !isImage}
             <Button class="spoiler-reveal" onclick={() => spoilerVisibility.set(spoilerKey, false)}>
               {spoiler ? `${spoiler} — ` : ''}{i18n.t('timeline.spoilerMedia')}
             </Button>
           {:else if url}
-            {#if item.kind === 'video'}
-              <!-- Matrix carries no caption track for an attachment. -->
-              <!-- svelte-ignore a11y_media_has_caption -->
-              <video
-                class="media-player"
-                controls
-                controlslist={savesNatively() ? 'nodownload' : undefined}
-                src={url}
-                aria-label={mediaLabel || i18n.t('timeline.videoAttachment')}
-              >
-                {fileName}
-              </video>
-            {:else if item.kind === 'audio'}
-              <audio
-                class="media-player"
-                controls
-                controlslist={savesNatively() ? 'nodownload' : undefined}
-                src={url}
-                aria-label={mediaLabel || i18n.t('timeline.audioAttachment')}
-              >
-                {fileName}
-              </audio>
+            {#if item.kind === 'video' || item.kind === 'audio'}
+              <MediaViewerPlayer kind={item.kind} {url} label={mediaLabel} {fileName} />
             {:else if item.kind === 'file'}
               <PdfViewer
                 src={url}
                 name={fileName}
-                page={pdfPage}
-                {zoom}
+                page={view.pdfPage}
+                zoom={view.zoom}
                 onPages={(pages) => {
-                  pdfPages = pages;
+                  view.pdfPages = pages;
                 }}
               />
             {:else}
               <img
                 bind:this={imageEl}
-                class={{ pixelated, dragging, instant, spoilered: spoilerHidden }}
+                class={{ pixelated: view.pixelated, dragging, instant, spoilered: spoilerHidden }}
                 src={url}
                 alt={spoilerHidden ? '' : mediaLabel || i18n.t('viewer.imageAlt')}
                 aria-hidden={spoilerHidden ? 'true' : undefined}
                 draggable="false"
-                style:opacity={imageReady ? undefined : 0}
-                style:transform={`translate(${String(pan.x + swipeX)}px, ${String(pan.y + swipeY)}px) scale(${String(zoom)}) rotate(${String(rotation)}deg)`}
+                style:opacity={view.imageReady ? undefined : 0}
+                style:transform={`translate(${String(view.pan.x + swipeX)}px, ${String(view.pan.y + swipeY)}px) scale(${String(view.zoom)}) rotate(${String(view.rotation)}deg)`}
                 {@attach mediaEvents({ load: onImageLoad })}
                 oncontextmenu={mouseContextMenu(openImageMenu)}
               />
@@ -929,7 +862,7 @@
                   style:height={`${String(lensSettings.size)}px`}
                 >
                   <img
-                    class={{ pixelated }}
+                    class={{ pixelated: view.pixelated }}
                     src={url}
                     alt=""
                     draggable="false"
@@ -945,7 +878,6 @@
                 anchor={imageMenuAnchor}
                 side="bottom"
                 align="start"
-                preventScroll={false}
               >
                 <ActionMenuItem onSelect={() => void mediaActions.copyImage()}>
                   <CopyIcon />
@@ -963,30 +895,7 @@
               <span>{i18n.t('timeline.mediaUnavailableDetail')}</span>
             </div>
           {:else}
-            {#if preview}
-              <MediaImage
-                class="viewer-preview"
-                style={[
-                  preview.width ? `--preview-width: ${String(preview.width)}px` : '',
-                  preview.height ? `--preview-height: ${String(preview.height)}px` : '',
-                ].join(';')}
-                source={preview.source}
-                thumbnail={preview.thumbnail}
-                alt=""
-                width={800}
-                height={600}
-                intrinsicWidth={preview.width}
-                intrinsicHeight={preview.height}
-                mime={preview.mime}
-                blurhash={preview.blurhash}
-              />
-            {/if}
-            <span class="loading">
-              <Spinner label={i18n.t('a11y.loading')} />
-              {#if loading.percent !== null}
-                <span>{i18n.t('timeline.downloadProgress', { percent: loading.percent })}</span>
-              {/if}
-            </span>
+            <MediaViewerPending {preview} percent={loading.percent} />
           {/if}
           {#if isImage && spoilerHidden}
             <ImageSpoilerControl
@@ -997,29 +906,29 @@
             />
           {/if}
           {#if index < items.length - 1}
-            <IconButton class="nav next" label={i18n.t('viewer.next')} size="large" onclick={next}
-              ><ArrowRightIcon /></IconButton
-            >
+            <MediaViewerNavButton direction="next" onclick={next} />
           {/if}
         </main>
 
-        {#if isPdf && pdfPages > 1}
+        {#if isPdf && view.pdfPages > 1}
           <footer class={['bottom-bar', { 'chrome-hidden': chromeHidden }]}>
             <div class="zoom-controls">
               <IconButton
                 label={i18n.t('pdf.previousPage')}
                 size="small"
                 variant="ghost"
-                disabled={pdfPage <= 1}
-                onclick={() => (pdfPage -= 1)}><CaretLeftIcon /></IconButton
+                disabled={view.pdfPage <= 1}
+                onclick={() => (view.pdfPage -= 1)}><CaretLeftIcon /></IconButton
               >
-              <span>{i18n.t('pdf.pageIndicator', { page: pdfPage, pages: pdfPages })}</span>
+              <span
+                >{i18n.t('pdf.pageIndicator', { page: view.pdfPage, pages: view.pdfPages })}</span
+              >
               <IconButton
                 label={i18n.t('pdf.nextPage')}
                 size="small"
                 variant="ghost"
-                disabled={pdfPage >= pdfPages}
-                onclick={() => (pdfPage += 1)}><CaretRightIcon /></IconButton
+                disabled={view.pdfPage >= view.pdfPages}
+                onclick={() => (view.pdfPage += 1)}><CaretRightIcon /></IconButton
               >
             </div>
           </footer>
@@ -1030,6 +939,60 @@
 {/if}
 
 <style>
+  .heading {
+    display: grid;
+    flex: 1;
+    gap: var(--space-050);
+    min-width: 0;
+  }
+
+  .heading strong,
+  .heading span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .heading span {
+    color: var(--surface-var-on-container);
+    font-size: var(--font-size-small);
+  }
+
+  .error {
+    color: var(--crit-main);
+    display: grid;
+    gap: var(--space-200);
+    text-align: center;
+  }
+
+  .error span {
+    color: var(--surface-var-on-container);
+  }
+
+  .zoom-level {
+    background: none;
+    border: 0;
+    color: inherit;
+    cursor: text;
+    font: inherit;
+    min-width: 4em;
+    padding: 0;
+    text-align: center;
+  }
+
+  .zoom-level input {
+    all: unset;
+    field-sizing: content;
+    text-align: center;
+  }
+
+  @media (--app-layout) {
+    .error,
+    .error span {
+      color: var(--media-on-scrim);
+    }
+  }
+
   :global(.viewer) {
     background: var(--surface-var-container);
     color: var(--surface-var-on-container);
@@ -1076,42 +1039,6 @@
     display: flex;
     gap: var(--space-150);
     min-width: 0;
-  }
-
-  .zoom-level {
-    background: none;
-    border: 0;
-    color: inherit;
-    cursor: text;
-    font: inherit;
-    min-width: 4em;
-    padding: 0;
-    text-align: center;
-  }
-
-  .zoom-level input {
-    all: unset;
-    field-sizing: content;
-    text-align: center;
-  }
-
-  .heading {
-    display: grid;
-    flex: 1;
-    gap: var(--space-050);
-    min-width: 0;
-  }
-
-  .heading strong,
-  .heading span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .heading span {
-    color: var(--surface-var-on-container);
-    font-size: var(--font-size-small);
   }
 
   .actions {
@@ -1219,20 +1146,6 @@
     transition: none;
   }
 
-  .stage .media-player {
-    max-height: 100%;
-    max-width: 100%;
-  }
-
-  :global(.nav) {
-    background: var(--surface-container-hover);
-    color: var(--surface-on-container);
-    position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 1;
-  }
-
   .toolbar.chrome-hidden,
   .bottom-bar.chrome-hidden,
   .stage.chrome-hidden :global(.nav) {
@@ -1246,34 +1159,17 @@
     }
 
     .toolbar,
-    .bottom-bar,
-    :global(.nav) {
+    .bottom-bar {
       transition:
         opacity var(--motion-normal) var(--ease-smooth-out),
         visibility var(--motion-normal);
     }
   }
 
-  :global(.nav:hover) {
-    background: var(--surface-container-active);
-  }
-
-  :global(.previous) {
-    left: max(0.25rem, var(--safe-left));
-  }
-
-  :global(.next) {
-    right: max(0.25rem, var(--safe-right));
-  }
-
   @media (--compact-layout) {
     .stage.has-nav {
       --stage-padding-left: var(--space-200);
       --stage-padding-right: var(--space-200);
-    }
-
-    :global(.nav) {
-      display: none;
     }
 
     :global(.viewer) {
@@ -1324,37 +1220,9 @@
     display: none;
   }
 
-  .loading {
-    align-items: center;
-    background: var(--surface-container);
-    border-radius: var(--radius);
-    color: var(--surface-on-container);
-    display: flex;
-    font-size: var(--font-size-small);
-    gap: var(--space-100);
-    padding: var(--space-100) var(--space-200);
-    position: relative;
-  }
-
-  .error {
-    color: var(--crit-main);
-    display: grid;
-    gap: var(--space-200);
-    text-align: center;
-  }
-
-  .error span {
-    color: var(--surface-var-on-container);
-  }
-
   @media (--app-layout) {
     :global(.viewer) {
       background: color-mix(in srgb, var(--viewer-immersive) 90%, transparent);
-    }
-
-    .error,
-    .error span {
-      color: var(--media-on-scrim);
     }
 
     .toolbar {
@@ -1381,14 +1249,6 @@
     .stage.has-nav {
       --stage-padding-left: calc(var(--space-600) + var(--control-height-500) + var(--space-200));
       --stage-padding-right: calc(var(--space-600) + var(--control-height-500) + var(--space-200));
-    }
-
-    :global(.previous) {
-      left: 1.5rem;
-    }
-
-    :global(.next) {
-      right: 1.5rem;
     }
   }
 

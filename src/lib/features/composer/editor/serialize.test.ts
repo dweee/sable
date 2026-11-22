@@ -122,6 +122,20 @@ test('typed LaTeX is sent as data-mx-maths with the source as body', () => {
   expect(rich.formatted).toBe(expected);
 });
 
+test('maths falls back to backticks inside the dollars', () => {
+  const maths = (latex: string) => composerSchema.nodes.math_inline.create({ latex });
+  const cases = [
+    { content: [maths('a\\')], markdown: '$`a\\`$' },
+    { content: [maths('x'), composerSchema.text('5')], markdown: '$`x`$5' },
+    { content: [maths('`')], markdown: '$```$' },
+  ];
+  for (const { content, markdown } of cases) {
+    const source = docOf(para(content));
+    expect(composerMarkdown(source)).toBe(markdown);
+    expect(richFromPlain(textDoc(markdown)).toJSON()).toEqual(source.toJSON());
+  }
+});
+
 test('an existing time element survives a rich-text edit', () => {
   const message = serializeComposer(
     parseMatrixHtml('<time datetime="1970-01-01T00:00:00Z">old label</time>')
@@ -342,8 +356,8 @@ test('a plain-mode edit rebuilds the source when the body would not reproduce th
 
 test('a plain-mode edit keeps pills between markdown and across paragraphs', () => {
   const html =
-    '<p><strong>hey</strong> <a href="https://matrix.to/#/@one:example.org">@_one</a></p>' +
-    '<p><a href="https://matrix.to/#/!room:example.org?via=example.org">#Room</a> ' +
+    '<p><strong>hey</strong> <a href="matrix:u/one:example.org">@_one</a></p>' +
+    '<p><a href="matrix:roomid/room:example.org?via=example.org">#Room</a> ' +
     '<img data-mx-emoticon="" src="mxc://other.org/wave" alt="wave" title="wave" height="32"></p>';
   const edited = plainEditDoc('**hey** @_one\n\n#Room :wave:', html);
 
@@ -553,9 +567,7 @@ test('a mention keeps its name in the body and links in the formatted body', () 
   );
 
   expect(message.body).toBe('hey Member One');
-  expect(message.formatted).toBe(
-    'hey <a href="https://matrix.to/#/@one:example.org">Member One</a>'
-  );
+  expect(message.formatted).toBe('hey <a href="matrix:u/one:example.org">Member One</a>');
 });
 
 test('a room mention keeps its # name in the body and links in the formatted body', () => {
@@ -565,7 +577,7 @@ test('a room mention keeps its # name in the body and links in the formatted bod
 
   expect(message).toEqual({
     body: '#General',
-    formatted: '<a href="https://matrix.to/#/#general:example.org">#General</a>',
+    formatted: '<a href="matrix:r/general:example.org">#General</a>',
     mentions: { user_ids: [], room: false },
   });
 });
@@ -642,12 +654,12 @@ test('a soft break keeps its formatting and leaves no escape in the body', () =>
 });
 
 describe('plain text mode', () => {
-  test('a mention keeps its user id and renders as a matrix.to link', () => {
+  test('a mention keeps its user id and renders as a Sable link', () => {
     const who = mention.create({ userId: '@amp:example.org', name: 'amp' });
     const message = serializePlain(docOf(para([who, composerSchema.text(' hi')])));
 
     expect(message.mentions.user_ids).toEqual(['@amp:example.org']);
-    expect(message.formatted).toContain('https://matrix.to/#/@amp:example.org');
+    expect(message.formatted).toContain('matrix:u/amp:example.org');
   });
 
   test.each([
@@ -676,7 +688,7 @@ describe('plain text mode', () => {
     );
 
     expect(message.formatted).toBe(
-      '<code>@someone:server</code> hi <a href="https://matrix.to/#/@someone:server">@someone:server</a>'
+      '<code>@someone:server</code> hi <a href="matrix:u/someone:server">@someone:server</a>'
     );
     expect(message.mentions.user_ids).toEqual(['@someone:server']);
   });
@@ -704,6 +716,21 @@ describe('plain text mode', () => {
 
     expect(message.formatted).toContain('<strong>hey</strong>');
     expect(message.formatted).toContain('data-mx-emoticon');
+  });
+
+  test('italics around an emote survive sending, editing and switching composer modes', () => {
+    const wave = emoticon.create({ url: 'mxc://example.org/wave', shortcode: 'wave' });
+    const plain = docOf(para([composerSchema.text('*hey '), wave, composerSchema.text('*')]));
+    const rich = docOf(
+      para([composerSchema.text('hey ', [em.create()]), wave.mark([em.create()])])
+    );
+    const formatted =
+      '<em>hey <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32"></em>';
+
+    expect(serializePlain(plain).formatted).toBe(formatted);
+    expect(serializeComposer(rich).formatted).toBe(formatted);
+    expect(richFromPlain(plain).eq(rich)).toBe(true);
+    expect(serializePlain(plainEditDoc('*hey :wave:*', formatted)).formatted).toBe(formatted);
   });
 });
 
@@ -1060,34 +1087,9 @@ describe('clipboard slices', () => {
   });
 });
 
-describe('MSC references', () => {
-  const pull = 'https://github.com/matrix-org/matrix-spec-proposals/pull';
-
-  test('link in the formatted body and stay as typed in the body', () => {
-    const message = serializeComposer(docOf(para(composerSchema.text('see MSC4144, not xMSC1'))));
-
-    expect(message.body).toBe('see MSC4144, not xMSC1');
-    expect(message.formatted).toBe(`see <a href="${pull}/4144">MSC4144</a>, not xMSC1`);
-  });
-
-  test('link in plain mode, but not inside code', () => {
-    const message = serializePlain(textDoc('msc2545 and `MSC3391`'));
-
-    expect(message.body).toBe('msc2545 and `MSC3391`');
-    expect(message.formatted).toBe(`<a href="${pull}/2545">msc2545</a> and <code>MSC3391</code>`);
-  });
-
-  test('an edit of a linked message keeps its plain source', () => {
-    const sent = serializePlain(textDoc('MSC4144 lands')).formatted ?? '';
-
-    expect(plainTextOf(plainEditDoc('MSC4144 lands', sent))).toBe('MSC4144 lands');
-    expect(serializeComposer(parseMatrixHtml(sent)).body).toBe('MSC4144 lands');
-  });
-});
-
 test('a table cell keeps its line breaks and pills in the body', () => {
   const doc = parseMatrixHtml(
-    '<table><tr><th>h</th></tr><tr><td>a<br>b <a href="https://matrix.to/#/@alice:example.org">Alice</a></td></tr></table>'
+    '<table><tr><th>h</th></tr><tr><td>a<br>b <a href="matrix:u/alice:example.org">Alice</a></td></tr></table>'
   );
 
   expect(serializeComposer(doc).body).toBe('| h |\n| --- |\n| a b Alice |');

@@ -13,15 +13,15 @@
   import GridFourIcon from 'phosphor-svelte/lib/GridFourIcon';
   import ImagesIcon from 'phosphor-svelte/lib/ImagesIcon';
   import PushPinIcon from 'phosphor-svelte/lib/PushPinIcon';
+  import ScrollIcon from 'phosphor-svelte/lib/ScrollIcon';
   import UserCircleIcon from 'phosphor-svelte/lib/UserCircleIcon';
   import UserPlusIcon from 'phosphor-svelte/lib/UserPlusIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
   import type { RoomListItemView } from '#src/generated/protocol';
 
   import { useCoreClient } from '#lib/core/context.js';
-  import { toasts } from '#lib/ui/toasts.svelte.js';
   import { i18n } from '#lib/i18n.js';
-  import { copyRoomLink } from '#lib/rooms/permalink.js';
+  import { copyRoomLink, type PermalinkFormat } from '#lib/rooms/permalink.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
   import ActionMenuSeparator from '#lib/ui/primitives/ActionMenuSeparator.svelte';
@@ -46,6 +46,7 @@
     onPins?: () => void;
     pinsUnread?: number;
     onWidgets?: () => void;
+    onRules?: () => void;
     onReport: () => void;
     onLeave: () => void;
   }
@@ -67,6 +68,7 @@
     onPins,
     pinsUnread = 0,
     onWidgets,
+    onRules,
     onReport,
     onLeave,
   }: Props = $props();
@@ -78,10 +80,9 @@
     (room?.unread ?? 0) > 0 || (room?.highlight ?? 0) > 0 || (room?.marked_unread ?? false)
   );
 
-  async function copyLink(): Promise<void> {
+  function copyLink(format: PermalinkFormat): void {
     if (!room) return;
-    if (!(await copyRoomLink(core, room))) toasts.error(i18n.t('errors.copyFailed'));
-    else toasts.info(i18n.t('timeline.linkCopied'));
+    void copyRoomLink(core, room, null, format);
   }
 </script>
 
@@ -166,9 +167,19 @@
       {/if}
       <ActionMenuSeparator />
     {/if}
-    <ActionMenuItem onSelect={copyLink}>
+    {#if onRules}
+      <ActionMenuItem onSelect={onRules}>
+        <ScrollIcon />
+        {i18n.t('room.rulesTitle')}
+      </ActionMenuItem>
+    {/if}
+    <ActionMenuItem onSelect={() => copyLink('matrix')}>
       <LinkIcon />
-      {i18n.t('room.menuCopyLink')}
+      {i18n.t('timeline.copyMatrixLink')}
+    </ActionMenuItem>
+    <ActionMenuItem onSelect={() => copyLink('external')}>
+      <LinkIcon />
+      {i18n.t('timeline.copyExternalLink')}
     </ActionMenuItem>
     <ActionMenuItem onSelect={onSettings}>
       <GearIcon />

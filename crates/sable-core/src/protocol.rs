@@ -8,6 +8,7 @@ pub use sable_model::emote_picker::{
     ImageSourcePackView, ImageUsageView, PackImageInfoView, PackImageView,
 };
 pub use sable_model::event_preview::ReplyFallbackView;
+pub use sable_model::html::PreviewEmote;
 pub use sable_model::markdown::{ComposerContent, ComposerMentions, ComposerPill};
 pub use sable_model::member_look::{FieldEdit, PronounView};
 pub use sable_model::notifications::NotificationModeView;
@@ -15,6 +16,7 @@ pub use sable_model::power_levels::{PowerLevelAction, PowerLevelLocation, RoomPo
 pub use sable_model::search_filter::{SearchAttachment, SearchFilter};
 pub use sable_model::sidebar::SidebarItemView;
 pub use sable_model::slash::{GestureView, MessageKind};
+pub use sable_model::space_graph::RoomSpacesView;
 pub use sable_model::spaces::{RoomJoinRuleView, SpaceChildEdge};
 use serde::{Deserialize, Serialize};
 
@@ -399,6 +401,11 @@ pub enum CoreEvent {
         room_id: OwnedRoomId,
     },
 
+    RoomRulesChanged {
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        room_id: OwnedRoomId,
+    },
+
     NicknamesChanged {
         #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
         user_ids: Vec<OwnedUserId>,
@@ -761,7 +768,10 @@ pub struct SearchSharingView {
     pub peer: Option<SearchPeerDeviceView>,
     /// Rooms copied by the current or last receiving attempt.
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
-    pub rooms_copied: usize,
+    pub transferred_rooms: usize,
+    /// Total rooms to transfer during the current or last receiving attempt.
+    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
+    pub total_rooms: usize,
     pub last_copy: Option<SearchPeerCopyView>,
     pub automatic: bool,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
@@ -1016,6 +1026,7 @@ pub struct RoomUnreadView {
 pub enum RoomSortView {
     #[default]
     Recent,
+    UnreadFirst,
     NameAsc,
     NameDesc,
 }
@@ -1043,6 +1054,9 @@ pub struct RoomListOptionsView {
     /// A quiet space quiets everything under it.
     #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
     pub quiet_rooms: Vec<OwnedRoomId>,
+    /// Shows the unread dot even where the default or a quiet space would hide it.
+    #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
+    pub shown_rooms: Vec<OwnedRoomId>,
 }
 
 impl Default for RoomListOptionsView {
@@ -1055,6 +1069,7 @@ impl Default for RoomListOptionsView {
             badge_default_direct: BadgeModeView::All,
             badge_default_group: BadgeModeView::Mentions,
             quiet_rooms: Vec::new(),
+            shown_rooms: Vec::new(),
         }
     }
 }
@@ -1115,7 +1130,7 @@ pub struct RoomBadgeView {
     pub counts: RoomUnreadView,
 }
 
-/// Changed sections only. `badges` and `quiet_rooms` are whole when present.
+/// Changed sections only. `badges`, `quiet_rooms` and `room_spaces` are whole when present.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 pub struct RoomSectionsUpdate {
@@ -1124,6 +1139,8 @@ pub struct RoomSectionsUpdate {
     pub badges: Option<Vec<RoomBadgeView>>,
     #[cfg_attr(feature = "typegen", specta(type = Option<Vec<String>>))]
     pub quiet_rooms: Option<Vec<OwnedRoomId>>,
+    pub app_badge: Option<u32>,
+    pub room_spaces: Option<Vec<RoomSpacesView>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1553,6 +1570,19 @@ pub struct TimelineItemView {
     pub forwarded: Option<ForwardedView>,
     pub forum_title: Option<String>,
     pub shield: Option<MessageShieldView>,
+    /// MSC4268: who sent the key bundle this message was decrypted with.
+    pub shared_by: Option<SharedByView>,
+    /// MSC4293: shown as deleted because its sender was banned or kicked with
+    /// `redact_events`. The content is still held locally.
+    pub redacted_on_ban: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct SharedByView {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub user_id: OwnedUserId,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1690,6 +1720,9 @@ pub struct PostView {
     pub url: Option<String>,
     pub author: PostAuthorView,
     pub text: Option<String>,
+    /// The language code `text` was machine translated from.
+    #[serde(default)]
+    pub translated_from: Option<String>,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     pub created_at: Option<u64>,
     pub media: Vec<PostMediaView>,
@@ -1730,7 +1763,9 @@ pub enum PostMediaKindView {
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 pub struct PostMediaView {
     pub kind: PostMediaKindView,
-    pub source: String,
+    /// `None` for a bundled video, which plays by fetching the link again.
+    pub source: Option<String>,
+    pub poster: Option<String>,
     pub mime: Option<String>,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     pub width: Option<u64>,
@@ -1910,6 +1945,8 @@ pub struct AttachmentInfoView {
     #[serde(default)]
     pub voice: bool,
     pub audio_metadata: Option<AudioMetadataView>,
+    /// The sender's choice to play a video as a GIF. Unset, the core decides from the file.
+    pub gif: Option<bool>,
 }
 
 /// MSC4144 per-message profile, letting one account send under several
@@ -2031,6 +2068,28 @@ pub struct ReplyView {
     pub body: Option<String>,
     /// Set instead of `body` when the replied-to event has none to show.
     pub fallback: Option<ReplyFallbackView>,
+    pub emotes: Vec<PreviewEmote>,
+}
+
+/// What the homeserver still holds of a redacted event (MSC2815).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnredactedEventView {
+    Content {
+        #[cfg_attr(feature = "typegen", specta(type = TimelineItemContentView))]
+        content: Box<TimelineItemContentView>,
+    },
+    /// Encrypted, and this device has no key for it.
+    Undecryptable,
+    /// Erased from the server's database. `content_keep_ms` is how long that
+    /// server keeps redacted content, when it says.
+    Deleted {
+        #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+        content_keep_ms: Option<u64>,
+    },
+    /// The server only ever saw the event already redacted.
+    NotReceived,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2370,6 +2429,9 @@ pub enum StateChangeView {
     CallMembership {
         joined: bool,
     },
+    RoomRules {
+        removed: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2616,6 +2678,19 @@ pub enum ShareHistoryView {
     Unencrypted,
     NoCrossSigning,
     HistoryNotShared,
+    NotInvited,
+    NoVerifiedDevices,
+    NothingToShare,
+}
+
+/// What became of the room's past messages when an invite went out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum InviteHistoryView {
+    Shared,
+    NotShared,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2638,6 +2713,8 @@ pub enum DiagnosticPushView {
 pub struct DefaultNotificationModesView {
     pub direct: NotificationModeView,
     pub group: NotificationModeView,
+    /// The server has the MSC4563 rule.
+    pub direct_rule: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2732,6 +2809,13 @@ pub struct NotificationView {
     pub noisy: Option<bool>,
 }
 
+impl NotificationView {
+    #[must_use]
+    pub const fn wants_banner(&self) -> bool {
+        self.event_id.is_some() && (self.mention || self.is_direct)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 pub struct PushEventView {
@@ -2741,17 +2825,19 @@ pub struct PushEventView {
     pub content: serde_json::Value,
     pub sender: String,
     pub sender_display_name: Option<String>,
+    pub sender_avatar_url: Option<String>,
     pub room_name: String,
     pub room_avatar_url: Option<String>,
     pub encrypted: bool,
     pub noisy: bool,
+    pub mention: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PushFetchView {
-    Event { event: PushEventView },
+    Event { event: Box<PushEventView> },
     Discard,
     Unavailable,
 }
@@ -2762,13 +2848,35 @@ pub enum PushFetchView {
 pub struct LatestEventView {
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub sender: Option<OwnedUserId>,
-    /// Plain text: a list row must not run untrusted HTML.
+    /// Sent by this account, including a local echo.
+    pub own: bool,
+    /// Only in a room with more than two people, and never for `own`. A
+    /// per-message profile name wins over the member's.
+    pub sender_label: Option<String>,
+    pub kind: LatestEventKind,
+    /// Plain text: a list row must not run untrusted HTML. For a non-text
+    /// `kind` this is the caption or poll question, empty when there is none.
     pub body: String,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     pub timestamp: Option<u64>,
     pub sending: bool,
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub event_id: Option<OwnedEventId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum LatestEventKind {
+    Text,
+    Image,
+    Video,
+    Audio,
+    Voice,
+    File,
+    Sticker,
+    Location,
+    Poll,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3083,6 +3191,29 @@ pub struct AbbreviationView {
     pub definition: String,
     #[serde(default)]
     pub cased: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct RoomRulesView {
+    /// The room whose rules these are, which differs from the room asked
+    /// about when it delegates. Acceptance is recorded there.
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub source_room_id: OwnedRoomId,
+    pub html: String,
+    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
+    pub version: i64,
+    pub require_acceptance: bool,
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct RoomRulesSettingsView {
+    pub html: String,
+    pub require_acceptance: bool,
+    #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
+    pub delegate_to: Option<OwnedRoomId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

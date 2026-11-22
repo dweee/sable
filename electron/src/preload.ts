@@ -104,9 +104,6 @@ contextBridge.exposeInMainWorld('sableElectron', {
     ipcRenderer.send('sable-telemetry-consent', enabled);
   },
   takeDeepLinks: () => ipcRenderer.invoke('sable-take-deep-links') as Promise<string[]>,
-  openAuthWindow: (id: string, url: string) =>
-    ipcRenderer.invoke('sable-auth-open', id, url) as Promise<void>,
-  closeAuthWindow: (id: string) => ipcRenderer.invoke('sable-auth-close', id) as Promise<void>,
   openAuthInSystemBrowser: (url: string) =>
     ipcRenderer.invoke('sable-auth-external', url) as Promise<void>,
   startAuthLoopback: () => ipcRenderer.invoke('sable-auth-loopback-start') as Promise<string>,
@@ -148,6 +145,7 @@ contextBridge.exposeInMainWorld('sableElectron', {
     ipcRenderer.invoke('sable-save-file', request) as Promise<{ path: string } | null>,
   shareFile: (request: PickedFile) =>
     ipcRenderer.invoke('sable-share-file', request) as Promise<void>,
+  openAppLink: (url: string) => ipcRenderer.invoke('sable-open-app-link', url) as Promise<void>,
   checkForUpdate: () =>
     ipcRenderer.invoke('sable-update-check') as Promise<{
       version: string;

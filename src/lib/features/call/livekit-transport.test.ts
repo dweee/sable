@@ -16,6 +16,7 @@ import type { CallTelemetry } from './call-telemetry';
 import { MatrixKeyProvider } from './key-provider';
 import * as voiceFilter from './voice-filter';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 
 const screenAudio = vi.hoisted(() => ({
   screenAudioSupported: vi.fn(() => false),
@@ -388,11 +389,37 @@ test('screen quality changes apply the next time the screen is shared', async ()
   }
 });
 
-test('a fresh profile shares the screen at 720p and 30 fps', async () => {
+test('an encrypted call publishes H.264 in place of AV1 and says so once', async () => {
+  preferences.callScreenCodec = 'av1';
+  preferences.callCameraCodec = 'av1';
+  const info = vi.spyOn(toasts, 'info');
+  const fixture = roomFixture();
+  const transport = createLivekitTransport({
+    encryptMedia: true,
+    createRoom: () => fixture.room,
+    createWorker: () => ({ terminate: vi.fn() }) as unknown as Worker,
+  });
+  try {
+    await transport.connect({ ...connectOptions, cameraEnabled: true });
+    expect(fixture.camera).toHaveBeenCalledWith(true, {}, { videoCodec: 'h264' });
+    await transport.capabilities.screenShare?.setEnabled(true);
+    expect(fixture.localParticipant.setScreenShareEnabled).toHaveBeenLastCalledWith(
+      true,
+      expect.anything(),
+      expect.objectContaining({ videoCodec: 'h264' })
+    );
+    expect(info).toHaveBeenCalledOnce();
+  } finally {
+    await transport.disconnect();
+  }
+});
+
+test('a fresh profile shares the screen in VP8 at 1080p and 30 fps', async () => {
   vi.resetModules();
   const { preferences: fresh } = await import('#lib/settings/preferences.svelte.js');
-  expect(fresh.callScreenResolution).toBe('720');
+  expect(fresh.callScreenResolution).toBe('1080');
   expect(fresh.callScreenFramerate).toBe('30');
+  expect(fresh.callScreenCodec).toBe('vp8');
 });
 
 test('screen frame rate caps capture and encoding', async () => {
@@ -1135,8 +1162,9 @@ test('falls back to browser noise suppression if the microphone processor fails'
     restart: vi.fn(() => Promise.resolve()),
     destroy: vi.fn(() => Promise.resolve()),
   };
-  const createFilter = vi.spyOn(voiceFilter, 'createMicrophoneFilter').mockReturnValue(filter);
+  const createFilter = vi.spyOn(voiceFilter, 'createMicrophoneProcessor').mockReturnValue(filter);
   const track = Object.assign(Object.create(LocalAudioTrack.prototype) as LocalAudioTrack, {
+    getProcessor: vi.fn(() => undefined),
     setProcessor: vi.fn(() => Promise.reject(new Error('filter unavailable'))),
     applyConstraints: vi.fn(() => Promise.resolve()),
   });
@@ -1155,6 +1183,45 @@ test('falls back to browser noise suppression if the microphone processor fails'
   } finally {
     preferences.voiceIsolation = previousIsolation;
     preferences.noiseSuppression = previousSuppression;
+    await transport.disconnect();
+  }
+});
+
+test('attaches the microphone volume processor when the volume is not 100%', async () => {
+  const previous = preferences.microphoneVolume;
+  vi.spyOn(voiceFilter, 'microphoneProcessing').mockReturnValue({
+    filter: false,
+    constraints: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  const processor = {
+    name: 'microphone-volume',
+    init: vi.fn(() => Promise.resolve()),
+    restart: vi.fn(() => Promise.resolve()),
+    destroy: vi.fn(() => Promise.resolve()),
+  };
+  const create = vi.spyOn(voiceFilter, 'createMicrophoneProcessor').mockReturnValue(processor);
+  const track = () =>
+    Object.assign(Object.create(LocalAudioTrack.prototype) as LocalAudioTrack, {
+      getProcessor: vi.fn(() => undefined),
+      setProcessor: vi.fn(() => Promise.resolve()),
+    });
+  const { room } = roomFixture();
+  const transport = createLivekitTransport({ encryptMedia: false, createRoom: () => room });
+  try {
+    preferences.microphoneVolume = 1;
+    const unchanged = track();
+    room.emit(RoomEvent.LocalTrackPublished, { track: unchanged, source: Track.Source.Microphone });
+    expect(create).not.toHaveBeenCalled();
+
+    preferences.microphoneVolume = 1.5;
+    const louder = track();
+    room.emit(RoomEvent.LocalTrackPublished, { track: louder, source: Track.Source.Microphone });
+    await vi.waitFor(() => {
+      expect(louder.setProcessor).toHaveBeenCalledWith(processor);
+    });
+    expect(create).toHaveBeenCalledWith(false);
+  } finally {
+    preferences.microphoneVolume = previous;
     await transport.disconnect();
   }
 });

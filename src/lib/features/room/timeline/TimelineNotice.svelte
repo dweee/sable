@@ -18,7 +18,9 @@
   import { redactedLabel } from '../messages/redacted-label';
   import { memberName } from '../members/members.js';
   import StateContentDiff from '../messages/StateContentDiff.svelte';
+  import { hasRoomRulesOpener, useRoomRulesOpener } from '../room-rules.svelte.js';
   import StateEventText from './StateEventText.svelte';
+  import './text-button.css';
   import { stateEventIcon } from './state-event-icon';
   import { reactionSource } from './state-event-text';
   import {
@@ -52,6 +54,7 @@
     onSenderProfile,
     onJumpToEvent,
   }: Props = $props();
+  const openRules = hasRoomRulesOpener() ? useRoomRulesOpener() : null;
   let peekOpen = $state(false);
   let redactedText = $derived.by(() => {
     const redactor = events?.redactor(item) ?? null;
@@ -162,6 +165,11 @@
   <p class="state">
     {@render stateGutter()}
     <StateEventText {item} {members} {onSenderProfile} />
+    {#if openRules && item.content.kind === 'state_event' && item.content.change?.kind === 'room_rules' && !item.content.change.removed}
+      <button type="button" class="text-button" onclick={openRules}
+        >{i18n.t('timeline.roomRulesView')}</button
+      >
+    {/if}
     {@render stateTime()}
   </p>
   {#if pins.length > 0}
@@ -186,7 +194,7 @@
     {@render stateTime()}
   </p>
   {#if item.content.content !== null}
-    <div class="state-detail">
+    <div class="state-detail state-diff">
       <StateContentDiff before={item.content.prev_content} after={item.content.content} />
     </div>
   {/if}
@@ -285,9 +293,13 @@
   }
 
   .state-icon,
-  .state :global(.state-event-text),
-  .state-text {
+  .state-text,
+  .state :global(.state-emote) {
     opacity: var(--opacity-p300);
+  }
+
+  .state :global(.state-event-text) {
+    color: color-mix(in srgb, currentcolor calc(var(--opacity-p300) * 100%), transparent);
   }
 
   .state-icon {
@@ -323,8 +335,11 @@
     gap: var(--space-050);
     margin-inline-start: calc(var(--avatar-size-small) + var(--timeline-row-gap));
     min-width: 0;
-    opacity: var(--opacity-p300);
     padding-block: var(--space-050);
+  }
+
+  .state-diff {
+    opacity: var(--opacity-p300);
   }
 
   .state-detail.target-above,

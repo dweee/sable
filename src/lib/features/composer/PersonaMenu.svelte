@@ -21,7 +21,7 @@
   import { filterPersonas, type SelectionScope } from '#lib/personas/persona.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
-  import TextInput from '#lib/ui/primitives/TextInput.svelte';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
   import { nameColorOnDark, nameColorOnLight } from '#lib/ui/primitives/readable-color.js';
 
   import '#lib/features/room/members/sender-identity.css';
@@ -239,13 +239,10 @@
           {/snippet}
         </Tooltip>
       {/if}
-      <TextInput
+      <SearchField
         id="persona-search"
         bind:value={query}
-        type="search"
-        autocomplete="off"
-        placeholder={i18n.t('personas.search')}
-        aria-label={i18n.t('personas.search')}
+        label={i18n.t('personas.search')}
         onkeyup={(event) => {
           if (event.key === 'Enter' && query && filteredPersonas && filteredPersonas.length !== 0) {
             onChoose(filteredPersonas[0]);
@@ -364,7 +361,7 @@
     border-radius: var(--radius);
     font: inherit;
     margin-inline: 0;
-    padding: var(--space-200) var(--space-300);
+    padding-block: var(--space-200);
   }
 
   .persona-grid-option {
@@ -396,7 +393,7 @@
     font: inherit;
     gap: var(--space-300);
     padding: var(--space-200) var(--space-300);
-    text-align: left;
+    text-align: start;
     width: 100%;
   }
 

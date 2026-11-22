@@ -72,7 +72,10 @@
   }
 
   .media-image-spoiler.hidden {
+    container-type: size;
     inset: 0;
+    min-height: 0;
+    min-width: 0;
   }
 
   .media-image-spoiler-chip {
@@ -116,6 +119,48 @@
 
   .media-image-spoiler-hint {
     font-size: var(--font-size-x-small);
+  }
+
+  @container (height < 5.5rem) {
+    .media-image-spoiler-hint {
+      display: none;
+    }
+
+    .hidden .media-image-spoiler-chip {
+      padding-block: var(--space-100);
+    }
+
+    .media-image-spoiler-copy > span:first-child {
+      -webkit-line-clamp: 1;
+      line-clamp: 1;
+    }
+  }
+
+  @container (height < 3.25rem) or (width < 6rem) {
+    .media-image-spoiler-copy {
+      display: none;
+    }
+
+    .hidden .media-image-spoiler-chip {
+      padding: var(--space-050);
+    }
+
+    .hidden .media-image-spoiler-chip :global(svg) {
+      height: min(var(--icon-size-medium), 100cqmin - var(--space-100));
+      width: min(var(--icon-size-medium), 100cqmin - var(--space-100));
+    }
+  }
+
+  @container (height < 2rem) {
+    .media-image-spoiler.hidden,
+    .hidden .media-image-spoiler-chip {
+      padding: 0;
+    }
+
+    .hidden .media-image-spoiler-chip :global(svg) {
+      height: min(var(--icon-size-medium), 100cqmin);
+      width: min(var(--icon-size-medium), 100cqmin);
+    }
   }
 
   @media (any-hover: hover) and (any-pointer: fine) {

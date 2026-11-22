@@ -1,3 +1,7 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -42,6 +46,7 @@ beforeEach(() => {
   mocks.autoUpdate = undefined;
   mocks.app.isPackaged = true;
   mocks.app.getVersion = () => '2.0.0';
+  mocks.app.getAppPath = () => 'electron';
 });
 
 test('package-managed Linux installs do not configure or check the self-update feed', async () => {
@@ -98,7 +103,12 @@ test.each([
   });
   vi.stubGlobal('fetch', fetch);
   const updater = await import('./updater');
-  updater.registerUpdater(() => true);
+  updater.registerUpdater(
+    () => true,
+    (notify) => {
+      notify();
+    }
+  );
   const handler = mocks.handle.mock.calls.find(
     ([channel]) => channel === 'sable-update-latest-version'
   );
@@ -106,6 +116,26 @@ test.each([
   expect(fetch).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`/download/${feed}$`)), {
     cache: 'no-store',
   });
+});
+
+test('Flatpak waits for its remote to have the update before reporting it', async () => {
+  vi.stubEnv('FLATPAK_ID', 'moe.sable.client');
+  const fetch = vi.fn(() => Promise.resolve(new Response('version: 2.1.0\nfiles: []\n')));
+  vi.stubGlobal('fetch', fetch);
+  let notify = (): void => {};
+  registerUpdater(
+    () => true,
+    (callback) => {
+      notify = callback;
+    }
+  );
+  const handler = mocks.handle.mock.calls.find(
+    ([channel]) => channel === 'sable-update-latest-version'
+  );
+  expect(await handler?.[1]({ senderFrame: {} })).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+  notify();
+  expect(await handler?.[1]({ senderFrame: {} })).toBe('2.1.0');
 });
 
 test('self-updating builds leave the latest version to the updater', async () => {
@@ -166,5 +196,22 @@ test.each([
     expect(mocks.checkForUpdates).not.toHaveBeenCalled();
     expect(mocks.downloadUpdate).not.toHaveBeenCalled();
     expect(mocks.quitAndInstall).not.toHaveBeenCalled();
+  }
+);
+
+test.each(['gentoo', 'nix'])(
+  'a %s install leaves update notices to its repository',
+  async (type) => {
+    const resources = mkdtempSync(join(tmpdir(), 'sable-updater-'));
+    writeFileSync(join(resources, 'package-type'), `${type}\n`);
+    mocks.app.getAppPath = () => join(resources, 'app.asar');
+    const fetch = vi.fn(() => Promise.resolve(new Response('version: 2.4.0\nfiles: []\n')));
+    vi.stubGlobal('fetch', fetch);
+    registerUpdater(() => true);
+    const latest = mocks.handle.mock.calls.find(
+      ([channel]) => channel === 'sable-update-latest-version'
+    );
+    expect(await latest?.[1]({ senderFrame: {} })).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
   }
 );

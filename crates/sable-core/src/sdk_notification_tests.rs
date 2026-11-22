@@ -17,7 +17,7 @@ use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
 use wiremock::{
     Mock, ResponseTemplate,
-    matchers::{method, path_regex},
+    matchers::{body_json, method, path_regex},
 };
 
 use crate::{
@@ -26,10 +26,18 @@ use crate::{
     session::Session,
     store::MemorySessionStore,
 };
+/// The default rules of a server without MSC4563.
+fn legacy_rules(user_id: &ruma::UserId) -> Ruleset {
+    let mut rules = Ruleset::server_default(user_id);
+    for rule_id in [
+        ".eu.cyrneko.msc4563.direct",
+        ".eu.cyrneko.msc4563.encrypted_direct",
+    ] {
+        rules.underride.shift_remove(rule_id);
+    }
+    rules
+}
 
-mod direct;
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn watching(
     server: &MatrixMockServer,
     client: &Client,
@@ -46,8 +54,6 @@ async fn watching(
         .await;
     (core, events)
 }
-
-#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 async fn next_notification(events: &mut UnboundedReceiver<CoreEvent>) -> NotificationView {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -104,7 +110,7 @@ async fn a_replayed_invite_alerts_once() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let own = client.user_id().unwrap().to_owned();
-    let invite = |room_id: &matrix_sdk::ruma::RoomId| {
+    let invite = |room_id: &ruma::RoomId| {
         InvitedRoomBuilder::new(room_id).add_state_event(stripped_state_event!({
             "type": "m.room.member", "sender": User::Alice, "state_key": own,
             "content": { "membership": "invite" }
@@ -156,15 +162,13 @@ async fn a_replayed_message_alerts_once() {
         )
         .await;
     let (core, mut events) = watching(&server, &client).await;
-    let mut rules = matrix_sdk::ruma::push::Ruleset::server_default(client.user_id().unwrap());
+    let mut rules = Ruleset::server_default(client.user_id().unwrap());
     rules
         .insert(
-            matrix_sdk::ruma::push::NewPushRule::Room(
-                matrix_sdk::ruma::push::NewSimplePushRule::new(
-                    room_id.to_owned(),
-                    vec![matrix_sdk::ruma::push::Action::Notify],
-                ),
-            ),
+            ruma::push::NewPushRule::Room(ruma::push::NewSimplePushRule::new(
+                room_id.to_owned(),
+                vec![Action::Notify],
+            )),
             None,
             None,
         )
@@ -203,9 +207,9 @@ async fn a_replayed_message_alerts_once() {
                             json!({"notification_count": 1, "highlight_count": 0}),
                         )
                         .add_timeline_event(
-                            matrix_sdk::ruma::serde::Raw::new(&message)
+                            ruma::serde::Raw::new(&message)
                                 .unwrap()
-                                .cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>(),
+                                .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
                         ),
                 );
             })
@@ -246,7 +250,7 @@ async fn a_message_delivered_late_by_a_resumed_sync_does_not_alert() {
         )
         .await;
     let (core, mut events) = watching(&server, &client).await;
-    let rules = matrix_sdk::ruma::push::Ruleset::server_default(client.user_id().unwrap());
+    let rules = Ruleset::server_default(client.user_id().unwrap());
     let long_ago = MilliSecondsSinceUnixEpoch::from_system_time(
         std::time::SystemTime::now() - Duration::from_secs(600),
     )
@@ -284,9 +288,9 @@ async fn a_message_delivered_late_by_a_resumed_sync_does_not_alert() {
                             json!({"notification_count": 1, "highlight_count": 0}),
                         )
                         .add_timeline_event(
-                            matrix_sdk::ruma::serde::Raw::new(&event)
+                            ruma::serde::Raw::new(&event)
                                 .unwrap()
-                                .cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>(),
+                                .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
                         ),
                 );
             })
@@ -402,9 +406,9 @@ async fn an_existing_bridge_status_rule_is_respected() {
                 builder.add_global_account_data(factory.push_rules(rules.clone()));
                 builder.add_joined_room(
                     JoinedRoomBuilder::new(room_id).add_timeline_event(
-                        matrix_sdk::ruma::serde::Raw::new(&event)
+                        ruma::serde::Raw::new(&event)
                             .unwrap()
-                            .cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>(),
+                            .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
                     ),
                 );
             })
@@ -442,15 +446,13 @@ async fn a_message_alerts_when_the_server_reports_no_counts() {
         )
         .await;
     let (core, mut events) = watching(&server, &client).await;
-    let mut rules = matrix_sdk::ruma::push::Ruleset::server_default(client.user_id().unwrap());
+    let mut rules = Ruleset::server_default(client.user_id().unwrap());
     rules
         .insert(
-            matrix_sdk::ruma::push::NewPushRule::Room(
-                matrix_sdk::ruma::push::NewSimplePushRule::new(
-                    room_id.to_owned(),
-                    vec![matrix_sdk::ruma::push::Action::Notify],
-                ),
-            ),
+            ruma::push::NewPushRule::Room(ruma::push::NewSimplePushRule::new(
+                room_id.to_owned(),
+                vec![Action::Notify],
+            )),
             None,
             None,
         )
@@ -478,9 +480,9 @@ async fn a_message_alerts_when_the_server_reports_no_counts() {
                         json!({"notification_count": 0, "highlight_count": 0}),
                     )
                     .add_timeline_event(
-                        matrix_sdk::ruma::serde::Raw::new(&message)
+                        ruma::serde::Raw::new(&message)
                             .unwrap()
-                            .cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>(),
+                            .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
                     ),
             );
         })
@@ -517,15 +519,13 @@ async fn sticker_notifications_do_not_block_sync_or_reappear_after_reading() {
             )
             .await;
         let (core, mut events) = watching(&server, &client).await;
-        let mut rules = matrix_sdk::ruma::push::Ruleset::server_default(client.user_id().unwrap());
+        let mut rules = Ruleset::server_default(client.user_id().unwrap());
         rules
             .insert(
-                matrix_sdk::ruma::push::NewPushRule::Room(
-                    matrix_sdk::ruma::push::NewSimplePushRule::new(
-                        room_id.to_owned(),
-                        vec![matrix_sdk::ruma::push::Action::Notify],
-                    ),
-                ),
+                ruma::push::NewPushRule::Room(ruma::push::NewSimplePushRule::new(
+                    room_id.to_owned(),
+                    vec![Action::Notify],
+                )),
                 None,
                 None,
             )
@@ -562,9 +562,9 @@ async fn sticker_notifications_do_not_block_sync_or_reappear_after_reading() {
                             json!({"notification_count": 1, "highlight_count": 0}),
                         )
                         .add_timeline_event(
-                            matrix_sdk::ruma::serde::Raw::new(&event)
+                            ruma::serde::Raw::new(&event)
                                 .unwrap()
-                                .cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>(),
+                                .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
                         ),
                 );
             }),
@@ -582,8 +582,8 @@ async fn sticker_notifications_do_not_block_sync_or_reappear_after_reading() {
                 .add_receipt(factory.read_receipts().add_with_timestamp(
                     matrix_sdk::ruma::event_id!("$sticker"),
                     client.user_id().unwrap(),
-                    matrix_sdk::ruma::events::receipt::ReceiptType::Read,
-                    matrix_sdk::ruma::events::receipt::ReceiptThread::Unthreaded,
+                    ruma::events::receipt::ReceiptType::Read,
+                    ruma::events::receipt::ReceiptThread::Unthreaded,
                     Some(MilliSecondsSinceUnixEpoch::now()),
                 ).into_event()));
             builder.add_invited_room(InvitedRoomBuilder::new(invite_room).add_state_event(stripped_state_event!({
@@ -643,7 +643,7 @@ async fn an_encrypted_room_defaults_to_the_rule_its_decrypted_messages_hit() {
         .await
         .snapshot()
         .await;
-    let direct = notifications::uses_direct_push_rules(&room);
+    let direct = notifications::uses_direct_push_rules(&rules, &room);
     let result = crate::push_rules::room_settings(&rules, room_id, direct);
 
     assert!(result.room.is_none());
@@ -671,11 +671,7 @@ async fn a_second_room_mode_change_before_the_sync_echo_still_lands() {
     let rules = PushRules::load(&client).await;
 
     rules
-        .apply(plan_room_mode(
-            room_id,
-            false,
-            Some(NotificationModeView::Mute),
-        ))
+        .apply(plan_room_mode(room_id, Some(NotificationModeView::Mute)))
         .await
         .unwrap();
     assert_eq!(
@@ -683,10 +679,7 @@ async fn a_second_room_mode_change_before_the_sync_echo_still_lands() {
         Some(NotificationModeView::Mute)
     );
 
-    rules
-        .apply(plan_room_mode(room_id, false, None))
-        .await
-        .unwrap();
+    rules.apply(plan_room_mode(room_id, None)).await.unwrap();
 
     assert_eq!(room_mode(&rules.snapshot().await, room_id), None);
     let deleted_override = server
@@ -719,7 +712,7 @@ async fn a_missing_rule_on_delete_is_not_a_failure() {
     let rules = PushRules::load(&client).await;
 
     rules
-        .apply(plan_room_mode(room_id!("!gone:example.org"), false, None))
+        .apply(plan_room_mode(room_id!("!gone:example.org"), None))
         .await
         .unwrap();
 }
@@ -731,6 +724,16 @@ async fn notification_cleanup_reads_the_server_and_retries_a_partial_failure() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let (core, _) = watching(&server, &client).await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"/account_data/moe\.sable\.dm_notification_default$",
+        ))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(json!({"errcode":"M_NOT_FOUND", "error":"not set"})),
+        )
+        .mount(server.server())
+        .await;
     let mut remote = Ruleset::server_default(client.user_id().unwrap());
     for id in ["moe.sable.sticker", "moe.sable.sticker_one_to_one"] {
         let mut conditions =
@@ -808,6 +811,48 @@ async fn notification_cleanup_reads_the_server_and_retries_a_partial_failure() {
 }
 
 #[tokio::test]
+async fn notification_cleanup_empties_the_old_dm_default() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let (core, _) = watching(&server, &client).await;
+    let remote = Ruleset::server_default(client.user_id().unwrap());
+    Mock::given(method("GET"))
+        .and(path_regex(r"/pushrules/$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"global":remote})))
+        .mount(server.server())
+        .await;
+    let stored = Mock::given(method("GET"))
+        .and(path_regex(
+            r"/account_data/moe\.sable\.dm_notification_default$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "mode":"all", "managed":{"!dm:example.org":{"mode":"all"}}
+        })))
+        .mount_as_scoped(server.server())
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"/account_data/moe\.sable\.dm_notification_default$",
+        ))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(server.server())
+        .await;
+    assert!(core.cleanup_notification_rules().await);
+    drop(stored);
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"/account_data/moe\.sable\.dm_notification_default$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(server.server())
+        .await;
+    assert!(core.cleanup_notification_rules().await);
+    core.session_tasks.lock().clear();
+}
+
+#[tokio::test]
 async fn notification_cleanup_does_not_succeed_when_rules_cannot_be_fetched() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
@@ -876,7 +921,148 @@ async fn a_bridged_dm_uses_the_group_defaults_like_the_server() {
         .await;
     let room = client.get_room(room_id).unwrap();
 
-    assert!(!notifications::uses_direct_push_rules(&room));
+    assert!(!notifications::uses_direct_push_rules(
+        &legacy_rules(&own),
+        &room
+    ));
+    assert!(
+        notifications::uses_direct_push_rules(&Ruleset::server_default(&own), &room),
+        "an MSC4563 server has a rule for every room in m.direct"
+    );
+}
+
+#[tokio::test]
+async fn a_group_dm_alerts_through_the_msc4563_rule() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!groupdm:example.org");
+    let own = client.user_id().unwrap().to_owned();
+    let friend = user_id!("@friend:example.org");
+    let other = user_id!("@other:example.org");
+    let factory = EventFactory::new().room(room_id).sender(friend);
+    let members = [own.as_ref(), friend, other];
+    let quiet_groups = |mut rules: Ruleset| {
+        rules
+            .set_actions(RuleKind::Underride, ".m.rule.message", vec![])
+            .unwrap();
+        rules
+    };
+    let sync_rules = async |rules: Ruleset| {
+        server
+            .mock_sync()
+            .ok_and_run(&client, |builder| {
+                builder.add_global_account_data(factory.push_rules(rules));
+            })
+            .await;
+    };
+    server
+        .mock_sync()
+        .ok_and_run(&client, |builder| {
+            builder.add_joined_room(
+                JoinedRoomBuilder::new(room_id)
+                    .add_state_bulk(members.iter().map(|member| factory.member(*member).into()))
+                    .set_joined_members_count(3),
+            );
+            builder.add_global_account_data(factory.direct().add_user(friend.to_owned(), room_id));
+        })
+        .await;
+    let room = client.get_room(room_id).unwrap();
+    let (synced, mut alerts) = tokio::sync::mpsc::unbounded_channel();
+    client
+        .register_notification_handler(move |notification, _, _| {
+            let synced = synced.clone();
+            async move {
+                synced.send(notification.actions).unwrap();
+            }
+        })
+        .await;
+
+    sync_rules(quiet_groups(Ruleset::server_default(&own))).await;
+    let raw: ruma::serde::Raw<ruma::events::AnySyncTimelineEvent> = factory
+        .text_msg("hey")
+        .event_id(ruma::event_id!("$hey"))
+        .into_raw_sync();
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id).add_timeline_event(raw.clone()),
+        )
+        .await;
+    let actions = alerts.try_recv().expect("the sync alerts for the message");
+    assert!(notifications::notifies(&actions));
+    assert!(actions.iter().any(|action| action.sound().is_some()));
+    let push = room.push_context().await.unwrap().unwrap();
+    assert!(notifications::notifies(&push.for_event(&raw).await));
+
+    sync_rules(quiet_groups(legacy_rules(&own))).await;
+    let push = room.push_context().await.unwrap().unwrap();
+    assert!(
+        !notifications::notifies(&push.for_event(&raw).await),
+        "without the rule a group DM follows the other rooms"
+    );
+}
+
+#[tokio::test]
+async fn a_direct_room_that_grew_is_named_as_a_group() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!grown:example.org");
+    let own = client.user_id().unwrap().to_owned();
+    let founder = user_id!("@founder:example.org");
+    let guest = user_id!("@guest:example.org");
+    let factory = EventFactory::new().room(room_id);
+    let members = [own.as_ref(), founder, guest];
+    server
+        .mock_sync()
+        .ok_and_run(&client, |builder| {
+            builder.add_joined_room(
+                JoinedRoomBuilder::new(room_id)
+                    .add_state_bulk(members.iter().map(|member| factory.member(*member).into()))
+                    .set_joined_members_count(3),
+            );
+            builder.add_global_account_data(factory.direct().add_user(founder.to_owned(), room_id));
+        })
+        .await;
+    let room = client.get_room(room_id).unwrap();
+
+    assert!(room.is_direct().await.unwrap());
+    assert!(!crate::view::is_one_to_one(&room));
+    assert_eq!(crate::view::direct_peer_name(&room).await, None);
+}
+
+#[tokio::test]
+async fn a_grown_direct_room_keeps_the_partner_converttodm_chose() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!chosen:example.org");
+    let own = client.user_id().unwrap().to_owned();
+    let partner = user_id!("@partner:example.org");
+    let backup = user_id!("@backup:example.org");
+    let factory = EventFactory::new().room(room_id);
+    let members = [own.as_ref(), partner, backup];
+    let chosen = json!({
+        "type": "moe.sable.direct_partner",
+        "content": { "user_id": partner },
+    });
+    server
+        .mock_sync()
+        .ok_and_run(&client, |builder| {
+            builder.add_joined_room(
+                JoinedRoomBuilder::new(room_id)
+                    .add_state_bulk(members.iter().map(|member| factory.member(*member).into()))
+                    .add_account_data(ruma::serde::Raw::new(&chosen).unwrap().cast_unchecked())
+                    .set_joined_members_count(3),
+            );
+            builder.add_global_account_data(factory.direct().add_user(partner.to_owned(), room_id));
+        })
+        .await;
+    let room = client.get_room(room_id).unwrap();
+
+    assert!(!crate::view::is_one_to_one(&room));
+    assert_eq!(
+        crate::view::direct_peer_name(&room).await.as_deref(),
+        Some("partner")
+    );
 }
 
 #[tokio::test]
@@ -891,8 +1077,12 @@ async fn a_two_member_room_not_marked_direct_uses_the_direct_defaults() {
         })
         .await;
     let room = client.get_room(room_id).unwrap();
+    let own = client.user_id().unwrap();
 
-    assert!(notifications::uses_direct_push_rules(&room));
+    assert!(notifications::uses_direct_push_rules(
+        &legacy_rules(own),
+        &room
+    ));
 }
 
 #[tokio::test]
@@ -911,14 +1101,13 @@ async fn a_pending_invite_does_not_make_a_room_one_to_one() {
     let room = client.get_room(room_id).unwrap();
 
     assert_eq!(room.active_members_count(), 2);
-    assert!(!notifications::uses_direct_push_rules(&room));
+    assert!(!notifications::uses_direct_push_rules(
+        &legacy_rules(client.user_id().unwrap()),
+        &room
+    ));
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one sequential flow kept in a single function"
-)]
 async fn resetting_a_bridged_dm_to_default_does_not_create_a_room_push_rule() {
     use std::collections::BTreeSet;
 
@@ -994,29 +1183,6 @@ async fn resetting_a_bridged_dm_to_default_does_not_create_a_room_push_rule() {
     })
     .await
     .unwrap();
-    Mock::given(method("GET"))
-        .and(path_regex(r"/pushrules/$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "global": core.push_rules().await.unwrap().snapshot().await
-        })))
-        .mount(server.server())
-        .await;
-    Mock::given(method("GET"))
-        .and(path_regex(
-            r"/account_data/(moe.sable.dm_notification_default|m.direct)$",
-        ))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-            "errcode":"M_NOT_FOUND", "error":"not set"
-        })))
-        .mount(server.server())
-        .await;
-    Mock::given(method("PUT"))
-        .and(path_regex(
-            r"/account_data/moe.sable.dm_notification_default$",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .mount(server.server())
-        .await;
     for direct in [true, false] {
         core.run(SetDefaultModeParams {
             direct,
@@ -1175,9 +1341,9 @@ async fn a_knock_alerts_like_a_join() {
                 builder.add_global_account_data(factory.push_rules(rules.clone()));
                 builder.add_joined_room(
                     JoinedRoomBuilder::new(room_id).add_timeline_event(
-                        matrix_sdk::ruma::serde::Raw::new(&event)
+                        ruma::serde::Raw::new(&event)
                             .unwrap()
-                            .cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>(),
+                            .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
                     ),
                 );
             })

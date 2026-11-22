@@ -5,16 +5,14 @@
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import ArrowDownIcon from 'phosphor-svelte/lib/ArrowDownIcon';
+  import ArrowUDownLeftIcon from 'phosphor-svelte/lib/ArrowUDownLeftIcon';
   import ArrowUpIcon from 'phosphor-svelte/lib/ArrowUpIcon';
+  import AtIcon from 'phosphor-svelte/lib/AtIcon';
   import CheckIcon from 'phosphor-svelte/lib/CheckIcon';
 
-  import type {
-    MemberView,
-    PerMessageProfileView,
-    TimelineItemView,
-  } from '#src/generated/protocol';
+  import type { MemberView, TimelineItemView } from '#src/generated/protocol';
   import { i18n } from '#lib/i18n.js';
-  import { dismissKeyboardOnScroll } from '#lib/platform/keyboard.js';
+  import { dismissKeyboardOnScroll, keepKeyboardOnTap } from '#lib/platform/keyboard.js';
   import { windowActivity } from '#lib/platform/window-activity.js';
   import type { RoomTimeline } from '#lib/rooms/timeline.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
@@ -35,9 +33,12 @@
   import EmptyState from '#lib/ui/primitives/EmptyState.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
+  import UnreadBadge from '#lib/ui/primitives/UnreadBadge.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import { rovingFocus } from '#lib/ui/roving-focus.js';
-  import { isEditableTarget } from '#lib/ui/shortcuts/binding.js';
+  import { isDialogOpen, isEditableTarget, matchesBinding } from '#lib/ui/shortcuts/binding.js';
+  import { bindingFor } from '#lib/ui/shortcuts/bindings.svelte.js';
+  import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
 
   import MessageContextMenu from '../messages/MessageContextMenu.svelte';
   import MessageDialogHost from '../messages/MessageDialogHost.svelte';
@@ -47,33 +48,28 @@
   import { LoadRetry } from './load-retry';
   import TimelineItem from './TimelineItem.svelte';
   import TimelineMemberGroup from './TimelineMemberGroup.svelte';
+  import TimelineBeforeJoinGroup from './TimelineBeforeJoinGroup.svelte';
   import TimelineReadReceipt from './TimelineReadReceipt.svelte';
   import TimelineAnnouncements from './TimelineAnnouncements.svelte';
   import TimelineSkeleton from './TimelineSkeleton.svelte';
   import TypingIndicator, { type TypingUser } from './TypingIndicator.svelte';
-  import type { MatrixLink } from '#lib/rooms/matrix-link.js';
-  import { groupMemberEvents } from '../members/member-groups';
   import { TimelineEventIndex } from './timeline-event-index';
   import {
     cumulativeReadBy,
     cumulativeReadTimestamps,
-    isCollapsed,
     latestEventId,
-    mergeAggregations,
     personaLookup,
     replyTarget,
-    unreadCountAfter,
-    visibleAggregations,
-    visibleTimelineItems,
-    withDateDividers,
-    withReadMarkerBefore,
     type ReplyDirection,
   } from './timeline-format';
   import { TimelinePagination } from './timeline-pagination.svelte.js';
   import { TimelineFocus } from './timeline-focus.svelte.js';
+  import { TimelineReadPosition } from './timeline-read-position.svelte.js';
+  import { TimelineReturnStack } from './timeline-return-stack.svelte.js';
+  import { TimelineMentions } from './timeline-mentions.svelte.js';
   import { TimelineFuture } from './timeline-future.svelte.js';
   import { TimelineHistoryController } from './timeline-history';
-  import { TimelineIdentityTracker } from './timeline-identity';
+  import { holdsEvent, TimelineRows, type RowValue } from './timeline-rows.svelte.js';
   import { TimelineUnread } from './timeline-unread.svelte.js';
   import {
     estimatedColumnPx,
@@ -83,17 +79,18 @@
     timelineLayoutStyle,
   } from './timeline-layout';
 
-  import type { MessageCallbacks } from '../messages/message-action-controller.svelte.js';
+  import type { TimelineCallbacks } from './timeline-row.svelte.js';
 
-  interface Props extends MessageCallbacks {
+  interface Props {
     timeline: RoomTimeline;
-    onSwipeMembers?: () => void;
+    callbacks?: TimelineCallbacks;
     focusEventId?: string | null;
     landingEventId?: string | null;
     replyEventId?: string | null;
     editEventId?: string | null;
     inlineEditor?: Snippet;
     onLanded?: () => void;
+    onReturnedToLatest?: () => void;
     onRequestHistory: (count?: number) => Promise<boolean>;
     onRequestFuture: () => Promise<void>;
     onRetryLoad?: () => Promise<void>;
@@ -101,27 +98,18 @@
     onRead: (eventId: string, fullyRead: boolean) => Promise<void>;
     onFullyRead?: (roomId: string, eventId: string) => void;
     hasUnread?: boolean;
+    /** Unread mentions of the reader in this timeline, oldest first. */
+    mentionEventIds?: readonly string[];
     onLoadReadMarker?: () => Promise<string | null>;
     onRequestUnread?: (eventId: string) => Promise<void>;
     onResumeLive?: () => Promise<void>;
     onMarkRead?: () => Promise<void>;
-    onMatrixLink?: (link: MatrixLink, anchor: HTMLAnchorElement) => void;
-    onSenderProfile?: (
-      userId: string,
-      anchor: HTMLElement,
-      pmp?: PerMessageProfileView | null
-    ) => void;
-    onMentionUser?: (userId: string, name: string) => void;
-    onRetrySend?: (transactionId: string) => void;
-    onCancelSend?: (transactionId: string) => void;
     currentUserId?: string | null;
     roomId?: string;
     members?: readonly MemberView[];
-    onJumpToEvent?: (eventId: string) => void;
+    onJumpToEvent?: (eventId: string, origin?: string | null) => void;
     onJumpToLive?: () => void;
-    onOpenMedia?: (eventId: string) => void;
-    onVotePoll?: (eventId: string, answers: string[]) => void;
-    onEndPoll?: (eventId: string) => void;
+    onReturnToPosition?: () => void;
     readOnly?: boolean;
     canRedactOwn?: boolean;
     canRedactOthers?: boolean;
@@ -145,6 +133,7 @@
     editEventId = null,
     inlineEditor,
     onLanded,
+    onReturnedToLatest,
     onRequestHistory,
     onRequestFuture,
     onRetryLoad,
@@ -152,32 +141,18 @@
     onRead,
     onFullyRead,
     hasUnread = false,
+    mentionEventIds = [],
     onLoadReadMarker,
     onRequestUnread,
     onResumeLive,
     onMarkRead,
-    onMatrixLink,
-    onCopyLink,
-    onMarkUnread,
-    onSenderProfile,
-    onMentionUser,
-    onRetrySend,
-    onCancelSend,
+    callbacks = {},
     currentUserId,
-    onToggleReaction,
-    onReply,
-    onSwipeMembers,
-    onCancelContext,
-    onOpenThread,
-    onEdit,
-    onDelete,
     roomId,
     members = [],
     onJumpToEvent,
     onJumpToLive,
-    onOpenMedia,
-    onVotePoll,
-    onEndPoll,
+    onReturnToPosition,
     readOnly = false,
     canRedactOwn = true,
     canRedactOthers = false,
@@ -186,7 +161,6 @@
     active = true,
     scrollLocked = false,
     nearLatest = $bindable(true),
-    /* eslint-disable-next-line no-useless-assignment */
     followingLive = $bindable(false),
     typingUsers = [],
     footTrailing,
@@ -197,14 +171,6 @@
   const dialogs = provideMessageDialogs(new MessageDialogs());
   const messageMenu = provideMessageMenu(new OpenMessageMenu());
 
-  interface RowValue {
-    item: TimelineItemView;
-    group: readonly TimelineItemView[] | null;
-    collapsed: boolean;
-    groupStart: boolean;
-    unreadCount: number;
-  }
-  const identity = new TimelineIdentityTracker();
   const unread = new TimelineUnread();
   const appLayout = new AppLayout();
   let unreadNavigation: AbortController | null = null;
@@ -219,95 +185,35 @@
   );
   const readRoomId = untrack(() => roomId);
   const viewScope = readRoomId ? `${readRoomId}:${untrack(() => threadRootId) ?? ''}` : null;
-  let readUpTo: string | null = null;
-  let fullyReadAt: string | null = null;
-  function settleFullyRead(): void {
-    if (!readRoomId || !onFullyRead || readUpTo === null || readUpTo === fullyReadAt) return;
-    fullyReadAt = readUpTo;
-    onFullyRead(readRoomId, readUpTo);
-  }
+  const readPosition = new TimelineReadPosition({
+    roomId: readRoomId ?? null,
+    timeline: () => timeline,
+    windowState: () => windowState,
+    canRead: () => revealed && viewport !== null && !unread.blocking && !markingRead,
+    onFullyRead: () => onFullyRead,
+  });
   $effect(() => {
-    if (!windowActivity.active) untrack(settleFullyRead);
+    if (!windowActivity.active) untrack(() => readPosition.settle());
   });
   const loadRetry = new LoadRetry();
   onDestroy(() => {
     unreadNavigation?.abort();
     unread.destroy();
-    settleFullyRead();
+    readPosition.settle();
     loadRetry.reset();
   });
   let followingRead = $state(false);
-  let eventItems = $derived(visibleTimelineItems(timeline.items, preferences, { readOnly }));
-  let allItems = $derived(
-    withDateDividers(
-      mergeAggregations(eventItems, visibleAggregations(timeline.aggregations, preferences), {
-        start: timeline.backwardPagination === 'end',
-        end: timeline.mode.kind === 'live' || timeline.forwardPagination === 'end',
-      })
-    )
-  );
-  let visibleItems = $derived(
-    unread.firstEventId !== null
-      ? withReadMarkerBefore(allItems, unread.firstEventId)
-      : followingRead
-        ? allItems.filter((item) => item.content.kind !== 'read_marker')
-        : allItems
-  );
-  function sameRow(next: RowValue, previous: RowValue): boolean {
-    const sameItem =
-      next.item === previous.item ||
-      (next.item.event_id === null &&
-        next.item.id === previous.item.id &&
-        next.item.timestamp === previous.item.timestamp);
-    const sameGroup =
-      next.group === previous.group ||
-      (next.group !== null &&
-        previous.group !== null &&
-        next.group.length === previous.group.length &&
-        next.group.every((member, index) => member === previous.group?.[index]));
-    return (
-      sameItem &&
-      sameGroup &&
-      next.collapsed === previous.collapsed &&
-      next.groupStart === previous.groupStart &&
-      next.unreadCount === previous.unreadCount
-    );
-  }
-  let previousEntries = new Map<string, TimelineEntry<RowValue>>();
-  let entries = $derived.by((): readonly TimelineEntry<RowValue>[] => {
-    identity.reconcile(visibleItems);
-    const units = groupMemberEvents(visibleItems);
-    const unitItems = units.map((unit) => unit.item);
-    const next = units.map(({ item, index: source, group }, index) => {
-      const collapsed =
-        !(
-          threadRootId &&
-          (item.event_id === threadRootId || unitItems[index - 1]?.event_id === threadRootId)
-        ) && isCollapsed(unitItems, index, preferences.replyPreviewStyle);
-      const entry = {
-        key: identity.key(visibleItems, source),
-        value: {
-          item,
-          group,
-          collapsed,
-          groupStart: index > 0 && !collapsed,
-          unreadCount:
-            item.content.kind === 'read_marker' ? unreadCountAfter(visibleItems, source) : 0,
-        },
-      };
-      const previous = previousEntries.get(entry.key);
-      return previous && sameRow(entry.value, previous.value) ? previous : entry;
-    });
-    previousEntries = new Map(next.map((entry) => [entry.key, entry]));
-    return next;
+  const rowModel = new TimelineRows({
+    timeline: () => timeline,
+    readOnly: () => readOnly,
+    threadRootId: () => threadRootId,
+    readMarkerBefore: () => unread.firstEventId,
+    followingRead: () => followingRead,
   });
+  const eventItems = $derived(rowModel.eventItems);
+  const visibleItems = $derived(rowModel.visibleItems);
+  const entries = $derived(rowModel.entries);
   let events = $derived(new TimelineEventIndex(timeline.items, timeline.aggregations));
-  function holdsEvent({ item, group }: RowValue, eventId: string | null): boolean {
-    if (eventId === null) return false;
-    return (
-      item.event_id === eventId || (group?.some((member) => member.event_id === eventId) ?? false)
-    );
-  }
   function entryFor(eventId: string | null): TimelineEntry<RowValue> | undefined {
     return entries.find(({ value }) => holdsEvent(value, eventId));
   }
@@ -392,22 +298,6 @@
     loadRetry.schedule(() => void onRetryLoad());
     return () => loadRetry.cancel();
   });
-  let readEventId = $derived.by(() => {
-    if (!revealed || !viewport || unread.blocking || markingRead) return null;
-    if (windowState.pinned) {
-      return (
-        latestEventId(timeline.items) ??
-        latestEventId(windowState.rows.map((row) => row.value.item))
-      );
-    }
-    if (windowState.lastFullyVisible === null) return null;
-    for (let index = windowState.rows.length - 1; index >= 0; index -= 1) {
-      const row = windowState.rows[index];
-      if (row.index <= windowState.lastFullyVisible && row.value.item.event_id)
-        return row.value.item.event_id;
-    }
-    return null;
-  });
   let atLatest = $derived(windowState.pinned && timeline.reachesLatest);
   let unreadCount = $derived(unread.count(eventItems));
   let unreadInView = $derived.by(() => {
@@ -429,7 +319,7 @@
     if (unreadInView) unread.observe(unread.firstEventId);
     else if (atLatest && opened && !jumpingUnread && !unread.background) unread.reachLatest();
   });
-  let holdAtLatest = $state(untrack(() => !preferences.openRoomsAtUnread));
+  let holdAtLatest = $state(untrack(() => !preferences.openRoomsAtUnread && hasUnread));
   let hadUnread = untrack(() => hasUnread);
   $effect(() => {
     if (hadUnread && !hasUnread && unread.initialized && !holdAtLatest)
@@ -449,6 +339,51 @@
   let futureLoading = $derived(
     revealed && !live && visibleItems.length > 0 && timeline.forwardPagination === 'loading'
   );
+  const mentions = new TimelineMentions({
+    timeline: () => timeline,
+    eventIds: () => mentionEventIds,
+  });
+  $effect(() => {
+    const { firstVisible, lastVisible, rows } = windowState;
+    // The list arrives after its message is on screen, so it has to rerun this too.
+    const mentionIds = mentionEventIds;
+    if (!reading || !revealed || !windowActivity.active) return;
+    if (firstVisible === null || lastVisible === null) return;
+    untrack(() => {
+      for (const { index, value } of rows) {
+        const eventId = value.item.event_id;
+        if (
+          index >= firstVisible &&
+          index <= lastVisible &&
+          eventId &&
+          mentionIds.includes(eventId)
+        )
+          mentions.markSeen(eventId);
+      }
+    });
+  });
+  /** The message a jump control is heading to, focused once it is on screen. */
+  let jumpFocusId = $state<string | null>(null);
+  let jumps = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const eventId = jumpFocusId;
+    const { firstVisible, lastVisible, rows } = windowState;
+    if (eventId === null || firstVisible === null || lastVisible === null) return;
+    const row = rows.find(
+      ({ index, value }) =>
+        index >= firstVisible && index <= lastVisible && holdsEvent(value, eventId)
+    );
+    if (!row) return;
+    jumpFocusId = null;
+    // A reader who moved on to the composer or elsewhere keeps their focus.
+    const focused = document.activeElement;
+    if (focused === null || focused === document.body || jumps?.contains(focused))
+      articleFor(row.key)?.focus({ preventScroll: true });
+  });
+  const returns = new TimelineReturnStack({
+    entries: () => entries,
+    lastVisible: () => windowState.lastVisible,
+  });
   let historyLoadingVisible = $state(false);
   $effect(() => {
     if (historyLoading) {
@@ -488,6 +423,7 @@
   });
   function windowChanged(state: TimelineWindowState<RowValue>): void {
     const wasScrolling = windowState.scrolling;
+    if (state.pinned && !windowState.pinned) returns.clear();
     windowState = state;
     const node = viewport;
     const height = node?.clientHeight ?? 0;
@@ -508,6 +444,7 @@
     if (!revealed) return;
     if (delta < 0) holdAtLatest = false;
     if (delta > 0 && atLatest && windowActivity.active && !holdAtLatest) unread.reachLatest();
+    if (delta > 0 && live && windowState.pinned) onReturnedToLatest?.();
     historyController.observeScroll(delta < 0, nearLatest);
     if (
       timeline.mode.kind !== 'live' &&
@@ -994,10 +931,10 @@
     if (windowState.pinned) followingRead = true;
     const fullyRead = !holdAtLatest && eventId === latestEventId(timeline.items);
     await onRead(eventId, fullyRead);
-    if (!holdAtLatest) readUpTo = eventId;
-    if (fullyRead) fullyReadAt = eventId;
+    if (!holdAtLatest) readPosition.advance(eventId);
+    if (fullyRead) readPosition.markFullyRead(eventId);
     if (disposed) {
-      settleFullyRead();
+      readPosition.settle();
       return;
     }
     if (!holdAtLatest && eventId === latestEventId(timeline.items)) unread.dismiss();
@@ -1074,6 +1011,12 @@
     unreadNavigation?.abort();
     unread.clear();
   }
+  export function markUnreadFrom(eventId: string, readEventId: string | null): void {
+    unreadNavigation?.abort();
+    unreadError = null;
+    holdAtLatest = false;
+    unread.markUnreadFrom(eventId, readEventId);
+  }
   let replayingEventId = $state<string | null>(null);
   async function replayHighlight(eventId: string): Promise<void> {
     replayingEventId = eventId;
@@ -1088,6 +1031,19 @@
     void controller.jumpTo(key, 'center', !shouldReduceMotion());
     if (eventId === (focusEventId ?? landedEventId)) void replayHighlight(eventId);
     return true;
+  }
+
+  /** The event to come back to, or null at the latest messages, where jumping to latest already returns. */
+  export function capturePosition(preferredEventId?: string | null): string | null {
+    if (!controller || !opened) return null;
+    if (preferredEventId != null && entryFor(preferredEventId)) return preferredEventId;
+    if (windowState.pinned && live) return null;
+    const first = windowState.firstVisible;
+    if (first === null) return null;
+    for (const row of windowState.rows) {
+      if (row.index >= first && row.value.item.event_id) return row.value.item.event_id;
+    }
+    return null;
   }
 
   export function stepReply(direction: ReplyDirection): string | null {
@@ -1105,7 +1061,28 @@
     const viewportRect = node.getBoundingClientRect();
     return rowRect.top >= viewportRect.top && rowRect.bottom <= viewportRect.bottom;
   }
+  function jumpFrom(origin: string | null, target: string): void {
+    if (origin !== null) returns.push(origin);
+    onJumpToEvent?.(target, origin);
+  }
+  function jumpDown(): void {
+    const eventId = returns.eventId;
+    if (eventId === null || !onJumpToEvent) {
+      jumpToLatest();
+      return;
+    }
+    returns.popThrough(eventId);
+    jumpFocusId = eventId;
+    onJumpToEvent(eventId);
+  }
+  function jumpToMention(): void {
+    const eventId = mentions.next((target) => entryFor(target) !== undefined);
+    if (eventId === null) return;
+    jumpFocusId = eventId;
+    onJumpToEvent?.(eventId);
+  }
   function jumpToLatest(): void {
+    returns.clear();
     focus.cancel();
     unreadNavigation?.abort();
     historyController.finishHistoryFill();
@@ -1118,7 +1095,24 @@
       return;
     }
     unread.reachLatest();
+    onReturnedToLatest?.();
     void controller?.jumpTo(null, 'start', !shouldReduceMotion());
+  }
+  function onJumpShortcut(event: KeyboardEvent): void {
+    if (event.defaultPrevented || event.isComposing || !active) return;
+    if (isEditableTarget(event.target) || isDialogOpen()) return;
+    const mac = isMacPlatform();
+    const pressed = (id: string): boolean => {
+      const binding = bindingFor(id);
+      return binding !== undefined && matchesBinding(binding, event, mac);
+    };
+    if (pressed('room.nextMention') && mentions.pending.length > 0) {
+      event.preventDefault();
+      jumpToMention();
+    } else if (pressed('room.jumpBack') && returns.eventId !== null) {
+      event.preventDefault();
+      jumpDown();
+    }
   }
   function onEscape(event: KeyboardEvent): void {
     if (
@@ -1159,21 +1153,8 @@
     selected={replyEventId !== null && item.event_id === replyEventId}
     editing={edited}
     editor={edited ? inlineEditor : undefined}
-    {onMatrixLink}
-    {onCopyLink}
-    {onMarkUnread}
-    {onSenderProfile}
-    {onMentionUser}
-    {onRetrySend}
-    {onCancelSend}
+    {...callbacks}
     {currentUserId}
-    {onToggleReaction}
-    {onReply}
-    {onSwipeMembers}
-    {onCancelContext}
-    {onOpenThread}
-    {onEdit}
-    {onDelete}
     {canRedactOwn}
     {canRedactOthers}
     {canPin}
@@ -1182,21 +1163,23 @@
     layout={preferences.layout}
     alignOwn={preferences.alignOwnMessages}
     avatarsInHeaders={preferences.avatarsInMessageHeaders}
-    {onJumpToEvent}
-    {onOpenMedia}
-    {onVotePoll}
-    {onEndPoll}
+    onJumpToEvent={onJumpToEvent && ((target: string) => jumpFrom(item.event_id, target))}
     {events}
     onMenuOpenChange={setMenuOpen}
     {roomId}
   />
 {/snippet}
 
-<svelte:window onkeydown={onEscape} />
+<svelte:window
+  onkeydown={(event) => {
+    onJumpShortcut(event);
+    onEscape(event);
+  }}
+/>
 
 <TimelineReadReceipt
   {timeline}
-  visibleEventId={readEventId}
+  visibleEventId={readPosition.eventId}
   enabled={reading && !unread.blocking && !markingRead && !timeline.resumingLive}
   {atLatest}
   onRead={markRead}
@@ -1213,12 +1196,12 @@
   receiptTimestamps={(item) => receiptTimestampsByItem.get(item.id) ?? item.read_timestamps}
   {canRedactOwn}
   {canRedactOthers}
-  {onMatrixLink}
-  {onSenderProfile}
-  {onToggleReaction}
-  {onReply}
-  {onOpenThread}
-  {onDelete}
+  onMatrixLink={callbacks.onMatrixLink}
+  onSenderProfile={callbacks.onSenderProfile}
+  onToggleReaction={callbacks.onToggleReaction}
+  onReply={callbacks.onReply}
+  onOpenThread={callbacks.onOpenThread}
+  onDelete={callbacks.onDelete}
 />
 
 {#if timeline.error && !emptyFailure}
@@ -1314,6 +1297,7 @@
         {@attach userScrollMarker}
         {@attach scrollLock(scrollLocked || menuOpen)}
         {@attach dismissKeyboardOnScroll}
+        {@attach keepKeyboardOnTap}
         role="feed"
       >
         <div class={['items', `layout-${preferences.layout}`]}>
@@ -1332,11 +1316,13 @@
                 {/if}
                 {#if timelineStart && item.content.kind === 'timeline_start'}
                   {@render timelineStart()}
+                {:else if group && row.value.kind === 'before_join'}
+                  <TimelineBeforeJoinGroup items={group} renderItem={timelineItem} />
                 {:else if group}
                   <TimelineMemberGroup
                     items={group}
                     {members}
-                    {onSenderProfile}
+                    onSenderProfile={callbacks.onSenderProfile}
                     renderItem={timelineItem}
                   />
                 {:else}
@@ -1358,6 +1344,9 @@
         description={i18n.t('timeline.focusFailedHint')}
       >
         {#snippet actions()}
+          {#if onReturnToPosition}
+            <Button type="button" onclick={onReturnToPosition}>{i18n.t('common.back')}</Button>
+          {/if}
           {#if onJumpToLive}
             <Button type="button" onclick={onJumpToLive}>{i18n.t('timeline.jumpToLatest')}</Button>
           {/if}
@@ -1382,34 +1371,88 @@
     {/if}
   </div>
 
-  {#if revealed && visibleItems.length > 0 && (live ? jumpToLatestVisible : onJumpToLive !== undefined)}
-    {@const jumpLabel = i18n.t('timeline.jumpToLatest')}
-    <div
-      class="jump-to-latest-motion"
-      in:fly={{ y: 4, duration: motionMs(200), easing: cubicOut }}
-      out:fade={{ duration: motionMs(MOTION_MS.quick) }}
-    >
-      <Tooltip label={jumpLabel}>
-        {#snippet trigger({ props })}
-          <IconButton
-            {...props}
-            type="button"
-            class="jump-to-latest"
-            variant="secondary"
-            size="medium"
-            label={jumpLabel}
-            onclick={jumpToLatest}
+  {#if revealed && visibleItems.length > 0}
+    <div class="timeline-jumps" bind:this={jumps}>
+      {#if mentions.pending.length > 0 && onJumpToEvent}
+        {@const mentionLabel = i18n.t('timeline.jumpToMention', {
+          count: mentions.pending.length,
+        })}
+        <div
+          class="jump-to-mention-motion"
+          in:fly={{ y: 4, duration: motionMs(200), easing: cubicOut }}
+          out:fade={{ duration: motionMs(MOTION_MS.quick) }}
+        >
+          <Tooltip label={mentionLabel}>
+            {#snippet trigger({ props })}
+              <IconButton
+                {...props}
+                type="button"
+                class="jump-to-mention"
+                variant="secondary"
+                size="medium"
+                label={mentionLabel}
+                aria-busy={mentions.jumping}
+                onclick={jumpToMention}
+              >
+                {#if mentions.jumping}<Spinner />{:else}<AtIcon />{/if}
+              </IconButton>
+            {/snippet}
+          </Tooltip>
+          <UnreadBadge
+            class="mention-count"
+            counts={{ unread: 0, highlight: mentions.pending.length }}
+            aria-hidden="true"
+          />
+        </div>
+      {/if}
+      <div class="jump-to-latest-slot">
+        {#if live ? jumpToLatestVisible || returns.eventId !== null : onJumpToLive !== undefined}
+          {@const jumpLabel = i18n.t(
+            returns.eventId === null ? 'timeline.jumpToLatest' : 'timeline.jumpBack'
+          )}
+          <div
+            class="jump-to-latest-motion"
+            in:fly={{ y: 4, duration: motionMs(200), easing: cubicOut }}
+            out:fade={{ duration: motionMs(MOTION_MS.quick) }}
           >
-            <ArrowDownIcon />
-          </IconButton>
-        {/snippet}
-      </Tooltip>
+            <Tooltip label={jumpLabel}>
+              {#snippet trigger({ props })}
+                {#if returns.eventId === null}
+                  <IconButton
+                    {...props}
+                    type="button"
+                    class="jump-to-latest"
+                    variant="secondary"
+                    size="medium"
+                    label={jumpLabel}
+                    onclick={jumpDown}
+                  >
+                    <ArrowDownIcon />
+                  </IconButton>
+                {:else}
+                  <Button
+                    {...props}
+                    type="button"
+                    class="jump-to-latest jump-back"
+                    variant="secondary"
+                    aria-label={jumpLabel}
+                    onclick={jumpDown}
+                  >
+                    <ArrowUDownLeftIcon class="mirror-rtl" aria-hidden="true" />
+                    {i18n.t('common.back')}
+                  </Button>
+                {/if}
+              {/snippet}
+            </Tooltip>
+          </div>
+        {/if}
+      </div>
     </div>
   {/if}
 
   {#if typingUsers.length > 0 || footTrailingVisible}
     <div class="timeline-foot">
-      <TypingIndicator users={typingUsers} onProfile={onSenderProfile} />
+      <TypingIndicator users={typingUsers} onProfile={callbacks.onSenderProfile} />
       {#if footTrailing && footTrailingVisible}
         <div class="foot-trailing">{@render footTrailing()}</div>
       {/if}
@@ -1485,13 +1528,15 @@
 
   .history-loading {
     inset-block-start: var(--space-200);
-    inset-inline-start: 50%;
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
+    left: 50%;
     transform: translateX(-50%);
   }
 
   .future-loading {
     inset-block-end: var(--space-200);
-    inset-inline-start: 50%;
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
+    left: 50%;
     transform: translateX(-50%);
   }
 
@@ -1576,6 +1621,10 @@
     padding-top: 0;
   }
 
+  .layout-bubble .item {
+    padding-bottom: 0;
+  }
+
   .unread-bar {
     align-items: center;
     background: var(--primary-container);
@@ -1631,16 +1680,43 @@
     flex: none;
   }
 
-  .jump-to-latest-motion {
+  .timeline-jumps {
+    align-items: center;
     inset-inline: 0;
     bottom: calc(var(--timeline-foot-height) + var(--space-200));
+    display: flex;
+    gap: var(--space-200);
     margin-inline: auto;
+    pointer-events: none;
     position: absolute;
     width: fit-content;
     z-index: 4;
   }
 
-  :global(button.jump-to-latest) {
+  .jump-to-mention-motion {
+    pointer-events: auto;
+    position: relative;
+  }
+
+  /* Kept empty while the control is away so the mention control never moves. */
+  .jump-to-latest-slot {
+    display: flex;
+    height: var(--timeline-indicator-size);
+    min-width: var(--timeline-indicator-size);
+  }
+
+  .jump-to-latest-motion {
+    pointer-events: auto;
+  }
+
+  .jump-to-mention-motion :global(.mention-count) {
+    inset-block-start: calc(var(--space-100) * -1);
+    inset-inline-end: calc(var(--space-100) * -1);
+    position: absolute;
+  }
+
+  :global(button.jump-to-latest),
+  :global(button.jump-to-mention) {
     --button-height: var(--timeline-indicator-size);
     --button-container: var(--surface-var-container);
     --button-container-hover: var(--surface-var-container-hover);
@@ -1651,5 +1727,10 @@
     background-image: none;
     border-radius: 50%;
     box-shadow: var(--shadow-float);
+  }
+
+  :global(button.btn.jump-back) {
+    border-radius: var(--radii-pill);
+    border-width: var(--border-width);
   }
 </style>

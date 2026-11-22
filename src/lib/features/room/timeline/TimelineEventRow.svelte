@@ -1,5 +1,6 @@
 <script lang="ts">
   import '#lib/ui/primitives/menu.css';
+  import './timeline-highlight.css';
   import MessageActions from '../messages/MessageActions.svelte';
   import MessageReactions from '../messages/MessageReactions.svelte';
   import { TimelineRow, type TimelineItemProps } from './timeline-row.svelte';
@@ -49,6 +50,7 @@
     overrideCosmetics,
     replySender: null,
     hasLinkPreviews: item.link_previews_removed !== true && item.bundled_link_previews.length > 0,
+    linkPreviews: [],
     onToggleReaction,
     onMarkUnread,
     onReply,
@@ -189,59 +191,10 @@
   }
 
   .message.highlighted {
-    --message-highlight-duration: 6s;
-
     border-radius: var(--radius);
   }
 
-  @keyframes jump {
-    0% {
-      background-color: var(--primary-container);
-      color: var(--primary-on-container);
-    }
-
-    16% {
-      background-color: var(--primary-container-active);
-      color: var(--primary-on-container);
-    }
-
-    33%,
-    100% {
-      background-color: transparent;
-      color: inherit;
-    }
-  }
-
-  @media (prefers-reduced-motion: no-preference) {
-    :global(html:not([data-reduced-motion='on'])) .message.highlighted {
-      animation: jump var(--message-highlight-duration) var(--motion-easing-standard);
-    }
-  }
-
-  @keyframes jump-reduced {
-    0% {
-      background-color: var(--primary-container);
-      color: var(--primary-on-container);
-    }
-
-    33%,
-    100% {
-      background-color: transparent;
-      color: inherit;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .message.highlighted {
-      animation: jump-reduced var(--message-highlight-duration) steps(1, end);
-    }
-  }
-
-  :global(html[data-reduced-motion='on']) .message.highlighted {
-    animation: jump-reduced var(--message-highlight-duration) steps(1, end);
-  }
-
-  @media (--app-layout) and (any-hover: hover) and (any-pointer: fine) {
+  @media (hover: hover) and (pointer: fine) {
     .message:hover {
       background-color: var(--surface-container-hover);
     }

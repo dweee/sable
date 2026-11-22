@@ -12,6 +12,25 @@ export class LocalNetworkBlockedError extends Error {
   }
 }
 
+const privateRanges = [
+  /^10\./,
+  /^127\./,
+  /^169\.254\./,
+  /^172\.(1[6-9]|2\d|3[01])\./,
+  /^192\.168\./,
+  /^\[(::1|f[cd][0-9a-f]{2}:.*|fe[89ab][0-9a-f]:.*)\]$/i,
+];
+
+export function isLocalNetworkHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    privateRanges.some((range) => range.test(host))
+  );
+}
+
 export function browserGatesCoreNetwork(): boolean {
   return !isTauri();
 }
@@ -30,9 +49,36 @@ export async function localNetworkDenied(): Promise<boolean> {
   return false;
 }
 
-export async function requestAndroidLocalNetwork(): Promise<boolean> {
-  if (!isAndroid()) return false;
+let askedAndroid = false;
+// Until the next launch only, so a mistaken tap is not a dead end.
+let declinedAndroid = false;
+
+async function androidWouldPrompt(): Promise<boolean> {
+  const current = await invoke<Record<string, string>>('plugin:sable-push|check_permissions');
+  return current.localNetwork.startsWith('prompt');
+}
+
+/** Whether to offer the Android prompt: neither it nor the offer has been answered. */
+export async function androidLocalNetworkUnasked(): Promise<boolean> {
+  if (!isAndroid() || askedAndroid || declinedAndroid) return false;
   try {
+    return await androidWouldPrompt();
+  } catch (error) {
+    console.warn('[sable auth] local network permission unavailable', error);
+    return false;
+  }
+}
+
+export function declineAndroidLocalNetwork(): void {
+  declinedAndroid = true;
+}
+
+// The request opens a system activity even with nothing to ask, which closes the keyboard.
+export async function requestAndroidLocalNetwork(): Promise<boolean> {
+  if (!isAndroid() || askedAndroid) return false;
+  try {
+    if (!(await androidWouldPrompt())) return false;
+    askedAndroid = true;
     const states = await invoke<Record<string, string>>('plugin:sable-push|request_permissions', {
       permissions: ['localNetwork'],
     });
@@ -40,5 +86,36 @@ export async function requestAndroidLocalNetwork(): Promise<boolean> {
   } catch (error) {
     console.warn('[sable auth] local network permission unavailable', error);
     return false;
+  }
+}
+
+export async function probeFromPage(url: URL, init: RequestInit): Promise<void> {
+  const probe = () => fetch(url, init);
+  await probe().catch(async (error: unknown) => {
+    if (!(await requestAndroidLocalNetwork())) throw error;
+    return probe();
+  });
+}
+
+export async function withLocalNetworkAccess(
+  serviceUrl: string,
+  connect: () => Promise<void>
+): Promise<void> {
+  try {
+    await connect();
+  } catch (error) {
+    const origin = new URL(serviceUrl.replace(/^ws/, 'http'));
+    if (!isLocalNetworkHost(origin.hostname)) throw error;
+    if (isAndroid()) {
+      if (!(await requestAndroidLocalNetwork())) throw error;
+      return connect();
+    }
+    if (!browserGatesCoreNetwork()) throw error;
+    try {
+      await probeFromPage(origin, { mode: 'no-cors' });
+    } catch {
+      throw new LocalNetworkBlockedError(origin.hostname);
+    }
+    await connect();
   }
 }

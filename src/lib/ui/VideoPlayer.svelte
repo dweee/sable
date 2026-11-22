@@ -17,13 +17,15 @@
   import MediaImage from '#lib/ui/MediaImage.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import { animationsPaused } from '#lib/ui/still-frame.js';
+  import { playsVideo } from '#lib/ui/video-codec.js';
   import { videoPlayback } from '#lib/ui/video-playback.js';
   import '#lib/ui/media-size.css';
 
   const BLURHASH_POSTER_WIDTH = 32;
 
   interface Props {
-    source: string;
+    source: string | null;
+    resolveSource?: () => Promise<string | null>;
     mime: string | null;
     filename: string;
     width?: number | null;
@@ -33,11 +35,13 @@
     thumbnailMime?: string | null;
     playback?: VideoPlaybackView | null;
     size?: number | null;
+    onOpen?: () => void;
     class?: string;
   }
 
   let {
     source,
+    resolveSource,
     mime,
     filename,
     width = null,
@@ -47,6 +51,7 @@
     thumbnailMime = null,
     playback = null,
     size = null,
+    onOpen,
     class: className = '',
   }: Props = $props();
   const core = useCoreClient();
@@ -63,8 +68,11 @@
   let mediaLabel = $derived(filename || i18n.t('timeline.videoAttachment'));
   /* Keyed by source: a recycled tile must not inherit another's start. */
   let startedSource = $state<string | null>(null);
+  let resolved = $state<string | null>(null);
+  let resolving = $state(false);
+  let playable = $derived(source ?? resolved);
   let video = $derived(videoPlayback(playback));
-  let started = $derived(startedSource === source || video.autoplay);
+  let started = $derived(playable !== null && (startedSource === playable || video.autoplay));
   let awaitingPlay = $derived(!started && url === null);
   let posterFailed = $state<string | null>(null);
   let videoElement = $state<HTMLVideoElement>();
@@ -82,6 +90,21 @@
     }
   });
   let unsupportedUrl = $state<string | null>(null);
+  let checkedUrl = $state<string | null>(null);
+
+  $effect(() => {
+    const current = url;
+    if (current === null) return;
+    let active = true;
+    void playsVideo(current).then((plays) => {
+      if (!active) return;
+      if (!plays) unsupportedUrl = current;
+      checkedUrl = current;
+    });
+    return () => {
+      active = false;
+    };
+  });
   let aspectRatio = $derived(
     typeof width === 'number' &&
       typeof height === 'number' &&
@@ -107,7 +130,7 @@
     }
   });
   let retryWait = $derived(Math.max(0, retryAt - clock));
-  const loading = mediaProgress(core, () => (!url && !failed ? source : null));
+  const loading = mediaProgress(core, () => (!url && !failed ? playable : null));
   let retryLabel = $derived(
     retryWait === 0
       ? i18n.t('common.retry')
@@ -131,14 +154,19 @@
     let active = true;
     const retry = loadGeneration > 0 && retryNextLoad;
     retryNextLoad = false;
+    const wanted = playable;
+    if (wanted === null) {
+      url = null;
+      return;
+    }
     failed = false;
-    if (source !== backoffSource) {
-      backoffSource = source;
+    if (wanted !== backoffSource) {
+      backoffSource = wanted;
       retryCount = 0;
       retryAt = 0;
     }
-    const release = holdMediaUrl(core, source, 0, 0);
-    const cached = cachedMediaUrl(core, source, 0, 0);
+    const release = holdMediaUrl(core, wanted, 0, 0);
+    const cached = cachedMediaUrl(core, wanted, 0, 0);
     if (cached !== undefined) {
       url = cached;
       return release;
@@ -147,7 +175,7 @@
     url = null;
     if (!started) return release;
     const load = retry ? retryMediaUrl : loadMediaUrl;
-    void load(core, source, 0, 0, mime)
+    void load(core, wanted, 0, 0, mime)
       .then((nextUrl) => {
         if (!active) return;
         url = nextUrl;
@@ -174,12 +202,26 @@
     void downloadUrl(url, mediaLabel);
   }
 
-  function play(): void {
-    startedSource = source;
+  async function play(): Promise<void> {
+    if (playable === null) {
+      resolving = true;
+      failed = false;
+      resolved = (await resolveSource?.()) ?? null;
+      resolving = false;
+      if (resolved === null) {
+        failed = true;
+        return;
+      }
+    }
+    startedSource = playable;
   }
 
   function retry(): void {
     if (retryWait > 0) return;
+    if (playable === null) {
+      void play();
+      return;
+    }
     retryCount += 1;
     retryAt = 0;
     failed = false;
@@ -210,7 +252,7 @@
         {i18n.t('common.download')}
       </LinkButton>
     </span>
-  {:else if url}
+  {:else if url && checkedUrl === url}
     <video
       bind:this={videoElement}
       class="media-content media-video"
@@ -232,6 +274,14 @@
     >
       {filename}
     </video>
+    {#if !video.controls && onOpen}
+      <button
+        type="button"
+        class="media-open"
+        onclick={onOpen}
+        aria-label={i18n.t('timeline.openMedia', { name: mediaLabel })}
+      ></button>
+    {/if}
   {:else}
     {#if thumbnail && posterFailed !== thumbnail}
       <MediaImage
@@ -252,7 +302,7 @@
       <img class="media-loading-poster" src={posterUrl} alt="" aria-hidden="true" />
     {/if}
   {/if}
-  {#if awaitingPlay && !failed}
+  {#if awaitingPlay && !failed && !resolving}
     <button
       type="button"
       class="media-play"
@@ -264,7 +314,7 @@
       </span>
     </button>
     {#if size !== null && size > 0}<span class="media-image-size">{formatByteSize(size)}</span>{/if}
-  {:else if !failed && !url && !!started}
+  {:else if !failed && (!url || checkedUrl !== url) && (started || resolving)}
     <span class="media-loading">
       <span class="media-loading-status">
         <Spinner small />
@@ -340,6 +390,15 @@
     width: 100%;
   }
 
+  .media-open {
+    background: none;
+    border: 0;
+    cursor: pointer;
+    inset: 0;
+    padding: 0;
+    position: absolute;
+  }
+
   .media-play-badge {
     align-items: center;
     background: var(--surface-container);
@@ -390,6 +449,6 @@
   }
 
   .retry-media {
-    margin-left: var(--space-300);
+    margin-inline-start: var(--space-300);
   }
 </style>

@@ -30,6 +30,8 @@ function membership(change: 'left' | 'joined', userId: string, name: string): Ti
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    shared_by: null,
+    redacted_on_ban: null,
     timestamp: 0,
     is_own: false,
     mention: 'none',

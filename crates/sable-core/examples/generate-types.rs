@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         _ => return Err("usage: generate-types [--check]".into()),
     };
 
-    let mut types = specta::Types::default()
+    let mut types = Types::default()
         .register::<RpcError>()
         .register::<CoreEvent>()
         .register::<AttachmentInfoView>()
@@ -161,6 +161,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .register::<sable_model::spaces::SectionInputs>()
         .register::<sable_model::spaces::ChildOrderOverride>()
         .register::<sable_model::spaces::SuggestedOverride>()
+        .register::<sable_model::space_graph::SpaceRoomInput>()
+        .register::<sable_model::space_graph::SpaceLeaveOrder>()
+        .register::<sable_model::space_order::ChildOrder>()
         .register::<sable_model::sidebar::LayoutRef>()
         .register::<sable_model::sidebar::DropInstruction>()
         .register::<sable_model::event_preview::EventPreview>()

@@ -145,10 +145,12 @@ test.each([false, true])('fetches rich text as plain text (encrypted: %s)', asyn
           content,
           sender: '@alice:example.org',
           sender_display_name: 'Alice',
+          sender_avatar_url: null,
           room_name: 'Garden',
           room_avatar_url: null,
           encrypted: true,
           noisy: false,
+          mention: false,
         },
       }
     )
@@ -187,10 +189,12 @@ test('an encrypted event takes what the open tab decrypted, and remembers it was
           content: { body: 'secret' },
           sender: '@alice:example.org',
           sender_display_name: 'Alice',
+          sender_avatar_url: null,
           room_name: 'Alice',
           room_avatar_url: null,
           encrypted: true,
           noisy: false,
+          mention: false,
         },
       }
     )
@@ -473,10 +477,12 @@ test('an app tab supplies already validated RTC presentation', async () => {
         content: { notification_type: 'ring', lifetime: 85000 },
         sender: '@alice:example.org',
         sender_display_name: 'Alice',
+        sender_avatar_url: null,
         room_name: 'Room',
         room_avatar_url: null,
         encrypted: false,
         noisy: true,
+        mention: false,
       },
     }
   );

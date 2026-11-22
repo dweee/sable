@@ -80,6 +80,7 @@ export interface NativeNotificationPolicy {
   clearOnRead: boolean;
   privateReceipts: boolean;
   quietWhenActiveElsewhere: boolean;
+  inAppBanners: boolean;
 }
 
 export async function setNativeNotificationPolicy(policy: NativeNotificationPolicy): Promise<void> {
@@ -136,9 +137,14 @@ export async function playNativeChime(volume: number): Promise<void> {
   await invoke('plugin:sable-push|play_chime', { volume });
 }
 
+export async function playIosChime(): Promise<void> {
+  await invoke('play_notification_chime');
+}
+
 export interface NativePushTransport {
   provider: string | null;
   distributor: string | null;
+  fcmAvailable?: boolean;
 }
 
 export interface NativeDevicePusher {
@@ -165,10 +171,16 @@ export async function nativeDevicePusher(
 export async function nativePushTransport(): Promise<NativePushTransport | null> {
   if (!isTauri()) return null;
   try {
-    const transport = await invoke<{ provider?: string; distributor?: string }>(
-      'plugin:notifications|push_transport'
-    );
-    return { provider: transport.provider ?? null, distributor: transport.distributor ?? null };
+    const transport = await invoke<{
+      provider?: string;
+      distributor?: string;
+      fcmAvailable?: boolean;
+    }>('plugin:notifications|push_transport');
+    return {
+      provider: transport.provider ?? null,
+      distributor: transport.distributor ?? null,
+      fcmAvailable: transport.fcmAvailable ?? false,
+    };
   } catch {
     return null;
   }

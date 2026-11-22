@@ -3,7 +3,7 @@
 import { render, screen, within } from '@testing-library/svelte';
 import { userEvent } from '@testing-library/user-event';
 import { tick } from 'svelte';
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type {
   MemberView,
@@ -33,6 +33,14 @@ Object.assign(core.rpc.members, {
 
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
+const afterOverlayPops = vi.hoisted(() => vi.fn(() => Promise.resolve()));
+afterEach(() => {
+  afterOverlayPops.mockImplementation(() => Promise.resolve());
+});
+vi.mock('#lib/platform/overlay-back.svelte.js', async (original) => ({
+  ...(await original<typeof import('#lib/platform/overlay-back.svelte.js')>()),
+  afterOverlayPops,
+}));
 
 import { goto } from '#lib/test-support/app-navigation.js';
 
@@ -391,6 +399,41 @@ test('asks before the Message button creates a new chat', async () => {
   });
 });
 
+test('starting a chat waits for the closed dialog to leave history before navigating', async () => {
+  core.rpc.rooms.createDm.mockClear();
+  core.rpc.rooms.createDm.mockResolvedValue('!dm:example.org');
+  vi.mocked(goto).mockClear();
+  let release!: () => void;
+  const popped = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  afterOverlayPops.mockImplementation(() => popped);
+  render(MentionProfileCard, {
+    props: {
+      userId: '@alice:example.org',
+      roomId: '!room:example.org',
+      member: null,
+      profile: emptyProfile,
+    },
+  });
+  await tick();
+
+  await user.click(screen.getByRole('button', { name: 'Message' }));
+  await user.click(
+    within(await screen.findByRole('dialog')).getByRole('button', { name: 'Start chat' })
+  );
+  await vi.waitFor(() => {
+    expect(core.rpc.rooms.createDm).toHaveBeenCalled();
+  });
+  await tick();
+  expect(vi.mocked(goto).mock.calls.some(([url]) => url.includes('/direct/'))).toBe(false);
+
+  release();
+  await vi.waitFor(() => {
+    expect(goto).toHaveBeenCalledWith(expect.stringContaining('/direct/'));
+  });
+});
+
 function extraKeys(): string[] {
   return [...document.querySelectorAll('.profile-keys button')].map((key) =>
     key.textContent.trim()
@@ -549,7 +592,7 @@ test('keeps a failed profile silent when the room member still names the user', 
 });
 
 test('collects an optional reason before kicking a member', async () => {
-  core.rpc.members.kick.mockResolvedValue(null);
+  core.rpc.members.kick.mockResolvedValue(0);
   render(MentionProfileCard, {
     props: {
       userId: '@alice:example.org',
@@ -600,12 +643,13 @@ test('collects an optional reason before kicking a member', async () => {
       room_id: '!room:example.org',
       user_id: '@alice:example.org',
       reason: 'spamming links',
+      redact_events: false,
     });
   });
 });
 
 test('sends no reason when the moderation reason is left blank', async () => {
-  core.rpc.members.ban.mockResolvedValue(null);
+  core.rpc.members.ban.mockResolvedValue(0);
   render(MentionProfileCard, {
     props: {
       userId: '@alice:example.org',
@@ -652,6 +696,61 @@ test('sends no reason when the moderation reason is left blank', async () => {
       room_id: '!room:example.org',
       user_id: '@alice:example.org',
       reason: null,
+      redact_events: false,
+    });
+  });
+});
+
+test("a ban can also delete the member's messages", async () => {
+  core.rpc.members.ban.mockResolvedValue(0);
+  render(MentionProfileCard, {
+    props: {
+      userId: '@alice:example.org',
+      roomId: '!room:example.org',
+      ownPowerLevel: 100,
+      permissions: {
+        own_power_level: 100,
+        can_post: true,
+        can_react: true,
+        can_redact_own: true,
+        can_redact_others: false,
+        can_invite: false,
+        can_kick: false,
+        can_ban: true,
+        can_change_settings: false,
+        can_pin: false,
+        can_change_join_rule: false,
+        can_change_power_levels: false,
+        can_manage_children: false,
+      },
+      member: {
+        user_id: '@alice:example.org',
+        display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
+        avatar_url: null,
+        power_level: 0,
+        membership: 'join',
+        member_ts: null,
+        kicked: false,
+        service: false,
+      },
+      profile: emptyProfile,
+    },
+  });
+  await tick();
+
+  await chooseAction('Ban from room');
+
+  const dialog = await screen.findByRole('dialog');
+  await user.click(within(dialog).getByRole('switch', { name: 'Also delete their messages' }));
+  await user.click(within(dialog).getByRole('button', { name: 'Ban and delete messages' }));
+  await vi.waitFor(() => {
+    expect(core.rpc.members.ban).toHaveBeenCalledWith({
+      room_id: '!room:example.org',
+      user_id: '@alice:example.org',
+      reason: null,
+      redact_events: true,
     });
   });
 });
@@ -981,6 +1080,50 @@ test('asks before lowering your own role', async () => {
     expect(core.rpc.members.setUserPowerLevel).toHaveBeenCalledWith({
       room_id: '!room:example.org',
       user_id: '@me:example.org',
+      power_level: 50,
+    });
+  });
+});
+
+test('asks before giving someone a role equal to your own', async () => {
+  core.rpc.members.setUserPowerLevel.mockReset().mockResolvedValue(null);
+  render(MentionProfileCard, {
+    props: {
+      userId: '@alice:example.org',
+      roomId: '!room:example.org',
+      ownPowerLevel: 50,
+      permissions: {
+        own_power_level: 50,
+        can_change_power_levels: true,
+      } as RoomPermissionsView,
+      member: {
+        user_id: '@alice:example.org',
+        display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
+        avatar_url: null,
+        power_level: 0,
+        membership: 'join',
+        member_ts: null,
+        kicked: false,
+        service: false,
+      },
+      profile: emptyProfile,
+    },
+  });
+  await tick();
+
+  await chooseAction('Change role');
+  await user.click(await screen.findByRole('menuitem', { name: /Moderator/ }));
+  const dialog = await screen.findByRole('dialog', { name: 'Give Alice your own role?' });
+  expect(within(dialog).getByText(/@alice:example\.org/)).toBeInTheDocument();
+  expect(core.rpc.members.setUserPowerLevel).not.toHaveBeenCalled();
+
+  await user.click(within(dialog).getByRole('button', { name: 'Give role' }));
+  await vi.waitFor(() => {
+    expect(core.rpc.members.setUserPowerLevel).toHaveBeenCalledWith({
+      room_id: '!room:example.org',
+      user_id: '@alice:example.org',
       power_level: 50,
     });
   });

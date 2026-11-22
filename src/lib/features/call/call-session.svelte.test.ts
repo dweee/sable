@@ -261,6 +261,7 @@ test('a call tears down after a successful join reports disconnected', async () 
 
   await session.join('!room:example.org', { microphone: true, camera: false });
   expect(session.lifecycle).toBe('active');
+  sounds.played.length = 0;
 
   emitTransportState({ ...idleTransportState(), connection: 'disconnected' });
 
@@ -272,10 +273,27 @@ test('a call tears down after a successful join reports disconnected', async () 
     expect(leaveCall).toHaveBeenCalledOnce();
     expect(transport.disconnect).toHaveBeenCalledOnce();
   });
+  expect(sounds.played).toEqual(['call_leave']);
 
   const retry = new CallSession(client, { createTransport: () => transport });
   await retry.join('!other:example.org', { microphone: true, camera: false });
   expect(retry.lifecycle).toBe('active');
+});
+
+test('a call server blocked by the local network fails with its own message', async () => {
+  const { client, transport } = harness();
+  vi.mocked(client.rpc.calls.join).mockResolvedValueOnce({
+    ...(await client.rpc.calls.join({} as never)),
+    url: 'wss://192.168.1.20:7880',
+  });
+  transport.connect = vi.fn(() => Promise.reject(new Error('connect')));
+  globalThis.fetch = vi.fn<() => Promise<Response>>().mockRejectedValue(new TypeError('blocked'));
+  const session = new CallSession(client, { createTransport: () => transport });
+
+  await session.join('!room:example.org', { microphone: true, camera: false });
+
+  expect(session.failure).toBe('local-network-blocked');
+  expect(transport.connect).toHaveBeenCalledOnce();
 });
 
 test('a connect promise does not make the session active while transport is still connecting', async () => {
@@ -297,10 +315,12 @@ test('a connect promise does not make the session active while transport is stil
   expect(session.transport.connection).toBe('connecting');
   expect(session.lifecycle).toBe('connecting');
 
+  sounds.played.length = 0;
   resolveConnect();
   await joining;
   expect(session.lifecycle).toBe('failed');
   expect(session.failure).toBe('setup-failed');
+  expect(sounds.played).toEqual([]);
 });
 
 test('reconnecting and recovering leaves an active call intact', async () => {

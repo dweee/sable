@@ -218,17 +218,10 @@ test('an override to a provider with no key falls back to the configured one', (
   expect(gifProvider({ ...config, provider: null }).id).toBe('tenor');
 });
 
-test('tenor searches under the one client_key Google still accepts', () => {
-  const url = new URL(gifProviders.tenor.searchUrl('a-key', 'a cat'));
-
-  expect(url.searchParams.get('client_key')).toBe('tenor_web');
-  expect(url.searchParams.get('key')).toBe('a-key');
-  expect(url.searchParams.get('q')).toBe('a cat');
-});
-
 test('search needs both a key and a proxy', () => {
   expect(gifSearchAvailable(config)).toBe(true);
   expect(gifSearchAvailable({ ...config, proxyUrl: null })).toBe(false);
+  expect(gifSearchAvailable({ ...config, proxyUrl: null }, 'default', true)).toBe(true);
   expect(gifSearchAvailable({ ...config, tenorApiKey: null })).toBe(false);
 });
 
@@ -281,6 +274,15 @@ test('only plain mxc gifs count as uploaded', () => {
   ).toBeUndefined();
   expect(
     gifFromUploadedMxc('mxc://gifs.example/tenor_YWJj', 'a.gif', 1, 1, 1, 'image/gif')
+  ).toBeUndefined();
+});
+
+test('an APNG uploaded as image/png can be saved like a gif, a still PNG cannot', () => {
+  expect(
+    gifFromUploadedMxc('mxc://example.org/abc', 'ball.png', 4, 3, 10, 'image/png', true)
+  ).toMatchObject({ mediaUrl: 'mxc://example.org/abc', mimetype: 'image/png' });
+  expect(
+    gifFromUploadedMxc('mxc://example.org/abc', 'ball.png', 4, 3, 10, 'image/png', false)
   ).toBeUndefined();
 });
 

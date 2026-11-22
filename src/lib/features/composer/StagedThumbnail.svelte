@@ -11,10 +11,11 @@
     file: File;
     kind: PreviewKind;
     spoiler: boolean;
+    gif?: boolean;
     onOpen: () => void;
   }
 
-  let { file, kind, spoiler, onOpen }: Props = $props();
+  let { file, kind, spoiler, gif = false, onOpen }: Props = $props();
 
   let failed = $state(false);
   let duration = $state<number | null>(null);
@@ -23,7 +24,9 @@
 <button
   class={['thumb', { 'thumb-spoiler': spoiler }]}
   type="button"
-  aria-label={i18n.t('composer.previewAttachment', { name: file.name })}
+  aria-label={i18n.t(gif ? 'composer.previewAttachmentGif' : 'composer.previewAttachment', {
+    name: file.name,
+  })}
   onclick={onOpen}
 >
   {#if failed}
@@ -53,8 +56,12 @@
       onerror={() => (failed = true)}
     ></video>
     <span class="thumb-badge" aria-hidden="true">
-      <PlayIcon weight="fill" />
-      {#if duration !== null}{formatClockDuration(duration)}{/if}
+      {#if gif}
+        {i18n.t('composer.gifBadge')}
+      {:else}
+        <PlayIcon weight="fill" />
+        {#if duration !== null}{formatClockDuration(duration)}{/if}
+      {/if}
     </span>
   {/if}
 </button>

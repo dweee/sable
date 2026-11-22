@@ -42,7 +42,8 @@ function setup(
   userId: string,
   store: Partial<PersonaStore> = {},
   beforeSend?: () => Promise<void>,
-  threadRoot: string | null = null
+  threadRoot: string | null = null,
+  canRedactOwn?: () => boolean
 ) {
   const sendMessage = vi.fn((..._args: unknown[]) => Promise.resolve());
   const editMessage = vi.fn((..._args: unknown[]) => Promise.resolve());
@@ -124,6 +125,7 @@ function setup(
       roomId: () => ROOM,
       beforeSend,
       threadRoot,
+      canRedactOwn,
     }),
   };
 }
@@ -249,6 +251,19 @@ test('toggling an existing custom quick reaction omits its source pack', async (
     subscription: 7,
     persona: null,
   });
+});
+
+test('removing your own reaction is skipped without permission to redact it', async () => {
+  const mine = {
+    ...item('$latest', '@ana:example.org'),
+    reactions: [{ key: '😂', senders: ['@kris:example.org'] }],
+  };
+  const fixture = setup([mine], '@kris:example.org', {}, undefined, null, () => false);
+  fixture.conversation.toggleReaction('$latest', '😂');
+  await fixture.conversation.quickReact(ROOM, '😂');
+  expect(fixture.toggleReaction).not.toHaveBeenCalled();
+  fixture.conversation.toggleReaction('$latest', '🎉');
+  expect(fixture.toggleReaction).toHaveBeenCalledOnce();
 });
 
 test('reaction failures reach the composer', async () => {
@@ -459,6 +474,46 @@ test.each([
     }
   }
 );
+
+test('a picked GIF is uploaded instead of linked when reuploading is on', async () => {
+  setPreference('reuploadGifs', true);
+  vi.spyOn(runtime, 'runtimeConfig').mockResolvedValue(
+    runtime.parseRuntimeConfig({
+      gifs: { proxyUrl: 'gifs.example' },
+      embeds: { serviceUrl: 'https://embeds.test' },
+    })
+  );
+  const fetched = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(new Response(new Uint8Array([71, 73, 70])));
+  const fixture = setup([], '@kris:example.org');
+  const gif = {
+    id: 'cat',
+    title: 'cat',
+    mediaUrl: 'https://media.tenor.com/abc123/cat.gif',
+    previewUrl: 'https://media.tenor.com/abc123/cat-tiny.gif',
+    width: 320,
+    height: 240,
+    size: 1000,
+    mimetype: 'image/gif',
+  };
+
+  await fixture.conversation.sendGif(ROOM, gif);
+  expect(fetched).toHaveBeenCalledWith(
+    'https://embeds.test/_soliditas/gifs/media?url=https%3A%2F%2Fmedia.tenor.com%2Fabc123%2Fcat.gif'
+  );
+  expect(fixture.sendGif).not.toHaveBeenCalled();
+  const [, file] = fixture.sendAttachment.mock.lastCall as unknown as [string, File];
+  expect([file.name, file.type, file.size]).toEqual(['cat.gif', 'image/gif', 3]);
+
+  await fixture.conversation.sendGif(ROOM, { ...gif, mediaUrl: 'mxc://example.org/already' });
+  expect(fixture.sendGif).toHaveBeenCalledTimes(1);
+
+  await expect(
+    fixture.conversation.sendGif(ROOM, { ...gif, mediaUrl: 'https://evil.example/cat.gif' })
+  ).rejects.toThrow();
+  expect(fetched).not.toHaveBeenCalledWith('https://evil.example/cat.gif', expect.anything());
+});
 
 test('a reply to a persona message names the persona', () => {
   const target = withRowFields({
@@ -880,6 +935,7 @@ afterEach(() => {
   clearDrafts();
   setPreference('scheduleInEncryptedRooms', true);
   setPreference('personaProxying', false);
+  setPreference('reuploadGifs', false);
 });
 
 test('an encrypted room falls back to the local queue while the preference allows it', async () => {

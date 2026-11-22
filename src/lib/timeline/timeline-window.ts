@@ -1,3 +1,4 @@
+import { clamp } from '#lib/clamp.js';
 import QuickLRU from 'quick-lru';
 
 export interface TimelineEntry<T> {
@@ -364,10 +365,10 @@ export class TimelineWindow<T> {
         leadIn < 0
           ? target - this.top
           : this.top + this.contentHeight - viewport.clientHeight - target;
-      this.writeOffset(target + leadIn * Math.max(0, Math.min(viewport.clientHeight, room)));
+      this.writeOffset(target + leadIn * clamp(room, 0, viewport.clientHeight));
     }
     this.writeOffset(target, smooth);
-    if (!smooth && this.atEnd(1)) this.pinned = true;
+    if (this.atEnd(1, smooth ? target : undefined)) this.pinned = true;
     if (smooth) this.scheduleSettle();
     this.publish(this.capture());
     if (this.pending) this.scheduleSettle();
@@ -626,7 +627,7 @@ export class TimelineWindow<T> {
 
   private writeOffset(offset: number, smooth = false): void {
     const viewport = this.options.viewport;
-    const target = Math.max(0, Math.min(offset, viewport.scrollHeight - viewport.clientHeight));
+    const target = clamp(offset, 0, viewport.scrollHeight - viewport.clientHeight);
     if (Math.abs(target - viewport.scrollTop) < EPSILON) return;
     if (smooth) viewport.scrollTo({ top: target, behavior: 'smooth' });
     else viewport.scrollTop = target;

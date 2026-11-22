@@ -10,6 +10,7 @@
   } from '#src/generated/protocol';
 
   import { useCoreClient } from '#lib/core/context.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import { i18n } from '#lib/i18n.js';
   import { nativeFilePicker } from '#lib/platform/native-file-picker.js';
   import { parsePronouns } from '#lib/personas/pronouns.js';
@@ -25,7 +26,8 @@
   import MediaImage from '#lib/ui/MediaImage.svelte';
   import { hexColorOrEmpty } from '#lib/ui/hex-color.js';
   import ColorSetting from '#lib/ui/ColorSetting.svelte';
-  import { uprightJpeg } from '#lib/ui/upright-jpeg.js';
+  import { requestCrop } from '#lib/ui/image-crop/crop-request.svelte.js';
+  import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
   import Select from '#lib/ui/primitives/Select.svelte';
   import ProhibitIcon from 'phosphor-svelte/lib/ProhibitIcon';
   import BioEditor from './BioEditor.svelte';
@@ -85,16 +87,14 @@
   async function pickAvatar(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
-    if (!file) return;
+    const cropped = file && (await requestCrop(file, 'avatar'));
+    if (!cropped) return;
 
     saving = true;
     error = null;
     try {
-      const upright = await uprightJpeg(file);
-      avatarUrl = await core.media.uploadMedia(
-        upright.type || 'image/*',
-        new Uint8Array(await upright.arrayBuffer())
-      );
+      const { mime, bytes } = await uprightImageBytes(cropped);
+      avatarUrl = await core.media.uploadMedia(mime, bytes);
     } catch (cause) {
       console.warn('[sable personas] uploading the picture failed', cause);
       error = i18n.t('personas.saveFailed');
@@ -134,16 +134,14 @@
   ): Promise<void> {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
-    if (!file) return;
+    const cropped = file && (await requestCrop(file, 'avatar'));
+    if (!cropped) return;
 
     saving = true;
     error = null;
     try {
-      const upright = await uprightJpeg(file);
-      alternateAvatars[index].avatar_url = await core.media.uploadMedia(
-        upright.type || 'image/*',
-        new Uint8Array(await upright.arrayBuffer())
-      );
+      const { mime, bytes } = await uprightImageBytes(cropped);
+      alternateAvatars[index].avatar_url = await core.media.uploadMedia(mime, bytes);
     } catch (cause) {
       console.warn('[sable personas] uploading the picture failed', cause);
       error = i18n.t('personas.saveFailed');
@@ -155,16 +153,14 @@
   async function pickBanner(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
-    if (!file) return;
+    const cropped = file && (await requestCrop(file, 'banner'));
+    if (!cropped) return;
 
     saving = true;
     error = null;
     try {
-      const upright = await uprightJpeg(file);
-      banner_url = await core.media.uploadMedia(
-        upright.type || 'image/*',
-        new Uint8Array(await upright.arrayBuffer())
-      );
+      const { mime, bytes } = await uprightImageBytes(cropped);
+      banner_url = await core.media.uploadMedia(mime, bytes);
     } catch (cause) {
       console.warn('[sable personas] uploading the picture failed', cause);
       error = i18n.t('personas.saveFailed');
@@ -433,15 +429,15 @@
     <fieldset class="triggers">
       <legend>{i18n.t('settings.profile')}</legend>
 
-      <label class="field">
+      <div class="field">
         <span>{i18n.t('settings.biography')}</span>
         <BioEditor id="persona-biography" bind:value={biography} />
-      </label>
+      </div>
 
-      <label class="field">
+      <div class="field">
         <span>{i18n.t('settings.banner')}</span>
         {#if banner_url}
-          <div class="profile-card-cover">
+          <div class={['profile-card-cover', { fit: preferences.bannerFit === 'image' }]}>
             <MediaImage
               class={banner_url
                 ? 'profile-card-banner'
@@ -475,7 +471,7 @@
             {i18n.t('common.chooseAPicture')}
           </label>
         </div>
-      </label>
+      </div>
     </fieldset>
 
     <fieldset class="triggers">
@@ -674,6 +670,15 @@
   .profile-card-cover {
     height: 7rem;
     overflow: hidden;
+  }
+
+  .profile-card-cover.fit {
+    height: auto;
+  }
+
+  .profile-card-cover.fit :global(.profile-card-banner) {
+    max-height: 14rem;
+    min-height: 4rem;
   }
 
   .profile-card-cover :global(.profile-card-banner img) {

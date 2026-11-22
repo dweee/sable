@@ -30,6 +30,7 @@ use crate::Core;
 use crate::notifications;
 use crate::search::ignored_user_ids;
 use crate::spaces::{self, SidebarSpacesEvent};
+use crate::timeline_overlay::BanRedaction;
 
 type NotificationSender = tokio::sync::mpsc::UnboundedSender<(Notification, matrix_sdk::Room)>;
 pub(crate) type NotificationRoute = Arc<parking_lot::Mutex<Option<NotificationSender>>>;
@@ -71,6 +72,24 @@ fn redecrypted_notification(
 }
 
 impl Core {
+    /// A sync that is only waiting for a network would otherwise read as starting.
+    pub(crate) fn shown_sync_status(&self, state: SyncState) -> SyncStatus {
+        if matches!(state, SyncState::Idle)
+            && !self.sync_paused()
+            && !self.activity.network_available()
+        {
+            return SyncStatus::Offline;
+        }
+        sync_status(state)
+    }
+
+    fn emit_sync_status(&self, generation: u64, state: SyncState) {
+        self.emit_if_current(
+            generation,
+            CoreEvent::SyncStatus(self.shown_sync_status(state)),
+        );
+    }
+
     /// Restarts a stalled sync with backoff and reports each state change.
     pub(crate) fn watch_sync_state(
         self: &Arc<Self>,
@@ -83,7 +102,7 @@ impl Core {
         let restarted = sync_service.clone();
         let support_client = client.clone();
         // `Subscriber::next` yields only on *change*, so emit the first by hand.
-        core.emit_if_current(generation, CoreEvent::SyncStatus(sync_status(states.get())));
+        core.emit_sync_status(generation, states.get());
         self.track_session_task(
             spawn(async move {
                 let mut failures = 0u32;
@@ -98,7 +117,7 @@ impl Core {
                     };
                     let Ok(next) = next else {
                         if server_reachable(&support_client).await {
-                            core.resume_sync(&restarted).await;
+                            core.retry_sync(&restarted).await;
                         }
                         continue;
                     };
@@ -119,7 +138,7 @@ impl Core {
                             .take()
                             .is_some_and(|since| since.elapsed() >= SYNC_BACKOFF_RESET)
                     };
-                    core.emit_if_current(generation, CoreEvent::SyncStatus(sync_status(state)));
+                    core.emit_sync_status(generation, state);
                     if running {
                         let core = core.clone();
                         let rules_cleaned = rules_cleaned.clone();
@@ -157,7 +176,7 @@ impl Core {
                             restarted.stop().await;
                             core.emit_if_current(
                                 generation,
-                                CoreEvent::SyncStatus(crate::protocol::SyncStatus::Error {
+                                CoreEvent::SyncStatus(SyncStatus::Error {
                                     message: "This homeserver does not support Sliding Sync."
                                         .to_owned(),
                                 }),
@@ -167,7 +186,7 @@ impl Core {
                         if steady {
                             failures = 0;
                         }
-                        crate::watchers::retry_backoff(failures).await;
+                        retry_backoff(failures).await;
                         failures = failures.saturating_add(1);
                         core.resume_sync(&restarted).await;
                     }
@@ -354,61 +373,62 @@ impl Core {
                     return;
                 };
                 let mut changes = rules.subscribe();
-                loop {
-                    while changes.try_recv().is_ok() {}
+                while let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
+                    changes.recv().await
+                {
                     core.emit_if_current(generation, CoreEvent::NotificationSettingsChanged);
-                    let retry = match rules.reconcile_direct_default().await {
-                        Ok(()) => false,
-                        Err(error) => {
-                            tracing::warn!(%error, "could not reconcile DM notification defaults");
-                            true
-                        }
-                    };
-                    if retry {
-                        matrix_sdk::sleep::sleep(std::time::Duration::from_secs(30)).await;
-                        continue;
-                    }
-                    let received = changes.recv().await;
-                    if matches!(
-                        received,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed)
-                    ) {
-                        return;
-                    }
                 }
             })
             .abort_on_drop(),
         );
     }
 
-    pub(crate) async fn watch_room_keys(self: &Arc<Self>, client: &matrix_sdk::Client) {
-        let Some(keys) = client.encryption().room_keys_received_stream().await else {
-            return;
-        };
+    pub(crate) fn watch_room_keys(self: &Arc<Self>, client: &matrix_sdk::Client) {
         let core = self.clone();
+        let client = client.clone();
         self.track_session_task(
             spawn(async move {
-                pin_mut!(keys);
-                while let Some(received) = keys.next().await {
-                    match received {
-                        Ok(keys) => {
-                            let rooms: BTreeSet<&RoomId> =
-                                keys.iter().map(|key| &*key.room_id).collect();
-                            for room in rooms {
-                                core.refresh_encrypted_replies(Some(room), |session| {
-                                    keys.iter().any(|key| {
-                                        &*key.room_id == room && key.session_id == session
+                // The stream ends when the SDK rebuilds its crypto machine, which it does after
+                // another process wrote to the crypto store.
+                while let Some(keys) = client.encryption().room_keys_received_stream().await {
+                    pin_mut!(keys);
+                    while let Some(received) = keys.next().await {
+                        match received {
+                            Ok(keys) => {
+                                let rooms: BTreeSet<&RoomId> =
+                                    keys.iter().map(|key| &*key.room_id).collect();
+                                for room in rooms {
+                                    core.refresh_encrypted_replies(Some(room), |session| {
+                                        keys.iter().any(|key| {
+                                            &*key.room_id == room && key.session_id == session
+                                        })
                                     })
-                                })
-                                .await;
+                                    .await;
+                                }
                             }
+                            Err(_) => core.refresh_encrypted_replies(None, |_| true).await,
                         }
-                        Err(_) => core.refresh_encrypted_replies(None, |_| true).await,
                     }
+                    core.refresh_encrypted_replies(None, |_| true).await;
                 }
             })
             .abort_on_drop(),
         );
+    }
+
+    /// `Encryption::devices_stream` owns the crypto machine it came from. A machine the SDK
+    /// replaced then never closes its room key stream, so the redecryptor keeps listening to it
+    /// and events stay undecryptable after their key arrives.
+    async fn identity_changes(&self) -> Option<impl futures_util::Stream<Item = ()> + use<>> {
+        let base = self.base_client().await.ok()?;
+        let machine = base.olm_machine().await;
+        Some(
+            machine
+                .as_ref()?
+                .store()
+                .identities_stream_raw()
+                .map(|_| ()),
+        )
     }
 
     /// Re-read the full status when verification, recovery, or backup changes.
@@ -487,22 +507,29 @@ impl Core {
         let watched = client.clone();
         self.track_session_task(
             spawn(async move {
-                let Ok(updates) = watched.encryption().devices_stream().await else {
-                    return;
-                };
-                pin_mut!(updates);
-                let mut known = crate::verification::local_own_devices(&watched).await;
-                while updates.next().await.is_some() {
-                    let devices = crate::verification::local_own_devices(&watched).await;
-                    if devices != known {
-                        known.clone_from(&devices);
-                        core.emit_if_current(
-                            generation,
-                            CoreEvent::EncryptionStatus {
-                                status: crate::verification::encryption_status(&watched).await,
-                            },
-                        );
-                        core.emit_if_current(generation, CoreEvent::DevicesChanged { devices });
+                let mut known = None;
+                while let Some(updates) = core.identity_changes().await {
+                    pin_mut!(updates);
+                    loop {
+                        let devices = crate::verification::local_own_devices(&watched).await;
+                        if known.as_ref().is_some_and(|known| *known != devices) {
+                            core.emit_if_current(
+                                generation,
+                                CoreEvent::EncryptionStatus {
+                                    status: crate::verification::encryption_status(&watched).await,
+                                },
+                            );
+                            core.emit_if_current(
+                                generation,
+                                CoreEvent::DevicesChanged {
+                                    devices: devices.clone(),
+                                },
+                            );
+                        }
+                        known = Some(devices);
+                        if updates.next().await.is_none() {
+                            break;
+                        }
                     }
                 }
             })
@@ -601,6 +628,16 @@ impl Core {
                     if event.prev_content().is_none() {
                         core.emit_profile_changed(generation, &room, &event).await;
                     }
+                    let ban = room.power_levels().await.ok().and_then(|power_levels| {
+                        BanRedaction::from_membership(
+                            &event.sender,
+                            &event.state_key,
+                            &event.content,
+                            &power_levels,
+                        )
+                    });
+                    core.overlay_ban_redaction(room.room_id(), &event.state_key, ban)
+                        .await;
                 }
             }
         });
@@ -616,7 +653,7 @@ impl Core {
         if event.content.membership != MembershipState::Join {
             return;
         }
-        let Ok(user_id) = matrix_sdk::ruma::OwnedUserId::try_from(event.state_key.as_str()) else {
+        let Ok(user_id) = ruma::OwnedUserId::try_from(event.state_key.as_str()) else {
             return;
         };
         let display_name = event.content.displayname.clone().and_then(visible_name);
@@ -784,7 +821,7 @@ struct ForegroundNotifier {
     client: matrix_sdk::Client,
     notifications: NotificationClient,
     generation: u64,
-    alerted_invites: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    alerted_invites: std::collections::HashSet<ruma::OwnedRoomId>,
     alerted_events: std::collections::HashMap<OwnedEventId, MilliSecondsSinceUnixEpoch>,
 }
 
@@ -960,15 +997,14 @@ mod tests {
 
     #[test]
     fn a_fresh_redecrypted_event_that_notifies_is_forwarded_once_and_stale_ones_are_not() {
-        let raw: Raw<matrix_sdk::ruma::events::AnySyncTimelineEvent> =
-            serde_json::from_value(json!({
-                "type": "m.room.message",
-                "event_id": "$late",
-                "sender": ALICE,
-                "origin_server_ts": 100_000,
-                "content": { "msgtype": "m.text", "body": "hi @bob" }
-            }))
-            .expect("event");
+        let raw: Raw<ruma::events::AnySyncTimelineEvent> = serde_json::from_value(json!({
+            "type": "m.room.message",
+            "event_id": "$late",
+            "sender": ALICE,
+            "origin_server_ts": 100_000,
+            "content": { "msgtype": "m.text", "body": "hi @bob" }
+        }))
+        .expect("event");
         let event = TimelineEvent::from_plaintext(raw.clone());
         let at = |ms: u64| MilliSecondsSinceUnixEpoch(ms.try_into().expect("timestamp"));
 

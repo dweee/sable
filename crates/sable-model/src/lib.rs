@@ -9,6 +9,7 @@
     )
 )]
 
+pub mod animation;
 pub mod bot_commands;
 pub mod calendar;
 mod civil;
@@ -25,12 +26,16 @@ pub mod mfm;
 pub mod non_blank;
 pub mod notifications;
 pub mod power_levels;
+pub mod proxy;
 pub mod rtc_invites;
 pub mod search_filter;
 pub mod search_query;
+pub mod settings_merge;
 pub mod shortcodes;
 pub mod sidebar;
 pub mod slash;
+pub mod space_graph;
+pub mod space_order;
 pub mod spaces;
 pub mod text;
 pub mod truncate;

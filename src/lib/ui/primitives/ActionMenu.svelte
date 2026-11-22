@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { currentDirection, inlineSide } from '#lib/language.svelte.js';
   import { DropdownMenu } from 'bits-ui';
   import type { Snippet } from 'svelte';
 
@@ -21,7 +22,6 @@
     side?: 'top' | 'bottom' | 'left' | 'right';
     align?: 'start' | 'center' | 'end';
     sideOffset?: number;
-    preventScroll?: boolean;
     onOpenChange?: (open: boolean) => void;
     trigger?: Snippet<[{ props: Record<string, unknown> }]>;
     children: Snippet;
@@ -35,7 +35,6 @@
     side = 'bottom',
     align = 'end',
     sideOffset = 4,
-    preventScroll,
     onOpenChange,
     trigger,
     children,
@@ -74,7 +73,7 @@
     </BottomSheet>
   {/if}
 {:else}
-  <DropdownMenu.Root bind:open {onOpenChange}>
+  <DropdownMenu.Root dir={currentDirection()} bind:open {onOpenChange}>
     {#if trigger}
       <DropdownMenu.Trigger>
         {#snippet child({ props })}{@render trigger({ props })}{/snippet}
@@ -82,15 +81,16 @@
     {/if}
     <DropdownMenu.Portal>
       <DropdownMenu.Content
+        dir={currentDirection()}
         class={['menu-surface', surfaceClass]}
         {...overlayLayer()}
         customAnchor={anchor}
         aria-label={label}
-        {side}
+        side={inlineSide(side)}
         {align}
         {sideOffset}
         collisionPadding={collisionPadding()}
-        {preventScroll}
+        preventScroll={false}
       >
         <div class="menu-scroll-content" {@attach scrollHint}>
           {@render children()}

@@ -6,6 +6,7 @@ use crate::api::auth::LoginIdentifier;
 use crate::api::auth::StartOidcLoginParams;
 use crate::api::auth::StartSsoLoginParams;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use matrix_sdk::authentication::oauth::error::OAuthDiscoveryError;
 use matrix_sdk::ruma::OwnedUserId;
@@ -281,7 +282,7 @@ impl Core {
                 flows.oidc_registration = metadata.prompt_values_supported.iter().any(|prompt| {
                     matches!(
                         prompt,
-                        matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create
+                        ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create
                     )
                 });
             }
@@ -370,7 +371,7 @@ impl Core {
                 .oauth()
                 .login(redirect_uri.clone(), device_id, Some(registration), None);
         if let Some(account) = &reauth {
-            let user_id: matrix_sdk::ruma::OwnedUserId = account
+            let user_id: OwnedUserId = account
                 .session
                 .credentials
                 .user_id()
@@ -380,7 +381,7 @@ impl Core {
         }
         if matches!(intent, AuthIntent::Register) {
             login = login.prompt(vec![
-                matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create,
+                ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create,
             ]);
         }
         let data = login
@@ -405,6 +406,7 @@ impl Core {
             tracing::warn!("replacing unfinished OIDC login with a new attempt");
         }
         *pending = Some(PendingLogin {
+            attempt: self.next_login_attempt.fetch_add(1, Ordering::Relaxed),
             method: LoginMethod::Oidc,
             account_id,
             account_store_id,
@@ -428,32 +430,47 @@ impl Core {
         tracing::info!(operation = "oidc_login", "completing OAuth login callback");
         let url = Url::parse(&callback_url).or_failed(self, "complete_oidc_login_callback_url")?;
 
-        let mut pending = self.pending_login.lock().await;
-        let Some(PendingLogin {
-            redirect_uri: expected_redirect_uri,
-            client,
-            ..
-        }) = pending
-            .as_ref()
-            .filter(|pending| pending.method == LoginMethod::Oidc)
-        else {
-            tracing::warn!("no pending OIDC login: it was started elsewhere or the core restarted");
-            return Err(RpcCode::Unavailable.into());
+        let (attempt, client) = {
+            let pending = self.pending_login.lock().await;
+            let Some(PendingLogin {
+                attempt,
+                redirect_uri: expected_redirect_uri,
+                client,
+                ..
+            }) = pending
+                .as_ref()
+                .filter(|pending| pending.method == LoginMethod::Oidc)
+            else {
+                tracing::warn!(
+                    "no pending OIDC login: it was started elsewhere or the core restarted"
+                );
+                return Err(RpcCode::Unavailable.into());
+            };
+
+            if !same_redirect_target(expected_redirect_uri, &url) {
+                unexpected_callback("oidc_login", expected_redirect_uri, &url);
+                return Err(self.failed(
+                    "complete_oidc_login_callback_url",
+                    "callback URL does not match the redirect URI used to start OAuth",
+                ));
+            }
+            (*attempt, client.clone())
         };
 
-        if !same_redirect_target(expected_redirect_uri, &url) {
-            unexpected_callback("oidc_login", expected_redirect_uri, &url);
-            return Err(self.failed(
-                "complete_oidc_login_callback_url",
-                "callback URL does not match the redirect URI used to start OAuth",
-            ));
-        }
-
-        if let Err(error) = client
+        // A suspension reads the pending login to close its stores, so the request must not hold it.
+        let finished = client
             .oauth()
             .finish_login(authorization_response(&url))
-            .await
+            .await;
+        let mut pending = self.pending_login.lock().await;
+        if pending
+            .as_ref()
+            .is_none_or(|pending| pending.attempt != attempt)
         {
+            return Err(RpcCode::Unavailable.into());
+        }
+
+        if let Err(error) = finished {
             let refused = pending.take_if(|pending| {
                 refuses_device(&error)
                     && matches!(&pending.reauth, Some(account) if !account.device_invalidated)
@@ -565,6 +582,7 @@ impl Core {
             return Err(RpcCode::Unavailable.into());
         }
         *pending = Some(PendingLogin {
+            attempt: self.next_login_attempt.fetch_add(1, Ordering::Relaxed),
             method: LoginMethod::Sso,
             account_id,
             account_store_id,
@@ -762,7 +780,7 @@ fn refuses_device(error: &matrix_sdk::Error) -> bool {
     )
 }
 
-fn reuses_oauth_client(session: &session::PersistedSession, redirect_uri: &Url) -> bool {
+fn reuses_oauth_client(session: &PersistedSession, redirect_uri: &Url) -> bool {
     session::registered_redirect_uri(session, redirect_uri)
         == session::registration_redirect_uri(redirect_uri)
 }
@@ -961,16 +979,14 @@ mod tests {
         let oauth = server.oauth();
         oauth.mock_server_metadata().ok().mount().await;
         oauth.mock_registration().ok().mount().await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-oauth-reauth-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-oauth-reauth-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
             Box::new(crate::store::MemorySessionStore::default()),
         );
-        let persisted = session::PersistedSession {
+        let persisted = PersistedSession {
             oauth_issuer: Some(Url::parse(&server.server().uri()).unwrap()),
             oauth_redirect_uri: Some(Url::parse(registered).unwrap()),
             resolved_homeserver: Some(Url::parse(&server.server().uri()).unwrap()),
@@ -1012,7 +1028,7 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     async fn start_oauth_reauthentication(core: &Arc<Core>, requested: &str) -> String {
-        core.start_oidc_login(crate::api::auth::StartOidcLoginParams {
+        core.start_oidc_login(StartOidcLoginParams {
             homeserver: "ignored.invalid".to_owned(),
             redirect_uri: requested.to_owned(),
             intent: AuthIntent::Login,
@@ -1126,10 +1142,8 @@ mod tests {
             .expect(1)
             .mount(server.server())
             .await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-reauth-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-reauth-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
@@ -1217,10 +1231,8 @@ mod tests {
                 .mount(server.server())
                 .await;
         }
-        let directory = std::env::temp_dir().join(format!(
-            "sable-identifier-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-identifier-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
@@ -1285,10 +1297,8 @@ mod tests {
             })))
             .mount(server.server())
             .await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-endpoint-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-endpoint-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
@@ -1359,10 +1369,8 @@ mod tests {
             .expect(1)
             .mount(server.server())
             .await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-no-sss-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-no-sss-{}", ruma::TransactionId::new()));
         let (core, _events) = Core::new(
             directory.to_str().unwrap(),
             Box::new(crate::store::MemorySessionStore::default()),
@@ -1398,7 +1406,7 @@ mod tests {
         use matrix_sdk::test_utils::mocks::MatrixMockServer;
         let server = MatrixMockServer::new().await;
         server.mock_versions().ok().mount().await;
-        let found = crate::session::discovery_client(&server.server().uri())
+        let found = session::discovery_client(&server.server().uri())
             .await
             .expect("discovery succeeds")
             .homeserver()

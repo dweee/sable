@@ -167,6 +167,19 @@ export function sharesNatively(): boolean {
   return electron ? electron.platform === 'darwin' : isNativeMobile();
 }
 
+export function sharesLinks(): boolean {
+  return isNativeMobile() || typeof navigator.share === 'function';
+}
+
+export async function shareLink(url: string): Promise<void> {
+  if (isNativeMobile()) {
+    const { shareText } = await import('@choochmeque/tauri-plugin-sharekit-api');
+    await shareText(url);
+    return;
+  }
+  await navigator.share({ url });
+}
+
 export async function shareFile(
   url: string,
   filename: string,
@@ -181,17 +194,12 @@ export async function shareFile(
       await electron.shareFile({ name, bytes });
       return 'saved';
     }
-    const [{ appCacheDir, join }, { mkdir, remove, writeFile }, { shareFile: shareNative }] =
-      await Promise.all([
-        import('@tauri-apps/api/path'),
-        import('@tauri-apps/plugin-fs'),
-        import('@choochmeque/tauri-plugin-sharekit-api'),
-      ]);
+    const [{ remove }, { shareFile: shareNative }] = await Promise.all([
+      import('@tauri-apps/plugin-fs'),
+      import('@choochmeque/tauri-plugin-sharekit-api'),
+    ]);
 
-    const directory = await join(await appCacheDir(), 'outgoing-share');
-    await mkdir(directory, { recursive: true });
-    const path = await join(directory, cacheName(name));
-    await writeFile(path, bytes);
+    const path = await writeCacheFile('outgoing-share', name, bytes);
 
     try {
       await shareNative(path, {
@@ -209,6 +217,23 @@ export async function shareFile(
     console.debug('[sable files] share failed', error);
     return 'failed';
   }
+}
+
+/** Native code cannot read a blob URL, so the bytes go to a file in the app cache first. */
+export async function writeCacheFile(
+  folder: string,
+  name: string,
+  bytes: Uint8Array
+): Promise<string> {
+  const [{ appCacheDir, join }, { mkdir, writeFile }] = await Promise.all([
+    import('@tauri-apps/api/path'),
+    import('@tauri-apps/plugin-fs'),
+  ]);
+  const directory = await join(await appCacheDir(), folder);
+  await mkdir(directory, { recursive: true });
+  const path = await join(directory, cacheName(name));
+  await writeFile(path, bytes);
+  return path;
 }
 
 function cacheName(name: string): string {
@@ -281,8 +306,12 @@ export function mimeFromName(name: string): string {
 
 const AMBIGUOUS_MIMES = new Set(['', 'application/octet-stream', 'application/ogg']);
 
+function typeScriptNamedVideo(file: File): boolean {
+  return file.type.startsWith('video/') && /\.m?ts$/i.test(file.name);
+}
+
 export function withResolvedMime(file: File): File {
-  if (!AMBIGUOUS_MIMES.has(file.type)) return file;
+  if (!AMBIGUOUS_MIMES.has(file.type) && !typeScriptNamedVideo(file)) return file;
   const mime = mimeFromName(file.name);
   if (mime === 'application/octet-stream') return file;
   return new File([file], file.name, { type: mime, lastModified: file.lastModified });

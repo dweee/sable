@@ -70,7 +70,10 @@ declare global {
     __e2eSendError?: string;
     __e2eFetchMedia?: (source: string, width: number, height: number) => Promise<Uint8Array>;
     __e2eMembers?: MemberView[];
+    __e2eMentionEventIds?: string[];
     __e2eRelationEvents?: unknown[];
+    /** Extra room state by event type, with an empty state key. */
+    __e2eRoomState?: Record<string, unknown>;
     __e2eMediaReady?: Promise<void>;
     __e2eReleaseMedia: () => void;
     __e2eAnchorPositions: number[];
@@ -208,6 +211,9 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       marked_unread: false,
       latest_event: {
         sender: '@alice:example.test',
+        own: false,
+        sender_label: null,
+        kind: 'text',
         body: 'General message 19',
         timestamp: 1_700_000_000_019,
         sending: false,
@@ -233,6 +239,9 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       highlight: 0,
       latest_event: {
         sender: '@ada:example.test',
+        own: false,
+        sender_label: null,
+        kind: 'text',
         body: 'invited you',
         timestamp: 1_700_000_000_000,
         sending: false,
@@ -465,6 +474,8 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
             per_message_profile: null,
             bundled_link_previews: [],
             link_previews_removed: null,
+            shared_by: null,
+            redacted_on_ban: null,
             mention: 'none',
             forwarded: null,
             forum_title: null,
@@ -669,6 +680,8 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           .filter((entry) => entry.counts.unread > 0 || entry.counts.highlight > 0)
           .map((entry) => ({ room_id: entry.room_id, counts: entry.counts })),
         quiet_rooms: [],
+        app_badge: null,
+        room_spaces: null,
       };
     }
 
@@ -1126,6 +1139,8 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'messages.bulk_redact': () => 0,
       'messages.delete_thread': () => null,
       'messages.reaction_shortcodes': () => [],
+      'messages.reaction_event_ids': () => [],
+      'messages.redact_reaction': () => null,
       'messages.frequent_reactions': () => [],
       'calendar.entries': () => ({ entries: [], rsvps: [] }),
       'messages.url_preview': (params) =>
@@ -1159,6 +1174,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'notifications.default_modes': () => ({
         direct: 'all',
         group: defaultGroupMode,
+        direct_rule: false,
       }),
       'notifications.mention_notifications': () => mentionNotificationModes,
       'notifications.event_notifications': () => eventNotifications,
@@ -1167,7 +1183,25 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'notifications.keywords': () => notificationKeywords.map((entry) => ({ ...entry })),
       'notifications.push_event': () => ({ kind: 'unavailable' }),
       'notifications.inbox': (params) => {
+        const mention = {
+          room_id: room.room_id,
+          ts: 1_700_000_000_019,
+          sender: '@alice:example.test',
+          sender_name: 'Alice',
+          body: 'General message 19',
+          highlight: true,
+          is_direct: false,
+          encrypted: true,
+          read: false,
+          thread_root: null,
+          reply: false,
+        };
         const items = [
+          ...(window.__e2eMentionEventIds ?? []).map((event_id, index) => ({
+            ...mention,
+            event_id,
+            ts: mention.ts + 1 + index,
+          })),
           {
             room_id: room.room_id,
             event_id: '$general-19:example.test',
@@ -1198,6 +1232,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           },
         ].filter(
           (item) =>
+            (params.room_id == null || item.room_id === params.room_id) &&
             (params.include_read || !item.read) &&
             (params.filter !== 'mentions' || item.highlight) &&
             (params.filter !== 'direct' || item.is_direct)
@@ -1321,7 +1356,8 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           pause: null,
           outcome: null,
           peer: null,
-          rooms_copied: 0,
+          transferred_rooms: 0,
+          total_rooms: 0,
           last_copy: null,
           automatic: false,
           asked: 0,
@@ -1427,7 +1463,9 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           subscription,
           items: unreadContext
             ? [...items.slice(0, 5), marker, ...items.slice(5, 20)]
-            : workerMode === 'thread_links' && focus.kind === 'thread'
+            : focus.kind === 'thread' &&
+                (workerMode === 'thread_links' ||
+                  (workerMode === 'forum' && focus.root_event_id === '$thread-root:example.test'))
               ? [
                   { ...items[0], id: 'thread-root', event_id: '$thread-root:example.test' },
                   ...Array.from({ length: 40 }, (_, index) => ({
@@ -1438,7 +1476,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
                     thread_root: '$thread-root:example.test',
                   })),
                 ]
-              : workerMode === 'thread_links' &&
+              : (workerMode === 'thread_links' || workerMode === 'forum') &&
                   focus.kind === 'event' &&
                   focus.event_id === '$thread-reply-older:example.test'
                 ? [
@@ -1623,27 +1661,45 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       }),
       'timeline.timestamp_to_event': () => null,
       'timeline.list_threads': () => ({ roots: [], next_batch: null }),
-      'timeline.event_source': (params) => ({
-        source:
-          workerMode === 'thread_links' && params.event_id.startsWith('$thread-reply-')
-            ? JSON.stringify({
-                type: 'm.room.message',
-                content: {
-                  'm.relates_to': { rel_type: 'm.thread', event_id: '$thread-root:example.test' },
-                },
-              })
-            : params.event_id === '$edit:example.test'
+      'timeline.event_source': (params) => {
+        if (params.event_id === '$missing:example.test') throw new Error('event not found');
+        return {
+          source:
+            (workerMode === 'thread_links' || workerMode === 'forum') &&
+            params.event_id.startsWith('$thread-reply-')
               ? JSON.stringify({
                   type: 'm.room.message',
                   content: {
-                    'm.relates_to': { rel_type: 'm.replace', event_id: '$general-8:example.test' },
+                    'm.relates_to': { rel_type: 'm.thread', event_id: '$thread-root:example.test' },
                   },
                 })
-              : '{}',
-        encrypted: false,
-        original: null,
-        encryption: null,
-      }),
+              : params.event_id === '$reaction:example.test'
+                ? JSON.stringify({
+                    type: 'm.reaction',
+                    content: {
+                      'm.relates_to': {
+                        rel_type: 'm.annotation',
+                        event_id: '$thread-reply-10:example.test',
+                        key: '👍',
+                      },
+                    },
+                  })
+                : params.event_id === '$edit:example.test'
+                  ? JSON.stringify({
+                      type: 'm.room.message',
+                      content: {
+                        'm.relates_to': {
+                          rel_type: 'm.replace',
+                          event_id: '$general-8:example.test',
+                        },
+                      },
+                    })
+                  : '{}',
+          encrypted: false,
+          original: null,
+          encryption: null,
+        };
+      },
       'timeline.edit_history': () => [],
       'timeline.read_marker': (params) => fullyReadEventId(params.room_id),
       'timeline.room_event_relations': () => ({
@@ -1705,11 +1761,15 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'personas.reorder': () => [],
       'personas.backup': () => '{}',
       'room_state.event': (params) =>
-        params.event_type === 'moe.sable.room.abbreviations'
-          ? { entries: abbreviations.get(params.room_id) ?? [] }
-          : params.event_type === 'm.room.tombstone' && params.room_id === tombstonedRoom.room_id
-            ? { replacement_room: successorRoom.room_id, body: null }
-            : null,
+        params.room_id === room.room_id &&
+        params.state_key === '' &&
+        window.__e2eRoomState?.[params.event_type] !== undefined
+          ? window.__e2eRoomState[params.event_type]
+          : params.event_type === 'moe.sable.room.abbreviations'
+            ? { entries: abbreviations.get(params.room_id) ?? [] }
+            : params.event_type === 'm.room.tombstone' && params.room_id === tombstonedRoom.room_id
+              ? { replacement_room: successorRoom.room_id, body: null }
+              : null,
       'room_state.events': (params) => roomStateEvents(params.room_id, params.event_type),
       'room_state.bot_commands': () => [],
       'room_state.account_data': (params) =>
@@ -1717,10 +1777,17 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           ? { event_id: fullyReadEventId(params.room_id) }
           : null,
       'room_state.events_raw': () => [],
-      'room_state.full_state': () => [],
+      'room_state.full_state': () =>
+        Object.entries(window.__e2eRoomState ?? {}).map(([type, content]) => ({
+          type,
+          state_key: '',
+          content,
+        })),
       'room_state.account_data_raw': () => null,
       'room_state.account_data_types': () => [],
       'room_state.send_event': (params) => {
+        if (window.__e2eRoomState && params.state_key === '')
+          window.__e2eRoomState[params.event_type] = params.content;
         if (params.event_type === 'im.vector.modular.widgets')
           roomWidgets.set(params.room_id, null);
         return `$state-${crypto.randomUUID()}`;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpRightIcon';
+  import { SvelteSet } from 'svelte/reactivity';
 
   import type {
     MemberView,
@@ -10,12 +11,16 @@
   } from '#src/generated/protocol';
 
   import { i18n } from '#lib/i18n.js';
-  import { useRoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
-  import { findMember, senderDisplayColors, stripReplyFallback } from '../members/members.js';
+  import MediaImage from '#lib/ui/MediaImage.svelte';
+  import {
+    hasRoomMediaPreviews,
+    useRoomMediaPreviews,
+  } from '../media/room-media-previews.svelte.js';
+  import { findMember, stripReplyFallback, useSenderColors } from '../members/members.js';
   import SenderName from '../members/SenderName.svelte';
-  import { hasSenderRoles, useSenderRoles } from '../members/sender-roles.js';
   import { replyText } from '../messages/reply-fallback.js';
+  import { previewSegments } from '../messages/reply-preview.js';
   import { stateEventText } from './state-event-text';
 
   interface Props {
@@ -32,11 +37,13 @@
   let { reply, target, sender, persona, profile, currentUserId, members, onJumpToEvent }: Props =
     $props();
 
-  const roomCosmetics = useRoomCosmetics();
-  const senderRoles = hasSenderRoles() ? useSenderRoles() : null;
+  const senderColors = useSenderColors();
+  const roomMedia = hasRoomMediaPreviews() ? useRoomMediaPreviews() : null;
+  const failedEmotes = new SvelteSet<string>();
 
   let roomName = $derived.by(() => {
     const member = findMember(members, sender);
+    // eslint-disable-next-line no-restricted-properties -- before the profile name
     return member ? member.display_name : (reply.sender_name ?? target?.sender_name ?? null);
   });
   let nameBase = $derived(
@@ -45,7 +52,7 @@
   let name = $derived(
     reply.sender_mentioned && !nameBase.startsWith('@') ? `@${nameBase}` : nameBase
   );
-  let body = $derived.by(() => {
+  let segments = $derived.by(() => {
     const kind = target?.content.kind;
     if (
       target &&
@@ -54,27 +61,38 @@
         kind === 'state_event' ||
         kind === 'hidden_event')
     ) {
-      return stateEventText(target, i18n.t);
+      return [stateEventText(target, i18n.t)];
     }
-    return stripReplyFallback(replyText(reply, i18n.t), persona);
+    const text = stripReplyFallback(replyText(reply, i18n.t), persona);
+    return roomMedia?.hidden ? [text] : previewSegments(text, reply.emotes);
   });
-  let cosmetics = $derived(persona ? null : (roomCosmetics?.for(reply.sender) ?? null));
   let colors = $derived(
-    senderDisplayColors(
-      sender ?? '',
-      profile,
+    senderColors(sender, profile, {
       persona,
-      currentUserId !== null && sender === currentUserId,
-      cosmetics,
-      sender ? (senderRoles?.(sender)?.color ?? null) : null
-    )
+      isOwn: currentUserId !== null && sender === currentUserId,
+    })
   );
 </script>
 
 {#snippet copy()}
   <span class="reply-copy"
     ><SenderName displayName={name} {colors} nameClass="reply-name" compact />
-    <span class="reply-body">{body}</span></span
+    <span class="reply-body" dir="auto"
+      >{#each segments as segment, index (index)}{#if typeof segment === 'string' || failedEmotes.has(segment.source)}{typeof segment ===
+          'string'
+            ? segment
+            : segment.alt}{:else}<MediaImage
+            class="reply-emote"
+            source={segment.source}
+            alt={segment.alt}
+            title={segment.alt}
+            width={64}
+            height={64}
+            original
+            emoticon
+            onfailed={(source) => failedEmotes.add(source)}
+          />{/if}{/each}</span
+    ></span
   >
 {/snippet}
 
@@ -96,7 +114,7 @@
       onJumpToEvent?.(reply.event_id);
     }}
   >
-    <ReplyIcon class="reply-icon" />
+    <ReplyIcon class="mirror-rtl reply-icon" />
     {@render copy()}
   </button>
 {/if}
@@ -132,6 +150,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .reply-body :global(.reply-emote) {
+    display: inline-block;
+    height: 1.25em;
+    max-width: 6em;
+    object-fit: contain;
+    vertical-align: middle;
+    width: calc(1.25em * var(--media-ratio, 1));
   }
 
   /* WebKit uses a clipped inline-block's bottom as its baseline. */
@@ -170,17 +197,22 @@
   }
 
   .reply-connected::before {
-    border-left: var(--reply-connector-width) solid var(--surface-on-container);
-    border-radius: var(--radius) 0 0;
+    border-inline-start: var(--reply-connector-width) solid var(--surface-on-container);
+    border-start-start-radius: var(--radius);
     border-top: var(--reply-connector-width) solid var(--surface-on-container);
     content: '';
     height: calc(var(--space-250) + var(--border-width-300));
-    left: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
+    inset-inline-start: calc(
+      -1 *
+        (var(--timeline-row-gap) + var(--avatar-size-small) / 2 + var(--reply-connector-width) / 2)
+    );
     opacity: var(--opacity-placeholder);
     pointer-events: none;
     position: absolute;
     top: calc(50% - var(--border-width-300));
-    width: calc(var(--timeline-row-gap) / 2 + var(--avatar-size-small) / 2);
+    width: calc(
+      var(--timeline-row-gap) / 2 + var(--avatar-size-small) / 2 + var(--reply-connector-width) / 2
+    );
   }
 
   .reply-connected:is(:hover, :focus-visible)::before {
@@ -203,7 +235,7 @@
     background: var(--primary-main);
     bottom: 0;
     content: '';
-    left: 0;
+    inset-inline-start: 0;
     pointer-events: none;
     position: absolute;
     top: 0;
@@ -216,12 +248,13 @@
     white-space: normal;
   }
 
-  .reply-expanded .reply-copy > span {
+  .reply-expanded .reply-body {
     -webkit-box-orient: vertical;
     display: -webkit-box;
-    -webkit-line-clamp: 6;
-    line-clamp: 6;
+    -webkit-line-clamp: 5;
+    line-clamp: 5;
     overflow: hidden;
+    white-space: pre-wrap;
   }
 
   .reply-preview:is(:hover, :focus-visible) .reply-body {
@@ -239,7 +272,7 @@
   }
 
   :global(.message.layout-compact) .reply-connected::before {
-    left: calc(var(--space-050) - var(--space-300));
+    inset-inline-start: calc(var(--space-050) - var(--space-300));
     width: calc(var(--space-300) - var(--space-150));
   }
 
@@ -255,14 +288,12 @@
   }
 
   :global(.message.layout-bubble.own.align-own) .reply-connected {
+    justify-self: end;
+    max-width: 100%;
     text-align: end;
   }
 
   :global(.message.layout-bubble.own.align-own) .reply-connected::before {
-    border-left: 0;
-    border-radius: 0 var(--radius) 0 0;
-    border-right: var(--reply-connector-width) solid var(--surface-on-container);
-    left: auto;
-    right: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
+    display: none;
   }
 </style>

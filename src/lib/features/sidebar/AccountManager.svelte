@@ -100,17 +100,25 @@
   });
 
   $effect(() => {
-    if (!activeUserId) return;
+    const userId = activeUserId;
+    if (!userId) return;
 
     let cancelled = false;
-    void core.userProfile(activeUserId).then(
-      (next) => {
-        if (!cancelled) profile = next;
-      },
-      (cause: unknown) => console.debug('[sable nav] own profile unavailable', cause)
-    );
+    const load = () => {
+      void core.userProfile(userId).then(
+        (next) => {
+          if (!cancelled) profile = next;
+        },
+        (cause: unknown) => console.debug('[sable nav] own profile unavailable', cause)
+      );
+    };
+    load();
+    const stop = core.onProfileChanged((changed) => {
+      if (changed === userId) load();
+    });
     return () => {
       cancelled = true;
+      stop();
     };
   });
 
@@ -465,7 +473,7 @@
     border-radius: var(--radius);
   }
 
-  .account-profile :global(.profile-card .profile-card-cover) {
+  .account-profile :global(.profile-card .profile-card-cover:not(.fit-banner)) {
     height: 8rem;
   }
 
@@ -631,7 +639,7 @@
     align-items: center;
     display: flex;
     min-width: 0;
-    padding-right: var(--space-100);
+    padding-inline-end: var(--space-100);
   }
 
   .account-row + .account-row {
@@ -692,7 +700,7 @@
   @container (width < 20rem) {
     .account-row {
       display: block;
-      padding-right: 0;
+      padding-inline-end: 0;
       position: relative;
     }
 
@@ -723,8 +731,8 @@
     }
 
     .account-row :global(.selection-open) {
+      inset-inline-end: var(--space-400);
       position: absolute;
-      right: var(--space-400);
       top: var(--space-400);
     }
   }

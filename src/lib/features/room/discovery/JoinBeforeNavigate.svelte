@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { serverNameOf } from '#lib/matrix-id.js';
   import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
@@ -8,11 +9,10 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { joinRoom, knockRoom } from '#lib/core/api/rooms.js';
   import { i18n } from '#lib/i18n.js';
-  import { CoreError } from '#src/transport';
+  import { isCoreError } from '#src/transport';
   import { bannedMessage } from '#lib/rooms/join-errors.js';
   import { joinVia, roomSectionPath } from '#lib/rooms/permalink.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { childRouting } from '#lib/rooms/spaces.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
@@ -58,7 +58,7 @@
   const reasonId = $props.id();
 
   let title = $derived(preview?.name ?? roomId);
-  let localServer = $derived(core.session?.user_id.split(':').slice(1).join(':') ?? null);
+  let localServer = $derived(core.session ? serverNameOf(core.session.user_id) : null);
 
   $effect(() => {
     const address = roomId;
@@ -101,8 +101,8 @@
   let offerKnock = $derived(mustKnock || (canKnock && !invited && failedAction === 'join'));
   let knocked = $derived((currentMembership === 'knocked' && !withdrew) || (sentKnock && !invited));
 
-  let parent = $derived(childRouting(roomList.rooms, roomId));
-  let selectedVias = $derived(via.length > 0 ? via : parent.via);
+  let parent = $derived(roomList.roomSpaces(roomId)?.parent ?? null);
+  let selectedVias = $derived(via.length > 0 ? via : (parent?.via ?? []));
   let listedKey = $derived(selectedVias.join(','));
 
   let provenanceTooltip = $derived.by(() => {
@@ -122,7 +122,7 @@
   let address = $derived(preview?.canonical_alias ?? roomId);
 
   function routingFor(): Promise<string[]> {
-    return joinVia(core, selectedVias, parent.parentId);
+    return joinVia(core, selectedVias, parent?.space_id ?? null);
   }
 
   async function join(): Promise<void> {
@@ -136,7 +136,7 @@
       await goto(target, { replace: true });
     } catch (error) {
       console.warn('[sable room] join failed', error);
-      if (error instanceof CoreError && error.detail.code === 'banned') {
+      if (isCoreError(error, 'banned')) {
         banReason = error.detail.reason;
         joinBanned = true;
       } else {
@@ -190,7 +190,7 @@
           label={i18n.t('timeline.back')}
           onclick={backToRoomList}
         >
-          <BackIcon />
+          <BackIcon class="mirror-rtl" />
         </PanelHeaderButton>
       {/snippet}
     </PanelHeader>
@@ -433,7 +433,7 @@
     content: '';
     height: 100%;
     position: absolute;
-    transform: translateX(calc((var(--space-400) + 3.5px) / 2));
+    transform: translateX(calc((var(--space-400) + 3.5px) / 2 * var(--inline-sign)));
     width: 1px;
   }
 

@@ -101,7 +101,7 @@
   {#if !loaded}
     <div role="status"><Spinner /></div>
   {:else}
-    <Avatar id={userId} src={avatar_url} openable={true} {name} size="large" />
+    <Avatar id={userId} src={avatar_url} openable={true} {name} size="large" autoplay />
     <h1 id="user-link-title">{name}</h1>
     <p class="user-link-id">{userId}</p>
     {#if failed}
@@ -130,12 +130,18 @@
     align-items: center;
     box-sizing: border-box;
     display: flex;
+    flex: 1;
     flex-direction: column;
     gap: var(--space-300);
     justify-content: center;
     min-height: 100%;
     padding: var(--space-700) var(--space-600);
     text-align: center;
+  }
+
+  .user-link > :global(.avatar-button) {
+    height: auto;
+    width: auto;
   }
 
   .user-link h1 {

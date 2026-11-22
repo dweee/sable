@@ -6,14 +6,13 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { UserProfile } from '#lib/profile/user-profile.svelte.js';
-  import { useRoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { resolveUserStatus } from '#lib/rooms/user-status.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import PresenceDot from '#lib/ui/primitives/PresenceDot.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
-  import { findMember, senderDisplayColors } from './members.js';
+  import { findMember, useSenderColors } from './members.js';
   import SenderName from './SenderName.svelte';
   import type { PowerLevelTag } from '../settings/power-level-tags.js';
 
@@ -41,16 +40,13 @@
   const core = useCoreClient();
   const profileDescriptionId = $props.id();
   const presenceStore = usePresenceStore();
-  const roomCosmetics = useRoomCosmetics();
+  const senderColors = useSenderColors();
   const profile = new UserProfile(core, () => userId);
   let member = $derived(findMember(members, userId));
   let shown = $derived(member ?? profile.current);
   let displayName = $derived(shown?.display_name ?? userId);
   let avatarUrl = $derived(shown?.avatar_url ?? null);
-  let cosmetics = $derived(roomCosmetics?.for(userId) ?? null);
-  let colors = $derived(
-    senderDisplayColors(userId, profile.current, null, false, cosmetics, powerTag?.color ?? null)
-  );
+  let colors = $derived(senderColors(userId, profile.current, { roleColor: powerTag?.color }));
   let profileLabel = $derived(i18n.t('timeline.senderProfile', { name: displayName }));
   let presence = $derived(presenceStore.peek(userId));
   let userStatus = $derived(showStatus ? resolveUserStatus(profile.current, presence) : null);
@@ -127,7 +123,7 @@
     font-size: var(--font-size-label);
     gap: var(--space-300);
     min-width: 0;
-    text-align: left;
+    text-align: start;
     width: 100%;
   }
 
@@ -157,9 +153,9 @@
   }
 
   .member-identity-avatar :global(.member-identity-presence) {
+    inset-inline-end: -0.125rem;
     bottom: -0.125rem;
     position: absolute;
-    right: -0.125rem;
   }
 
   .member-identity-main {
@@ -186,7 +182,7 @@
   }
 
   .member-identity-status-emoji {
-    margin-right: var(--space-050);
+    margin-inline-end: var(--space-050);
   }
 
   .member-identity-trailing {
@@ -196,6 +192,6 @@
     flex: none;
     font-size: var(--font-size-small);
     gap: var(--space-200);
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 </style>

@@ -1,11 +1,23 @@
-use matrix_sdk::ruma::push::{ConditionalPushRule, RuleKind, Ruleset};
+use matrix_sdk::ruma::push::{
+    ConditionalPushRule, EventMatchConditionData, NewConditionalPushRule, NewPushRule,
+    PushCondition, RuleKind, Ruleset,
+};
 use matrix_sdk::ruma::{RoomId, UserId};
 use serde_json::{Value, json};
 
 use super::RuleWrite;
 
 /// Per-room DM copies written by older versions.
-const SHAPE_PREFIX: &str = "moe.sable.shape.";
+const PER_ROOM_PREFIXES: [&str; 2] = ["moe.sable.shape.", "moe.sable.dm_default."];
+const PER_ROOM_EVENTS: [(&str, &str); 7] = [
+    ("message", "m.room.message"),
+    ("encrypted", "m.room.encrypted"),
+    ("sticker", "m.sticker"),
+    ("poll_start", "m.poll.start"),
+    ("poll_end", "m.poll.end"),
+    ("poll_start_unstable", "org.matrix.msc3381.poll.start"),
+    ("poll_end_unstable", "org.matrix.msc3381.poll.end"),
+];
 pub(super) const STICKER: &str = "moe.sable.sticker";
 pub(super) const STICKER_DIRECT: &str = "moe.sable.sticker_one_to_one";
 pub(super) const RING_ONE_TO_ONE: &str = "moe.sable.ring_one_to_one";
@@ -64,6 +76,32 @@ pub(super) const SUPPRESSED_ROOM_EVENTS: [&str; 15] = [
     "org.matrix.msc4310.rtc.decline",
 ];
 
+/// The suppressions a room set to all messages needs and the account does not have.
+#[must_use]
+pub fn plan_suppressions(rules: &Ruleset) -> Vec<RuleWrite> {
+    std::iter::once((
+        SUPPRESS_BRIDGE_STATUS.to_owned(),
+        "com.beeper.message_send_status",
+    ))
+    .chain(
+        SUPPRESSED_ROOM_EVENTS
+            .into_iter()
+            .map(|event_type| (format!("moe.sable.suppress.{event_type}"), event_type)),
+    )
+    .filter(|(rule_id, _)| rules.override_.get(rule_id.as_str()).is_none())
+    .map(|(rule_id, event_type)| {
+        RuleWrite::Put(NewPushRule::Override(NewConditionalPushRule::new(
+            rule_id,
+            vec![PushCondition::EventMatch(EventMatchConditionData::new(
+                "type".to_owned(),
+                event_type.to_owned(),
+            ))],
+            vec![],
+        )))
+    })
+    .collect()
+}
+
 /// Delete unchanged rules added by older Sable versions.
 #[must_use]
 pub fn plan_cleanup(rules: &Ruleset, user_id: &UserId) -> Vec<RuleWrite> {
@@ -106,15 +144,15 @@ fn is_generated(rule: &ConditionalPushRule, kind: &RuleKind, user_id: &UserId) -
             }
             return definition(rule, json!(conditions), &json!(super::spec_actions(direct)));
         }
-        if let Some(suffix) = rule.rule_id.strip_prefix(SHAPE_PREFIX)
+        if let Some(suffix) = PER_ROOM_PREFIXES
+            .iter()
+            .find_map(|prefix| rule.rule_id.strip_prefix(prefix))
             && let Some((family, room_id)) = suffix.split_once('.')
             && RoomId::parse(room_id).is_ok()
         {
-            let event_type = match family {
-                "message" => "m.room.message",
-                "encrypted" => "m.room.encrypted",
-                "sticker" => "m.sticker",
-                _ => return false,
+            let Some((_, event_type)) = PER_ROOM_EVENTS.iter().find(|(name, _)| *name == family)
+            else {
+                return false;
             };
             let conditions = json!([
                 {"kind":"event_match", "key":"room_id", "pattern":room_id},
@@ -131,15 +169,8 @@ fn is_generated(rule: &ConditionalPushRule, kind: &RuleKind, user_id: &UserId) -
         return false;
     }
 
-    let event_type = match rule.rule_id.as_str() {
-        SUPPRESS_BRIDGE_STATUS => Some("com.beeper.message_send_status"),
-        SUPPRESS_REACTIONS => Some("m.reaction"),
-        id => id
-            .strip_prefix("moe.sable.suppress.")
-            .filter(|event_type| SUPPRESSED_ROOM_EVENTS.contains(event_type)),
-    };
-    if let Some(event_type) = event_type {
-        return definition(rule, json!([event_match(event_type)]), &json!([]));
+    if rule.rule_id == SUPPRESS_REACTIONS {
+        return definition(rule, json!([event_match("m.reaction")]), &json!([]));
     }
     for (event_type, id) in RTC_INVITE_GUARDS {
         if rule.rule_id == id {

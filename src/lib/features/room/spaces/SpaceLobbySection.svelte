@@ -18,6 +18,7 @@
   import UsersThreeIcon from 'phosphor-svelte/lib/UsersThreeIcon';
 
   import { i18n } from '#lib/i18n.js';
+  import type { PermalinkFormat } from '#lib/rooms/permalink.js';
   import { whenVisible } from '#lib/ui/when-visible.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -60,7 +61,11 @@
       parentId: string,
       action: LobbyAction
     ) => void;
-    onCopyLink: (child: HierarchyRoomView) => void;
+    onCopyLink: (
+      child: HierarchyRoomView,
+      parentId: string | null,
+      format: PermalinkFormat
+    ) => void;
     onRemove: (section: HierarchySection, entry: HierarchyRoom) => void;
     dragList: DragList<LobbyDragItem>;
     onDropRoom: (
@@ -231,12 +236,13 @@
           >
             <HouseIcon size={16} />{i18n.t('room.lobbyOpenSubspace')}
           </ActionMenuItem>
-          <ActionMenuItem
-            onSelect={() => {
-              onCopyLink(sectionSpace);
-            }}
-          >
-            <LinkIcon size={16} />{i18n.t('room.menuCopyLink')}
+          <ActionMenuItem onSelect={() => onCopyLink(sectionSpace, ownerId, 'matrix')}>
+            <LinkIcon size={16} />
+            {i18n.t('timeline.copyMatrixLink')}
+          </ActionMenuItem>
+          <ActionMenuItem onSelect={() => onCopyLink(sectionSpace, ownerId, 'external')}>
+            <LinkIcon size={16} />
+            {i18n.t('timeline.copyExternalLink')}
           </ActionMenuItem>
           {#if joinedSpace}
             <ActionMenuItem
@@ -376,7 +382,7 @@
                     onOpen(child);
                   }}
                 >
-                  <ArrowRightIcon />
+                  <ArrowRightIcon class="mirror-rtl" />
                 </IconButton>
               {:else if action}
                 <Button
@@ -408,12 +414,13 @@
                   </button>
                 {/snippet}
                 <IconContext values={{ 'aria-hidden': 'true' }}>
-                  <ActionMenuItem
-                    onSelect={() => {
-                      onCopyLink(child);
-                    }}
-                  >
-                    <LinkIcon size={16} />{i18n.t('room.menuCopyLink')}
+                  <ActionMenuItem onSelect={() => onCopyLink(child, parentId, 'matrix')}>
+                    <LinkIcon size={16} />
+                    {i18n.t('timeline.copyMatrixLink')}
+                  </ActionMenuItem>
+                  <ActionMenuItem onSelect={() => onCopyLink(child, parentId, 'external')}>
+                    <LinkIcon size={16} />
+                    {i18n.t('timeline.copyExternalLink')}
                   </ActionMenuItem>
                   {#if canManage}
                     <ActionMenuItem
@@ -541,7 +548,7 @@
     gap: var(--space-300);
     min-width: 0;
     padding: var(--space-200);
-    text-align: left;
+    text-align: start;
   }
 
   :global(.section-toggle:hover) {
@@ -628,7 +635,7 @@
     cursor: grab;
     display: inline-flex;
     flex: none;
-    margin-left: calc(-1 * var(--space-300));
+    margin-inline-start: calc(-1 * var(--space-300));
   }
 
   .room:hover {
@@ -680,7 +687,7 @@
     min-width: 0;
     overflow: hidden;
     padding: 0;
-    text-align: left;
+    text-align: start;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -714,7 +721,7 @@
     display: flex;
     flex: none;
     gap: var(--space-200);
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 
   .section-failed {
@@ -755,7 +762,7 @@
 
   @media (width >= 42rem) {
     .room-actions {
-      margin-left: 0;
+      margin-inline-start: 0;
     }
   }
 </style>

@@ -24,10 +24,10 @@ import { createMedia } from './media.svelte.js';
 import { invalidatePacks, isPackAccountDataEvent } from '#lib/emoji/load-packs.js';
 import { createTransport } from '#src/transport/create';
 import type { Transport } from '../../transport';
-import { CoreError } from '../../transport';
+import { CoreError, isCoreError } from '../../transport';
 import QuickLRU from 'quick-lru';
 import { on } from 'svelte/events';
-import { deviceDisplayName } from '#lib/deployment/policy.js';
+import { deviceDisplayName, oauthClientName } from '#lib/deployment/policy.js';
 import {
   activateAccountConfiguration,
   removeAccountConfiguration,
@@ -41,6 +41,7 @@ import {
 } from '#lib/deployment/e2ee-policy.js';
 import { onDebugLogCapture, recordDebugLog } from '#lib/observability/debug-log.svelte.js';
 import { clearRoomListSnapshot } from '#lib/rooms/room-list-snapshot.js';
+import { forgetAccountStorage } from './account-storage';
 import { clearRoomTimelines } from '#lib/rooms/timeline.svelte.js';
 import { MemberPreviews } from '#lib/rooms/member-previews.svelte.js';
 import { clearRecentSearches } from '#lib/search/recent-searches.svelte.js';
@@ -48,7 +49,10 @@ import { reportCoreFailure } from '#lib/observability/core-failure.js';
 import { reportSessionFailure } from '#lib/observability/session-telemetry.js';
 import {
   browserGatesCoreNetwork,
+  probeFromPage,
   requestAndroidLocalNetwork,
+  androidLocalNetworkUnasked,
+  declineAndroidLocalNetwork,
   localNetworkDenied,
   LocalNetworkBlockedError,
 } from '#lib/platform/local-network.js';
@@ -62,6 +66,9 @@ const profileCacheFreshMs = 2 * 60 * 1000;
 const profileFailureRetryMs = 60 * 1000;
 const relationsCacheFreshMs = 60 * 1000;
 const SLOW_START_MS = 15_000;
+const LOCAL_NETWORK_SETTLED_MS = 30_000;
+const LOCAL_NETWORK_CONFIRM_MS = 5000;
+const LOCAL_NETWORK_REPEATS = 3;
 const MAX_PROFILE_CACHE_ENTRIES = 256;
 const MAX_RELATIONS_CACHE_ENTRIES = 128;
 const MAX_PROFILE_LOOKUPS = 24;
@@ -90,12 +97,9 @@ function homeserverUrl(homeserver: string): URL {
 }
 
 async function grantLocalNetworkAccess(baseUrl: string): Promise<boolean> {
-  const probe = () =>
-    fetch(new URL('_matrix/client/versions', homeserverUrl(baseUrl)), { mode: 'cors' });
   try {
-    await probe().catch(async (error: unknown) => {
-      if (!(await requestAndroidLocalNetwork())) throw error;
-      return probe();
+    await probeFromPage(new URL('_matrix/client/versions', homeserverUrl(baseUrl)), {
+      mode: 'cors',
     });
     return true;
   } catch (error) {
@@ -198,8 +202,11 @@ export class CoreClient {
   deviceList = $state.raw<DeviceView[]>([]);
   /** The homeserver's OAuth metadata: `undefined` until known, `null` when it has no OAuth. */
   oauthMetadata = $state.raw<OAuthMetadataView | null | undefined>(undefined);
+  qrGrantSupported = $state(false);
   unresponsive = $state(false);
   localNetworkBlocked = $state<string | null>(null);
+  /** The homeserver an Android user can let Sable look for on the local network. */
+  localNetworkOffer = $state<string | null>(null);
   accountRevision = $state(0);
 
   private transport: Transport | null = null;
@@ -233,6 +240,10 @@ export class CoreClient {
   private readonly profileChangeListeners = new Set<(userId: string) => void>();
   private readonly changedProfiles = new Set<string>();
   private profileChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  private localNetworkClearTimer: ReturnType<typeof setTimeout> | null = null;
+  private offlineSpell = 0;
+  private reachableOfflineSpells: number[] = [];
+  private pageProbe: { at: number; reachable: Promise<boolean> } | null = null;
   private profileLookups = 0;
   private readonly profileLookupQueue: {
     resolve: () => void;
@@ -452,7 +463,7 @@ export class CoreClient {
       homeserver: resolvedHomeserver,
       redirect_uri: redirectUri,
       intent,
-      device_display_name: deviceDisplayName(await prepareLoginConfiguration(homeserver)),
+      device_display_name: oauthClientName(await prepareLoginConfiguration(homeserver)),
     });
   }
 
@@ -616,7 +627,7 @@ export class CoreClient {
         return profile;
       })
       .catch((error: unknown) => {
-        const rateLimited = error instanceof CoreError && error.detail.code === 'rate_limited';
+        const rateLimited = isCoreError(error, 'rate_limited');
         const cancelled = error instanceof DOMException && error.name === 'AbortError';
         if (!rateLimited && !cancelled && this.profileRequests.get(userId)?.request === request) {
           this.profileFailures.set(userId, { accountId, error });
@@ -873,16 +884,27 @@ export class CoreClient {
 
     try {
       await this.refreshAccounts();
-      const fallbackAccountId = this.accounts.find((account) => !account.needs_reauth)?.account_id;
-      if (fallbackAccountId !== undefined) {
-        await this.switchAccount(fallbackAccountId);
-        return;
-      }
+      if (await this.switchToFallback()) return;
       this.status = 'signed-out';
     } catch (error) {
+      console.warn('[sable core] no saved account opened after signing out', error);
       this.status = 'signed-out';
-      throw error;
     }
+  }
+
+  private async switchToFallback(): Promise<boolean> {
+    let failure: Error | null = null;
+    for (const account of this.accounts) {
+      if (account.needs_reauth) continue;
+      try {
+        await this.switchAccount(account.account_id);
+        return true;
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    if (failure !== null) throw failure;
+    return false;
   }
 
   async resetCaches(): Promise<void> {
@@ -993,9 +1015,14 @@ export class CoreClient {
     this.encryption = null;
     this.deviceList = [];
     this.oauthMetadata = undefined;
+    this.qrGrantSupported = false;
     this.searchCoverage = null;
     this.searchCoverageUnavailable = false;
+    this.cancelLocalNetworkClear();
     this.localNetworkBlocked = null;
+    this.localNetworkOffer = null;
+    this.reachableOfflineSpells = [];
+    this.pageProbe = null;
   }
 
   /** Both events fire only on a change, so a session that starts unverified
@@ -1030,6 +1057,7 @@ export class CoreClient {
       void this.primeEncryptionStatus();
       void this.primeSyncStatus();
       void this.primeOAuthMetadata();
+      void this.primeQrGrantSupport();
       void this.primeOwnProfile(session.user_id);
       if (browserGatesCoreNetwork()) void grantLocalNetworkAccess(session.homeserver);
     }
@@ -1080,12 +1108,9 @@ export class CoreClient {
       } else {
         await this.refreshAccounts();
         if (generation !== this.generation) return;
-        const fallback = this.accounts.find((account) => !account.needs_reauth);
-        if (fallback) {
-          await this.switchAccount(fallback.account_id);
-          return;
-        }
+        if (await this.switchToFallback()) return;
         this.replaceSession(null);
+        if (this.accounts.length === 0) forgetAccountStorage();
         this.reauthenticationAccountId =
           this.accounts.find((account) => account.needs_reauth)?.account_id ?? null;
         this.restoreFailed = false;
@@ -1201,24 +1226,107 @@ export class CoreClient {
     }
   }
 
+  private async primeQrGrantSupport(): Promise<void> {
+    const revision = this.accountRevision;
+    try {
+      const supported = await this.rpc.session.qrGrantSupported();
+      if (revision === this.accountRevision) this.qrGrantSupported = supported;
+    } catch (error) {
+      console.debug('[sable core] QR grant support unavailable', error);
+    }
+  }
+
   private applySyncStatus(status: SyncStatus): void {
+    const reconnected = status.state === 'live' && this.sync?.state !== 'live';
     this.sync = status;
+    if (reconnected) {
+      const retry = [...this.profileFailures.keys()];
+      const own = this.session?.user_id;
+      if (own && this.cachedUserProfile(own, true) === null && !this.profileRequests.has(own)) {
+        retry.push(own);
+      }
+      for (const userId of retry) this.invalidateProfile(userId);
+    }
     if (status.state !== 'offline') {
-      this.localNetworkBlocked = null;
+      this.offlineSpell += 1;
+      this.localNetworkOffer = null;
+      if (this.localNetworkBlocked !== null) {
+        this.localNetworkClearTimer ??= setTimeout(() => {
+          this.localNetworkClearTimer = null;
+          this.localNetworkBlocked = null;
+        }, LOCAL_NETWORK_SETTLED_MS);
+      }
       return;
     }
+    this.cancelLocalNetworkClear();
     if (browserGatesCoreNetwork()) void this.checkLocalNetwork();
+    else if (navigator.onLine) void this.offerLocalNetwork();
+  }
+
+  private async offerLocalNetwork(): Promise<void> {
+    const session = this.session;
+    if (!session) return;
+    const revision = this.accountRevision;
+    if (!(await androidLocalNetworkUnasked())) return;
+    if (revision !== this.accountRevision || this.sync?.state !== 'offline') return;
+    this.localNetworkOffer = homeserverUrl(session.homeserver).hostname;
+  }
+
+  async retrySync(): Promise<void> {
+    try {
+      await this.rpc.session.retrySync();
+    } catch (error) {
+      console.debug('[sable core] sync retry failed', error);
+    }
+  }
+
+  async allowLocalNetwork(): Promise<void> {
+    this.localNetworkOffer = null;
+    await requestAndroidLocalNetwork();
+  }
+
+  declineLocalNetwork(): void {
+    this.localNetworkOffer = null;
+    declineAndroidLocalNetwork();
   }
 
   private async checkLocalNetwork(): Promise<void> {
     const session = this.session;
     if (!session) return;
     const revision = this.accountRevision;
+    const spell = this.offlineSpell;
     const blocked =
-      (await grantLocalNetworkAccess(session.homeserver)) ||
+      (await this.probeHomeserver(session.homeserver)) ||
       (navigator.onLine && (await localNetworkDenied()));
-    if (revision !== this.accountRevision || this.sync?.state !== 'offline') return;
-    this.localNetworkBlocked = blocked ? homeserverUrl(session.homeserver).hostname : null;
+    if (!blocked) return;
+    const now = Date.now();
+    this.reachableOfflineSpells = this.reachableOfflineSpells
+      .filter((at) => now - at < LOCAL_NETWORK_SETTLED_MS)
+      .concat(now);
+    if (this.reachableOfflineSpells.length < LOCAL_NETWORK_REPEATS) {
+      await sleep(LOCAL_NETWORK_CONFIRM_MS);
+    }
+    if (
+      revision !== this.accountRevision ||
+      spell !== this.offlineSpell ||
+      this.sync?.state !== 'offline'
+    ) {
+      return;
+    }
+    this.localNetworkBlocked = homeserverUrl(session.homeserver).hostname;
+  }
+
+  private probeHomeserver(homeserver: string): Promise<boolean> {
+    const now = Date.now();
+    if (this.pageProbe === null || now - this.pageProbe.at >= LOCAL_NETWORK_SETTLED_MS) {
+      this.pageProbe = { at: now, reachable: grantLocalNetworkAccess(homeserver) };
+    }
+    return this.pageProbe.reachable;
+  }
+
+  private cancelLocalNetworkClear(): void {
+    if (this.localNetworkClearTimer !== null) clearTimeout(this.localNetworkClearTimer);
+    this.localNetworkClearTimer = null;
   }
 
   private readonly handleEvent = (event: CoreEvent): void => {
@@ -1300,12 +1408,7 @@ export class CoreClient {
     try {
       await this.refreshAccounts();
       if (generation !== this.generation) return;
-      const fallbackAccountId = this.accounts.find((account) => !account.needs_reauth)?.account_id;
-      if (fallbackAccountId === undefined) {
-        this.status = 'signed-out';
-        return;
-      }
-      await this.switchAccount(fallbackAccountId);
+      if (!(await this.switchToFallback())) this.status = 'signed-out';
     } catch (error) {
       if (generation !== this.generation) return;
       reportSessionFailure('restore_fallback', error);

@@ -318,17 +318,11 @@ impl Core {
     ) -> Result<PresenceSharingView, RpcError> {
         let label = "edit_presence_sharing";
         let keys = self.presence_keys_or_unsupported(label).await?;
-        let stored = self
-            .sharing_document(keys, Document::Sharing, label)
+        let content = self
+            .update_account_data(&Document::Sharing.candidates(keys), label, async |stored| {
+                Ok(edited_sharing(stored, edit))
+            })
             .await?;
-        let content = match edited_sharing(stored.clone(), edit) {
-            Some(content) => {
-                self.put_global_account_data(keys.sharing.into(), &content, label)
-                    .await?;
-                Some(content)
-            }
-            None => stored,
-        };
         let prompted = self
             .sharing_document(keys, Document::Prompted, label)
             .await?;
@@ -375,15 +369,15 @@ impl Core {
     pub(crate) async fn presence_hint_initial_state(
         &self,
         hint: PresenceHintView,
-    ) -> Option<matrix_sdk::ruma::serde::Raw<matrix_sdk::ruma::events::AnyInitialStateEvent>> {
+    ) -> Option<ruma::serde::Raw<ruma::events::AnyInitialStateEvent>> {
         let keys = self.presence_keys().await?;
-        matrix_sdk::ruma::serde::Raw::new(&json!({
+        ruma::serde::Raw::new(&json!({
             "type": keys.hint,
             "state_key": "",
             "content": hint_content(hint),
         }))
         .ok()
-        .map(matrix_sdk::ruma::serde::Raw::cast_unchecked)
+        .map(ruma::serde::Raw::cast_unchecked)
     }
 
     pub(crate) async fn presence_prompt(
@@ -438,13 +432,12 @@ impl Core {
             self.edit_presence_sharing(&edit).await?;
             return Ok(());
         }
-        let stored = self
-            .sharing_document(keys, Document::Prompted, label)
-            .await?;
-        if let Some(content) = with_prompted(stored, &prompt) {
-            self.put_global_account_data(keys.prompted.into(), &content, label)
-                .await?;
-        }
+        self.update_account_data(
+            &Document::Prompted.candidates(keys),
+            label,
+            async |stored| Ok(with_prompted(stored, &prompt)),
+        )
+        .await?;
         Ok(())
     }
 
@@ -490,19 +483,21 @@ impl Core {
         if !replaced {
             return;
         }
-        if let Ok(stored) = self.sharing_document(keys, Document::Sharing, label).await
-            && let Some(content) = carried_sharing(stored, old, new)
-            && let Err(error) = self
-                .put_global_account_data(keys.sharing.into(), &content, label)
-                .await
+        if let Err(error) = self
+            .update_account_data(&Document::Sharing.candidates(keys), label, async |stored| {
+                Ok(carried_sharing(stored, old, new))
+            })
+            .await
         {
             tracing::warn!(?error, "presence sharing not carried to the upgraded room");
         }
-        if let Ok(stored) = self.sharing_document(keys, Document::Prompted, label).await
-            && let Some(content) = carried_prompted(stored, old, new)
-            && let Err(error) = self
-                .put_global_account_data(keys.prompted.into(), &content, label)
-                .await
+        if let Err(error) = self
+            .update_account_data(
+                &Document::Prompted.candidates(keys),
+                label,
+                async |stored| Ok(carried_prompted(stored, old, new)),
+            )
+            .await
         {
             tracing::warn!(
                 ?error,
@@ -995,7 +990,7 @@ mod tests {
         let own = client.user_id().unwrap().to_owned();
         let partner = owned_user_id!("@bob:example.org");
         let factory = EventFactory::new().room(&room_id);
-        let hint = matrix_sdk::ruma::serde::Raw::new(&json!({
+        let hint = ruma::serde::Raw::new(&json!({
             "type": UNSTABLE.hint,
             "state_key": "",
             "sender": own,

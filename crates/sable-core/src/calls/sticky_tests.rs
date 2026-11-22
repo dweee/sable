@@ -36,7 +36,7 @@ fn plaintext_membership_is_rejected_in_encrypted_rooms() {
     assert!(event.apply(&mut memberships, true, 100));
     assert_eq!(
         memberships.members(100),
-        [] as [crate::calls::membership::CallMember; 0]
+        Vec::<crate::calls::membership::CallMember>::new()
     );
     let mut memberships = crate::calls::membership::StickyMemberships::default();
     assert!(event.apply(&mut memberships, false, 100));
@@ -251,7 +251,7 @@ async fn test_sticky_sync_sends_bounded_extensions_and_parses_both_event_locatio
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "pos": "p1",
             "rooms": { room.room_id().as_str(): { "timeline": [{"type":"m.room.message","event_id":"$timeline","sender":"@a:example.org","origin_server_ts":1,"content":{}}] } },
-            "extensions": { "org.matrix.msc4354.sticky_events": { "next_batch":"s1", "rooms": { room.room_id().as_str(): { "events": [{"type":"m.room.message","event_id":"$sticky","sender":"@a:example.org","origin_server_ts":1,"content":{}}] } } } }
+            "extensions": { "org.matrix.msc4354.sticky_events": { "rooms": { room.room_id().as_str(): { "events": [{"type":"m.room.message","event_id":"$sticky","sender":"@a:example.org","origin_server_ts":1,"content":{}}] } } } }
         })))
         .mount(server.server())
         .await;
@@ -281,7 +281,7 @@ async fn test_sticky_sync_sends_bounded_extensions_and_parses_both_event_locatio
         json!([["m.room.create", ""]]),
         "Synapse rejects a room subscription without required_state"
     );
-    assert_eq!(body["extensions"]["to_device"]["enabled"], false);
+    assert_ne!(body["extensions"]["to_device"]["enabled"], true);
     assert_eq!(
         body["extensions"]["org.matrix.msc4354.sticky_events"]["enabled"],
         true
@@ -318,19 +318,19 @@ async fn test_sticky_sync_applies_redactions_in_encrypted_rooms() {
     }
     assert_eq!(
         memberships.members(200),
-        [] as [crate::calls::membership::CallMember; 0]
+        Vec::<crate::calls::membership::CallMember>::new()
     );
     assert!(!memberships.apply_authenticated(&member, ruma::device_id!("DEVICE"), 200));
 }
 
 #[async_test]
-async fn test_sticky_sync_reuses_since_when_incremental_response_is_empty() {
+async fn test_sticky_sync_resumes_from_the_connection_position() {
     let (server, room) = room().await;
     Mock::given(method("POST"))
         .and(path_regex(".*sync.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "pos": "p1",
-            "extensions": {"org.matrix.msc4354.sticky_events": {"next_batch": "s1"}}
+            "extensions": {"org.matrix.msc4354.sticky_events": {}}
         })))
         .expect(1)
         .up_to_n_times(1)
@@ -346,15 +346,11 @@ async fn test_sticky_sync_reuses_since_when_incremental_response_is_empty() {
         .mount(server.server())
         .await;
     let mut sync = StickySync::new(1);
-    sync.sync(&room, Duration::from_secs(1))
-        .await
-        .expect("initial sync");
-    sync.sync(&room, Duration::from_secs(1))
-        .await
-        .expect("incremental sync");
-    sync.sync(&room, Duration::from_secs(1))
-        .await
-        .expect("empty incremental sync");
+    for _ in 0..3 {
+        sync.sync(&room, Duration::from_secs(1))
+            .await
+            .expect("sticky sync");
+    }
 
     let received = server
         .received_requests()
@@ -363,33 +359,28 @@ async fn test_sticky_sync_reuses_since_when_incremental_response_is_empty() {
         .into_iter()
         .filter(|request| request.method == "POST" && request.url.path().contains("sync"))
         .collect::<Vec<_>>();
-    assert_eq!(received.len(), 3);
-    assert!(
-        received[0]
-            .url
-            .query_pairs()
-            .find(|(key, _)| key == "pos")
-            .is_none()
-    );
+    let positions = received
+        .iter()
+        .map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "pos")
+                .map(|(_, pos)| pos.into_owned())
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        received[1]
-            .url
-            .query_pairs()
-            .find(|(key, _)| key == "pos")
-            .unwrap()
-            .1,
-        "p1"
+        positions,
+        [None, Some("p1".to_owned()), Some("p2".to_owned())]
     );
-    let second: serde_json::Value = serde_json::from_slice(&received[1].body).unwrap();
-    assert_eq!(
-        second["extensions"]["org.matrix.msc4354.sticky_events"]["since"],
-        "s1"
-    );
-    let third: serde_json::Value = serde_json::from_slice(&received[2].body).unwrap();
-    assert_eq!(
-        third["extensions"]["org.matrix.msc4354.sticky_events"]["since"],
-        "s1"
-    );
+    for request in &received {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(
+            body["extensions"]["org.matrix.msc4354.sticky_events"]
+                .get("since")
+                .is_none()
+        );
+    }
 }
 
 #[async_test]
@@ -542,9 +533,9 @@ async fn test_delayed_send_refreshes_expired_credentials_and_preserves_sticky_qu
 async fn test_members_in_the_sdk_sticky_map_feed_the_call() {
     let (_server, room) = room().await;
     let now = crate::now_ms();
-    let mut response = ruma::api::client::sync::sync_events::v5::Response::new("1".to_owned());
+    let mut response = ruma::api::client::sync::sync_events::msc4186::Response::new("1".to_owned());
     let mut sticky_room =
-        ruma::api::client::sync::sync_events::v5::response::StickyEventsRoom::default();
+        ruma::api::client::sync::sync_events::msc4186::response::StickyEventsRoom::default();
     sticky_room.events.push(
         ruma::serde::Raw::new(&json!({
             "type": "m.rtc.member", "sender": "@other:example.org", "event_id": "$member",

@@ -2,13 +2,12 @@
   import { defineMeta } from '@storybook/addon-svelte-csf';
   import IconContext from 'phosphor-svelte/lib/IconContext';
 
-  import MessageQuickReactions from '#lib/features/room/messages/MessageQuickReactions.svelte';
   import { messageMenuRows } from '#lib/features/room/messages/message-menu-items.js';
   import BottomSheet from '#lib/ui/primitives/BottomSheet.svelte';
   import '#lib/ui/primitives/menu.css';
 
   const { Story } = defineMeta({
-    title: 'Room/Message menu',
+    title: 'Message/Message menu',
     tags: ['autodocs'],
   });
 
@@ -30,7 +29,6 @@
 <Story name="Desktop context menu" asChild>
   <div class="menu-surface demo">
     <IconContext values={decorative}>
-      <MessageQuickReactions count={4} onReact={noop} />
       {#each rows as row (row.key)}
         {@const RowIcon = row.icon}
         {#if row.separated}<div class="line"></div>{/if}
@@ -51,7 +49,6 @@
     <IconContext values={decorative}>
       <p class="preview">Shipped the search crawl fix, coverage looks right now</p>
       <div class="line"></div>
-      <MessageQuickReactions count={8} onReact={noop} roomy />
       <div class="sheet-list">
         {#each rows as row (row.key)}
           {@const RowIcon = row.icon}

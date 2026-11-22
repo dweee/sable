@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SettingsCategory, SettingsContext } from '#lib/settings/registry.js';
 import { searchSettings } from './settings-search.js';
 
-const context: SettingsContext = { oauth: false };
+const context: SettingsContext = { oauth: false, qrGrant: false };
 
 const translations: Record<string, string> = {
   'category.notifications': 'Notifications',
@@ -199,14 +199,17 @@ describe('custom panel search', () => {
   it('hides conditional panels until they are enabled', async () => {
     const { settingsCategories } = await import('#lib/settings/registry.js');
     const { preferences } = await import('#lib/settings/preferences.svelte.js');
-    const { t } = await import('#lib/i18n.js');
     const previous = preferences.developerTools;
+    const translateAccess = (key: string) =>
+      key === 'settings.developerAccessTokenTitle' ? 'Access token' : key;
     try {
       preferences.developerTools = false;
-      expect(searchSettings('access token', settingsCategories, t, context)).toEqual([]);
+      expect(searchSettings('access token', settingsCategories, translateAccess, context)).toEqual(
+        []
+      );
       preferences.developerTools = true;
       expect(
-        searchSettings('access token', settingsCategories, t, context).some(
+        searchSettings('access token', settingsCategories, translateAccess, context).some(
           (hit) => hit.setting.focusId === 'access-token'
         )
       ).toBe(true);
@@ -215,14 +218,15 @@ describe('custom panel search', () => {
     }
   });
 
-  it('hides device linking unless the server uses OAuth', async () => {
+  it('hides device linking unless the server uses OAuth and can carry it', async () => {
     const { settingsCategories } = await import('#lib/settings/registry.js');
     const translateLink = (key: string) => (key === 'qrLogin.titleGrant' ? 'Link a device' : key);
-    const linked = (oauth: boolean) =>
-      searchSettings('link a device', settingsCategories, translateLink, { oauth }).some(
+    const linked = (oauth: boolean, qrGrant: boolean) =>
+      searchSettings('link a device', settingsCategories, translateLink, { oauth, qrGrant }).some(
         (hit) => hit.setting.focusId === 'link-device'
       );
-    expect(linked(false)).toBe(false);
-    expect(linked(true)).toBe(true);
+    expect(linked(false, true)).toBe(false);
+    expect(linked(true, false)).toBe(false);
+    expect(linked(true, true)).toBe(true);
   });
 });

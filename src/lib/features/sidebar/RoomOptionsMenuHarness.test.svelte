@@ -6,18 +6,25 @@
 
   import type { RoomListItemView } from '#src/generated/protocol';
 
+  import { roomSpacesLookup } from '#lib/test-support/room-spaces.js';
+
   import RoomOptionsMenu from './RoomOptionsMenu.svelte';
 
   interface Props {
     core: CoreClient;
     room: RoomListItemView;
     rooms: RoomListItemView[];
+    quietRoomIds?: string[];
     registerRefresh: (refresh: () => void) => void;
   }
 
-  let { core, room, rooms, registerRefresh }: Props = $props();
+  let { core, room, rooms, quietRoomIds = [], registerRefresh }: Props = $props();
   const roomList = untrack(() => new RoomList(core));
   roomList.rooms = untrack(() => rooms);
+  roomList.quietRoomIds = new Set(untrack(() => quietRoomIds));
+  Object.assign(roomList, {
+    roomSpaces: (roomId: string) => roomSpacesLookup(roomList.rooms)(roomId),
+  });
 
   provideCoreClient(untrack(() => core));
   provideRoomList(roomList);

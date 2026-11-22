@@ -6,25 +6,23 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n, t } from '#lib/i18n.js';
   import { saveBytes } from '#lib/platform/files.js';
-  import { CoreError } from '#src/transport';
+  import { isCoreError } from '#src/transport';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import AuthField from '../shared/AuthField.svelte';
   import FormField from '#lib/ui/primitives/FormField.svelte';
   import AuthInfoBox from '../shared/AuthInfoBox.svelte';
-  import AuthSecondaryAction from '../shared/AuthSecondaryAction.svelte';
   import AuthStatusSlot from '../shared/AuthStatusSlot.svelte';
 
   interface Props {
     recoveryKey?: string | null;
     onComplete: () => void;
-    onSkip: () => void;
+    createdKey?: string;
   }
 
-  let { recoveryKey: givenKey = null, onComplete, onSkip }: Props = $props();
+  let { recoveryKey: givenKey = null, onComplete, createdKey = $bindable('') }: Props = $props();
   const core = useCoreClient();
-  let createdKey = $state('');
   let creating = $state(false);
   let confirmingReplaceBackup = $state(false);
   let error = $state<string | null>(null);
@@ -43,7 +41,7 @@
       });
       confirmingReplaceBackup = false;
     } catch (cause) {
-      if (cause instanceof CoreError && cause.detail.code === 'backup_exists') {
+      if (isCoreError(cause, 'backup_exists')) {
         confirmingReplaceBackup = true;
       } else {
         error = t('settings.actionFailed');
@@ -152,10 +150,6 @@
   busy={creating}
   onConfirm={() => void createRecoveryKey(true)}
 />
-
-{#if !recoveryKey}
-  <AuthSecondaryAction label={i18n.t('auth.skipForNow')} onclick={onSkip} />
-{/if}
 
 <style>
   .recovery-setup-card {

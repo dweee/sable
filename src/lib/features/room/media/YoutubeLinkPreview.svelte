@@ -39,16 +39,11 @@
       {/if}
     </span>
   {/if}
-  <a
-    class="youtube-preview-text"
-    href={url}
-    target="_blank"
-    rel="external noopener noreferrer"
-    aria-label={title}
-  >
+  <a class="youtube-preview-text" href={url} target="_blank" rel="external noopener noreferrer">
     <span class="youtube-preview-site">{preview.site_name ?? 'YouTube'}</span>
-    <span class="youtube-preview-title">{title}</span>
-    {#if preview.description}<span class="youtube-preview-description">{preview.description}</span
+    <span class="youtube-preview-title" dir="auto">{title}</span>
+    {#if preview.description}<span class="youtube-preview-description" dir="auto"
+        >{preview.description}</span
       >{/if}
   </a>
 </div>
@@ -62,7 +57,7 @@
     display: flex;
     flex-direction: column;
     margin-top: var(--space-100);
-    max-width: var(--timeline-media-max);
+    max-width: min(var(--timeline-media-max), 100%);
     overflow: hidden;
     text-decoration: none;
   }
@@ -92,6 +87,7 @@
     box-shadow: var(--shadow-float);
     color: var(--surface-on-container);
     display: flex;
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
     left: 50%;
     padding: var(--space-200);
     pointer-events: none;

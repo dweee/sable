@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use charabia::Script;
 use linkify::LinkFinder;
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::event_cache::RoomEventCache;
@@ -237,16 +238,45 @@ impl Document {
         if !terms
             .phrases
             .iter()
-            .all(|phrase| self.folded.contains(phrase))
+            .all(|phrase| contains_whole(&self.folded, phrase))
         {
             return false;
         }
-        if terms.exclude.iter().any(|term| self.folded.contains(term)) {
+        if terms
+            .exclude
+            .iter()
+            .any(|term| contains_whole(&self.folded, term))
+        {
             return false;
         }
 
         true
     }
+}
+
+/// A match may not start or end inside a word, so `mute` skips `mutex`.
+fn contains_whole(text: &str, wanted: &str) -> bool {
+    text.match_indices(wanted).any(|(start, found)| {
+        let before = text.get(..start).and_then(|head| head.chars().next_back());
+        let after = text
+            .get(start + found.len()..)
+            .and_then(|tail| tail.chars().next());
+        !joined(before, wanted.chars().next()) && !joined(wanted.chars().next_back(), after)
+    })
+}
+
+fn joined(left: Option<char>, right: Option<char>) -> bool {
+    left.zip(right)
+        .is_some_and(|(left, right)| spaced_letter(left) && spaced_letter(right))
+}
+
+/// Scripts written without spaces have no word edge to respect.
+fn spaced_letter(character: char) -> bool {
+    character.is_alphanumeric()
+        && !matches!(
+            Script::from(character),
+            Script::Cj | Script::Thai | Script::Khmer | Script::Myanmar
+        )
 }
 
 pub(super) struct FoldedTerms {
@@ -305,21 +335,8 @@ pub(super) fn indexable_body(body: &str) -> String {
     remove_plain_reply_fallback(body).to_owned()
 }
 
-pub(super) fn without_profile_name(body: &str, raw: Option<&serde_json::Value>) -> String {
-    let Some(profile) = crate::view::per_message_profile(raw) else {
-        return body.to_owned();
-    };
-    crate::matrix_html::strip_profile_fallback_body(
-        body,
-        profile
-            .display_name
-            .as_deref()
-            .filter(|_| profile.has_fallback),
-    )
-}
-
 pub(super) fn message_text(msgtype: &MessageType, raw: Option<&serde_json::Value>) -> String {
-    let body = indexable_body(&without_profile_name(msgtype.body(), raw));
+    let body = crate::view::authored_body(msgtype.body(), raw);
     let filenames = match msgtype {
         MessageType::Gallery(gallery) => crate::view::gallery_filenames(gallery),
         MessageType::Image(image) => vec![image.filename()],
@@ -645,6 +662,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_quoted_or_excluded_term_matches_whole_words() {
+        assert!(super::contains_whole("so i mute it", "mute"));
+        assert!(super::contains_whole("mute.", "mute"));
+        assert!(!super::contains_whole("a tokio mutex", "mute"));
+        assert!(!super::contains_whole("unmute it", "mute"));
+        assert!(super::contains_whole(
+            "the pipeline is broken",
+            "pipeline is"
+        ));
+        assert!(super::contains_whole("read the c++ guide", "c++"));
+        assert!(super::contains_whole("検索を使う", "検索"));
+        assert!(super::contains_whole("สวัสดีครับ", "สวัสดี"));
+    }
+
+    #[test]
     fn a_sticker_is_searchable_by_its_description() {
         let sticker: super::OriginalSyncStickerEvent = serde_json::from_value(json!({
             "type": "m.sticker",
@@ -663,7 +695,7 @@ mod tests {
         assert_eq!(document.body, "moai");
         assert_eq!(
             document.attachments,
-            [] as [sable_model::search_filter::SearchAttachment; 0]
+            Vec::<sable_model::search_filter::SearchAttachment>::new()
         );
     }
 

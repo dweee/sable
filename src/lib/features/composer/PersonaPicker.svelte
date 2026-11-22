@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { currentDirection } from '#lib/language.svelte.js';
   import { Popover } from 'bits-ui';
   import UserSwitchIcon from 'phosphor-svelte/lib/UserSwitchIcon';
 
@@ -60,7 +61,7 @@
 
   let desktop = $derived(appLayout.current);
   let open = $state(false);
-  let spaces = $derived(personaSpaces(roomList.rooms, roomId, page.params.spaceId));
+  let spaces = $derived(personaSpaces(roomList, roomId, page.params.spaceId));
   let hasSpace = $derived(spaces.target !== null);
 
   let scopeChoice = $derived(preferences.personaSelectionScope === 'picker');
@@ -205,6 +206,7 @@
     </Tooltip>
     <Popover.Portal>
       <Popover.Content
+        dir={currentDirection()}
         class="persona-picker-popover"
         {...overlayLayer()}
         side="top"

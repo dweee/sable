@@ -1,3 +1,4 @@
+pub mod badge;
 #[cfg(not(target_family = "wasm"))]
 mod cold;
 mod device_activity;
@@ -17,9 +18,9 @@ pub use cold::{
 pub(crate) use device_activity::set_device_activity;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use media::clear_push_media;
-pub use media::push_sender_name;
 #[cfg(not(target_family = "wasm"))]
 pub use media::{PushImage, PushMedia};
+pub use media::{push_preview, push_sender_name};
 #[cfg(not(target_family = "wasm"))]
 pub use push_cache::evict as evict_push_cache;
 #[cfg(not(target_family = "wasm"))]

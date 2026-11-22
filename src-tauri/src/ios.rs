@@ -1,7 +1,7 @@
 use std::{
     ffi::{CString, OsStr},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -9,6 +9,7 @@ use std::{
 use block2::RcBlock;
 use objc2::{
     msg_send,
+    rc::{Retained, autoreleasepool},
     runtime::{AnyClass, AnyObject, ClassBuilder, Sel},
     sel,
 };
@@ -16,10 +17,13 @@ use objc2_av_foundation::{
     AVAssetExportPreset1920x1080, AVAssetExportSession, AVAssetExportSessionStatus,
     AVFileTypeMPEG4, AVURLAsset,
 };
-use objc2_foundation::{NSString, NSURL};
+use objc2_core_foundation::{CGFloat, CGSize};
+use objc2_foundation::{NSArray, NSData, NSError, NSSortDescriptor, NSString, NSURL};
 use objc2_photos::{
-    PHAccessLevel, PHAssetCreationRequest, PHAssetResourceType, PHAuthorizationStatus,
-    PHPhotoLibrary,
+    PHAccessLevel, PHAsset, PHAssetCreationRequest, PHAssetMediaType, PHAssetResource,
+    PHAssetResourceManager, PHAssetResourceRequestOptions, PHAssetResourceType,
+    PHAuthorizationStatus, PHFetchOptions, PHImageContentMode, PHImageManager,
+    PHImageRequestOptions, PHImageRequestOptionsResizeMode, PHPhotoLibrary,
 };
 
 #[tauri::command]
@@ -218,10 +222,9 @@ fn allowed(status: PHAuthorizationStatus) -> bool {
     status == PHAuthorizationStatus::Authorized || status == PHAuthorizationStatus::Limited
 }
 
-fn authorize_blocking() -> Result<(), String> {
+fn authorize_blocking(level: PHAccessLevel) -> Result<(), String> {
     // SAFETY: a class method that only reads the current authorization and is callable from any thread
-    let status =
-        unsafe { PHPhotoLibrary::authorizationStatusForAccessLevel(PHAccessLevel::AddOnly) };
+    let status = unsafe { PHPhotoLibrary::authorizationStatusForAccessLevel(level) };
     if allowed(status) {
         return Ok(());
     }
@@ -240,10 +243,7 @@ fn authorize_blocking() -> Result<(), String> {
     });
     // SAFETY: the handler block takes one PHAuthorizationStatus as the API requires, Photos copies it, and it may run on any queue because it only sends on a Mutex-guarded channel
     unsafe {
-        PHPhotoLibrary::requestAuthorizationForAccessLevel_handler(
-            PHAccessLevel::AddOnly,
-            &handler,
-        );
+        PHPhotoLibrary::requestAuthorizationForAccessLevel_handler(level, &handler);
     }
     if allowed(
         receiver
@@ -257,7 +257,7 @@ fn authorize_blocking() -> Result<(), String> {
 }
 
 async fn authorize() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(authorize_blocking)
+    tauri::async_runtime::spawn_blocking(|| authorize_blocking(PHAccessLevel::AddOnly))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -319,6 +319,259 @@ pub(crate) async fn save_media_to_photos(request: tauri::ipc::Request<'_>) -> Re
     tauri::async_runtime::spawn_blocking(move || write_to_photos(&bytes, &filename, resource_type))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct RecentMedia {
+    id: String,
+    kind: &'static str,
+    name: String,
+    duration: f64,
+}
+
+fn media_asset(id: &str) -> Result<Retained<PHAsset>, String> {
+    let ids = NSArray::from_retained_slice(&[NSString::from_str(id)]);
+    // SAFETY: ids is a live array of identifier strings and no options are passed
+    let found = unsafe { PHAsset::fetchAssetsWithLocalIdentifiers_options(&ids, None) };
+    // SAFETY: firstObject has no preconditions
+    unsafe { found.firstObject() }.ok_or_else(|| "the photo is no longer in the library".into())
+}
+
+/// The edited rendering wins over the original, which still holds whatever a crop removed.
+fn media_resource(asset: &PHAsset) -> Option<(Retained<PHAssetResource>, String)> {
+    // SAFETY: a plain property read on a live asset
+    let video = unsafe { asset.mediaType() } == PHAssetMediaType::Video;
+    // SAFETY: asset is a live PHAsset
+    let resources = unsafe { PHAssetResource::assetResourcesForAsset(asset) }.to_vec();
+    let (edited, original) = if video {
+        (
+            PHAssetResourceType::FullSizeVideo,
+            PHAssetResourceType::Video,
+        )
+    } else {
+        (
+            PHAssetResourceType::FullSizePhoto,
+            PHAssetResourceType::Photo,
+        )
+    };
+    let of = |kind: PHAssetResourceType| {
+        resources
+            .iter()
+            // SAFETY: a plain property read on a live resource
+            .find(|resource| unsafe { resource.r#type() } == kind)
+    };
+    let original = of(original)?;
+    let chosen = of(edited).unwrap_or(original);
+    // SAFETY: a plain property read on a live resource
+    let shot = unsafe { original.originalFilename() }.to_string();
+    // SAFETY: a plain property read on a live resource
+    let rendered = unsafe { chosen.originalFilename() }.to_string();
+    let name = std::path::Path::new(&shot).with_extension(
+        std::path::Path::new(&rendered)
+            .extension()
+            .unwrap_or_default(),
+    );
+    Some((chosen.clone(), name.to_string_lossy().into_owned()))
+}
+
+fn recent_media_blocking(limit: usize) -> Result<Vec<RecentMedia>, String> {
+    if !matches!(media_access(), "granted" | "limited") {
+        return Ok(Vec::new());
+    }
+    autoreleasepool(|_| {
+        let newest = NSSortDescriptor::sortDescriptorWithKey_ascending(
+            Some(&NSString::from_str("creationDate")),
+            false,
+        );
+        // SAFETY: new has no preconditions
+        let options = unsafe { PHFetchOptions::new() };
+        // SAFETY: creationDate is a sortable PHAsset key
+        unsafe { options.setSortDescriptors(Some(&NSArray::from_retained_slice(&[newest]))) };
+        // SAFETY: a plain property write on options this thread owns
+        unsafe { options.setFetchLimit(limit) };
+        // SAFETY: options is a live PHFetchOptions
+        let assets = unsafe { PHAsset::fetchAssetsWithOptions(Some(&options)) };
+        // SAFETY: count has no preconditions
+        let count = unsafe { assets.count() };
+        Ok((0..count)
+            .filter_map(|index| {
+                // SAFETY: index is below count
+                let asset = unsafe { assets.objectAtIndex(index) };
+                // SAFETY: a plain property read on a live asset
+                let kind = unsafe { asset.mediaType() };
+                let kind = if kind == PHAssetMediaType::Image {
+                    "image"
+                } else if kind == PHAssetMediaType::Video {
+                    "video"
+                } else {
+                    return None;
+                };
+                let (_, name) = media_resource(&asset)?;
+                Some(RecentMedia {
+                    // SAFETY: a plain property read on a live asset
+                    id: unsafe { asset.localIdentifier() }.to_string(),
+                    kind,
+                    name,
+                    // SAFETY: a plain property read on a live asset
+                    duration: unsafe { asset.duration() },
+                })
+            })
+            .collect())
+    })
+}
+
+#[link(name = "UIKit", kind = "framework")]
+unsafe extern "C" {
+    fn UIImageJPEGRepresentation(image: &AnyObject, quality: CGFloat) -> *mut NSData;
+}
+
+fn media_thumbnail_blocking(id: &str, size: f64) -> Result<Vec<u8>, String> {
+    autoreleasepool(|_| {
+        let asset = media_asset(id)?;
+        let jpeg = Arc::new(Mutex::new(None));
+        let sink = jpeg.clone();
+        let handler: RcBlock<dyn Fn(*mut AnyObject, *mut AnyObject)> =
+            RcBlock::new(move |image: *mut AnyObject, _info: *mut AnyObject| {
+                // SAFETY: Photos hands over a live UIImage or nil
+                let Some(image) = (unsafe { image.as_ref() }) else {
+                    return;
+                };
+                // SAFETY: image is a live UIImage
+                let data = unsafe { UIImageJPEGRepresentation(image, 0.8) };
+                // SAFETY: the data is nil or an autoreleased NSData that outlives this block
+                let data = unsafe { data.as_ref() };
+                if let (Some(data), Ok(mut sink)) = (data, sink.lock()) {
+                    *sink = Some(data.to_vec());
+                }
+            });
+        // SAFETY: new has no preconditions
+        let options = unsafe { PHImageRequestOptions::new() };
+        // SAFETY: a plain property write on options this thread owns
+        unsafe { options.setSynchronous(true) };
+        // SAFETY: a plain property write on options this thread owns
+        unsafe { options.setNetworkAccessAllowed(true) };
+        // SAFETY: a plain property write on options this thread owns
+        unsafe { options.setResizeMode(PHImageRequestOptionsResizeMode::Fast) };
+        // SAFETY: defaultManager has no preconditions
+        let manager = unsafe { PHImageManager::defaultManager() };
+        // SAFETY: the selector takes a PHAsset, CGSize, PHImageContentMode, PHImageRequestOptions and a block of (UIImage, NSDictionary), and returns a 32-bit request id. A synchronous request runs the block on this thread before returning
+        let _: i32 = unsafe {
+            msg_send![
+                &*manager,
+                requestImageForAsset: &*asset,
+                targetSize: CGSize::new(size, size),
+                contentMode: PHImageContentMode::AspectFill,
+                options: &*options,
+                resultHandler: &*handler,
+            ]
+        };
+        jpeg.lock()
+            .ok()
+            .and_then(|mut jpeg| jpeg.take())
+            .ok_or_else(|| "the photo has no thumbnail".into())
+    })
+}
+
+fn media_file_blocking(id: &str) -> Result<Vec<u8>, String> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "sable-recent-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    autoreleasepool(|_| {
+        let (resource, _) =
+            media_resource(&*media_asset(id)?).ok_or("the photo has no file to send")?;
+        let sender = Mutex::new(Some(sender));
+        let done: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(move |error: *mut NSError| {
+            // SAFETY: Photos hands over a live NSError or nil
+            let failure =
+                unsafe { error.as_ref() }.map(|error| error.localizedDescription().to_string());
+            if let Ok(mut sender) = sender.lock()
+                && let Some(sender) = sender.take()
+            {
+                let _ = sender.send(failure);
+            }
+        });
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        // SAFETY: new has no preconditions
+        let options = unsafe { PHAssetResourceRequestOptions::new() };
+        // SAFETY: a plain property write on options this thread owns
+        unsafe { options.setNetworkAccessAllowed(true) };
+        // SAFETY: defaultManager has no preconditions
+        let manager = unsafe { PHAssetResourceManager::defaultManager() };
+        // SAFETY: resource and url are live, Photos copies the block, and it may run on any queue because it only sends on a Mutex-guarded channel
+        unsafe {
+            manager.writeDataForAssetResource_toFile_options_completionHandler(
+                &resource,
+                &url,
+                Some(&options),
+                &done,
+            );
+        }
+        Ok::<_, String>(())
+    })?;
+    let result = match receiver.recv() {
+        Ok(None) => {
+            std::fs::read(&path).map_err(|error| format!("failed to read the photo: {error}"))
+        }
+        Ok(Some(failure)) => Err(format!("failed to export the photo: {failure}")),
+        Err(_) => Err("the photo export was cancelled".into()),
+    };
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+fn media_access() -> &'static str {
+    // SAFETY: a class method that only reads the current authorization and is callable from any thread
+    match unsafe { PHPhotoLibrary::authorizationStatusForAccessLevel(PHAccessLevel::ReadWrite) } {
+        PHAuthorizationStatus::Authorized => "granted",
+        PHAuthorizationStatus::Limited => "limited",
+        PHAuthorizationStatus::NotDetermined => "unasked",
+        _ => "denied",
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct RecentMediaList {
+    access: &'static str,
+    items: Vec<RecentMedia>,
+}
+
+#[tauri::command]
+pub(crate) async fn recent_media(limit: usize, request: bool) -> Result<RecentMediaList, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request {
+            // A refusal is reported through `access`, not as a failure.
+            let _ = authorize_blocking(PHAccessLevel::ReadWrite);
+        }
+        Ok(RecentMediaList {
+            access: media_access(),
+            items: recent_media_blocking(limit)?,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn recent_media_thumbnail(
+    id: String,
+    size: f64,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || media_thumbnail_blocking(&id, size))
+        .await
+        .map_err(|error| error.to_string())?
+        .map(tauri::ipc::Response::new)
+}
+
+#[tauri::command]
+pub(crate) async fn recent_media_file(id: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || media_file_blocking(&id))
+        .await
+        .map_err(|error| error.to_string())?
+        .map(tauri::ipc::Response::new)
 }
 
 #[link(name = "AVFoundation", kind = "framework")]
@@ -424,7 +677,7 @@ pub(crate) fn donate_sent_message(
             log::warn!("conversation donation bridge is unavailable");
             return;
         };
-        let avatar = (!avatar.is_empty()).then(|| objc2_foundation::NSData::with_bytes(&avatar));
+        let avatar = (!avatar.is_empty()).then(|| NSData::with_bytes(&avatar));
         let (user, room, name) = (
             NSString::from_str(&user),
             NSString::from_str(&room),
@@ -477,6 +730,10 @@ pub(crate) fn hide_form_accessory_bar(window: &tauri::WebviewWindow) {
                 };
                 // SAFETY: the function takes (self, _cmd) and returns an object pointer, matching the inputAccessoryView signature
                 unsafe {
+                    #[expect(
+                        trivial_casts,
+                        reason = "add_method needs a fn pointer, not the fn item"
+                    )]
                     builder.add_method(
                         sel!(inputAccessoryView),
                         input_accessory_view_nil as extern "C-unwind" fn(_, _) -> _,
@@ -487,6 +744,21 @@ pub(crate) fn hide_form_accessory_bar(window: &tauri::WebviewWindow) {
             // SAFETY: subclass derives from the view's current class and adds no ivars, so the layout is unchanged
             unsafe { AnyObject::set_class(subview, subclass) };
         }
+    });
+}
+
+/// `WKWebView` can leave part of the page unpainted after the keyboard hides until it is laid out again.
+pub(crate) fn relayout_on_keyboard_hide(window: &tauri::WebviewWindow) {
+    let window = window.clone();
+    // SAFETY: UIKit notification names are immutable constants initialized when the framework loads
+    let name = unsafe { UIKeyboardDidHideNotification };
+    observe_notification(name, move || {
+        let _ = window.with_webview(|webview| {
+            // SAFETY: with_webview runs on the main thread and inner() is the live WKWebView
+            let webview: &AnyObject = unsafe { &*webview.inner().cast::<AnyObject>() };
+            // SAFETY: setNeedsLayout takes no arguments and returns void
+            let _: () = unsafe { msg_send![webview, setNeedsLayout] };
+        });
     });
 }
 
@@ -511,6 +783,20 @@ pub(crate) fn set_system_bars_hidden(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "tauri extracts command arguments by value"
+)]
+pub(crate) fn set_keep_screen_on(window: tauri::WebviewWindow, on: bool) -> Result<(), String> {
+    window
+        .with_webview(move |_| {
+            // SAFETY: with_webview runs on the main thread and UIApplication declares setIdleTimerDisabled: taking a BOOL
+            let _: () = unsafe { msg_send![shared_application(), setIdleTimerDisabled: on] };
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[link(name = "UIKit", kind = "framework")]
 unsafe extern "C" {
     static UIBackgroundTaskInvalid: usize;
@@ -518,6 +804,7 @@ unsafe extern "C" {
     static UIApplicationDidEnterBackgroundNotification: &'static NSString;
     static UIApplicationWillEnterForegroundNotification: &'static NSString;
     static UIApplicationDidBecomeActiveNotification: &'static NSString;
+    static UIKeyboardDidHideNotification: &'static NSString;
 }
 
 const UI_APPLICATION_STATE_BACKGROUND: isize = 2;
@@ -540,11 +827,6 @@ pub(crate) enum Lifecycle {
 /// tao's `Focused` follows the key window, which also changes in the background.
 pub(crate) fn observe_lifecycle(handler: impl Fn(Lifecycle) + 'static) {
     let handler = std::rc::Rc::new(handler);
-    // SAFETY: +defaultCenter returns the non-nil shared NSNotificationCenter
-    let center: &AnyObject =
-        unsafe { msg_send![objc2::class!(NSNotificationCenter), defaultCenter] };
-    // SAFETY: +mainQueue returns the non-nil main NSOperationQueue
-    let queue: &AnyObject = unsafe { msg_send![objc2::class!(NSOperationQueue), mainQueue] };
     // SAFETY: UIKit notification names are immutable constants initialized when the framework loads
     let observed = unsafe {
         [
@@ -568,17 +850,26 @@ pub(crate) fn observe_lifecycle(handler: impl Fn(Lifecycle) + 'static) {
     };
     for (name, change) in observed {
         let handler = handler.clone();
-        let block = RcBlock::new(move |_: *mut AnyObject| (*handler)(change));
-        // SAFETY: addObserverForName:object:queue:usingBlock: takes (NSString, nil, NSOperationQueue, block) and returns a retained observer, the block is copied and the handler is only run on the main queue
-        let _: objc2::rc::Retained<AnyObject> = unsafe {
-            msg_send![center,
-                addObserverForName: name,
-                object: std::ptr::null::<AnyObject>(),
-                queue: queue,
-                usingBlock: &*block
-            ]
-        };
+        observe_notification(name, move || (*handler)(change));
     }
+}
+
+fn observe_notification(name: &NSString, handler: impl Fn() + 'static) {
+    // SAFETY: +defaultCenter returns the non-nil shared NSNotificationCenter
+    let center: &AnyObject =
+        unsafe { msg_send![objc2::class!(NSNotificationCenter), defaultCenter] };
+    // SAFETY: +mainQueue returns the non-nil main NSOperationQueue
+    let queue: &AnyObject = unsafe { msg_send![objc2::class!(NSOperationQueue), mainQueue] };
+    let block = RcBlock::new(move |_: *mut AnyObject| handler());
+    // SAFETY: addObserverForName:object:queue:usingBlock: takes (NSString, nil, NSOperationQueue, block) and returns a retained observer, the block is copied and the handler is only run on the main queue
+    let _: Retained<AnyObject> = unsafe {
+        msg_send![center,
+            addObserverForName: name,
+            object: std::ptr::null::<AnyObject>(),
+            queue: queue,
+            usingBlock: &*block
+        ]
+    };
 }
 
 /// iOS kills a process suspended mid-write to the App Group stores.
@@ -627,6 +918,38 @@ fn end_background_task(task: &AtomicUsize) {
     }
 }
 
+#[link(name = "AudioToolbox", kind = "framework")]
+unsafe extern "C" {
+    fn AudioServicesCreateSystemSoundID(url: &NSURL, sound: *mut u32) -> i32;
+    fn AudioServicesPlaySystemSound(sound: u32);
+}
+
+#[tauri::command]
+pub(crate) fn play_notification_chime() -> Result<(), String> {
+    static CHIME: OnceLock<Result<u32, String>> = OnceLock::new();
+    let sound = CHIME
+        .get_or_init(|| {
+            let url = objc2_foundation::NSBundle::mainBundle()
+                .URLForResource_withExtension(
+                    Some(&NSString::from_str("msg")),
+                    Some(&NSString::from_str("caf")),
+                )
+                .ok_or_else(|| "msg.caf is missing from the app bundle".to_owned())?;
+            let mut sound = 0;
+            // SAFETY: NSURL is toll-free bridged to CFURL and `sound` is a valid out pointer
+            let status = unsafe { AudioServicesCreateSystemSoundID(&url, &raw mut sound) };
+            if status == 0 {
+                Ok(sound)
+            } else {
+                Err(format!("AudioServicesCreateSystemSoundID: {status}"))
+            }
+        })
+        .clone()?;
+    // SAFETY: the sound came from AudioServicesCreateSystemSoundID and is never disposed
+    unsafe { AudioServicesPlaySystemSound(sound) };
+    Ok(())
+}
+
 #[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
@@ -638,7 +961,7 @@ pub(crate) fn haptic_feedback(app: tauri::AppHandle, strong: bool) -> Result<(),
         let allocated: objc2::rc::Allocated<AnyObject> =
             unsafe { msg_send![objc2::class!(UIImpactFeedbackGenerator), alloc] };
         // SAFETY: initWithStyle: takes a UIImpactFeedbackStyle (NSInteger) and runs on the main thread as UIKit requires
-        let generator: objc2::rc::Retained<AnyObject> =
+        let generator: Retained<AnyObject> =
             unsafe { msg_send![allocated, initWithStyle: isize::from(strong)] };
         // SAFETY: impactOccurred takes no arguments and returns void
         let _: () = unsafe { msg_send![&*generator, impactOccurred] };

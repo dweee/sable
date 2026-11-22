@@ -3,7 +3,7 @@ use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::TimelineEventType;
-use matrix_sdk::ruma::push::Action;
+use matrix_sdk::ruma::push::{Action, Ruleset};
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{EventId, MilliSecondsSinceUnixEpoch, OwnedUserId, RoomId};
 use matrix_sdk_ui::notification_client::{
@@ -81,7 +81,9 @@ pub(super) async fn fetch_push_event_with(
             if event.sender_display_name.is_none() {
                 event.sender_display_name = Some(sender_name(client, room_id, &event.sender).await);
             }
-            PushFetchView::Event { event }
+            PushFetchView::Event {
+                event: Box::new(event),
+            }
         }
         Ok(NotificationStatus::EventFilteredOut | NotificationStatus::EventRedacted) => {
             PushFetchView::Discard
@@ -96,7 +98,21 @@ pub(super) async fn related_notification(
     room_id: &RoomId,
     event_id: &EventId,
 ) -> Result<NotificationStatus, matrix_sdk_ui::notification_client::Error> {
-    let mut status = notifications.get_notification(room_id, event_id).await;
+    let mut status = match client.get_room(room_id) {
+        // The SDK's sliding sync fetch also downloads all of the account's data, which a
+        // notification process may not have the memory for.
+        Some(room) if room.state() == matrix_sdk::RoomState::Joined => {
+            notifications
+                .get_notification_with_context(room_id, event_id)
+                .await
+        }
+        _ => notifications.get_notification(room_id, event_id).await,
+    };
+    if let Ok(NotificationStatus::Event(item)) = &status
+        && client.is_user_ignored(item.event.sender()).await
+    {
+        status = Ok(NotificationStatus::EventFilteredOut);
+    }
     if let Ok(NotificationStatus::Event(item)) = &mut status
         && let (Some(actions), RawNotificationEvent::Timeline(raw), Some(room)) = (
             item.actions.take(),
@@ -134,7 +150,8 @@ fn push_event_view(item: NotificationItem) -> Option<PushEventView> {
         RawNotificationEvent::Invite(raw) => raw.json().get(),
     };
     let mut event: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let noisy = item.is_noisy == Some(true) || item.has_mention == Some(true);
+    let mention = item.has_mention == Some(true);
+    let noisy = item.is_noisy == Some(true) || mention;
     Some(PushEventView {
         event_type: event.get("type")?.as_str()?.to_owned(),
         content: event
@@ -143,18 +160,24 @@ fn push_event_view(item: NotificationItem) -> Option<PushEventView> {
             .unwrap_or_default(),
         sender: item.event.sender().to_string(),
         sender_display_name: item.sender_display_name.and_then(visible_name),
+        sender_avatar_url: item.sender_avatar_url,
         room_name: item.room_computed_display_name,
         room_avatar_url: item.room_avatar_url,
         encrypted: item.is_room_encrypted == Some(true),
         noisy,
+        mention,
     })
 }
 
 pub use crate::push_rules::notifies;
 
 #[must_use]
-pub fn uses_direct_push_rules(room: &matrix_sdk::Room) -> bool {
-    room.joined_members_count() == 2
+pub fn uses_direct_push_rules(rules: &Ruleset, room: &matrix_sdk::Room) -> bool {
+    crate::push_rules::direct_defaults(
+        rules,
+        room.direct_targets_length() != 0,
+        room.joined_members_count() == 2,
+    )
 }
 
 pub async fn every_encrypted_event_pushed(client: &Client) -> bool {
@@ -177,7 +200,7 @@ pub async fn notification(
         Ok(NotificationStatus::Event(item)) if item.actions.as_deref().is_some_and(notifies) => {
             let mut view = view(client.user_id()?.to_owned(), room_id, event_id, *item);
             if let Some(room) = client.get_room(room_id) {
-                apply_direct_name(&room, &mut view.room_name, view.is_direct).await;
+                apply_direct(&room, &mut view).await;
             }
             Some(view)
         }
@@ -204,7 +227,7 @@ pub(crate) async fn foreground_notification(
                 event_id,
                 *item,
             );
-            apply_direct_name(room, &mut view.room_name, view.is_direct).await;
+            apply_direct(room, &mut view).await;
             Some(view)
         }
         _ => None,
@@ -223,13 +246,24 @@ pub(crate) fn raw_is_encrypted(raw: &Raw<AnySyncTimelineEvent>) -> bool {
     raw.get_field::<String>("type").ok().flatten().as_deref() == Some("m.room.encrypted")
 }
 
+async fn apply_direct(room: &matrix_sdk::Room, view: &mut NotificationView) {
+    let is_direct = view.is_direct;
+    view.is_direct = is_direct && crate::view::is_one_to_one(room);
+    apply_direct_name(room, &mut view.room_name, is_direct).await;
+}
+
 async fn apply_direct_name(room: &matrix_sdk::Room, name: &mut String, is_direct: bool) {
-    if is_direct
-        && room.name().is_none()
-        && let Some(peer) = crate::view::direct_peer_name(room).await
-    {
+    if is_direct && let Some(peer) = direct_name(room).await {
         *name = peer;
     }
+}
+
+/// An unnamed direct chat is named after its direct target, as in the room list.
+pub(super) async fn direct_name(room: &matrix_sdk::Room) -> Option<String> {
+    if room.name().is_some() {
+        return None;
+    }
+    crate::view::direct_peer_name(room).await
 }
 
 pub(crate) async fn invite_notification(
@@ -243,7 +277,7 @@ pub(crate) async fn invite_notification(
         event_id: None,
         room_name: room.display_name().await.ok()?.to_string(),
         room_avatar_url: room.avatar_url().map(|url| url.to_string()),
-        is_direct: room.is_direct().await.unwrap_or(false),
+        is_direct: room.is_direct().await.unwrap_or(false) && crate::view::is_one_to_one(room),
         encrypted: room.encryption_state().is_encrypted(),
         sender: invite.inviter_id,
         sender_name: invite.inviter.as_ref().and_then(|member| {

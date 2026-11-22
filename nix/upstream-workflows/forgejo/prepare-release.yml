@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
 
-permissions: {}
-
 env:
   MISE_GITHUB_TOKEN: ${{ secrets.MISE_GITHUB_TOKEN }}
 
@@ -18,9 +16,7 @@ jobs:
     name: Prepare release
     if: "${{ !contains(github.event.head_commit.message, 'chore: prepare release') }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,9 +26,9 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Set up mise
-        uses: https://github.com/jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        uses: https://github.com/jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: '2026.10.25'
+          version: '2026.11.5'
           github_token: ''
           cache: true
           env: false
@@ -40,6 +36,11 @@ jobs:
 
       - name: Trust project mise configuration
         run: mise settings set trusted_config_paths "$GITHUB_WORKSPACE"
+
+      - name: Install Lix
+        uses: https://github.com/samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
 
       - name: Set up git identity
         run: |

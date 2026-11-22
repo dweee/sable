@@ -5,6 +5,7 @@ import { render } from 'vitest-browser-svelte';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
 import type { ImagePackView } from '#src/generated/protocol';
+import { bioContent } from './bio-content.js';
 import Harness from './BioEditorHarness.test.svelte';
 
 const packs: ImagePackView[] = [
@@ -75,6 +76,7 @@ async function mount(html = '') {
 }
 
 test('renders saved inline images and preserves them after editing and reset', async () => {
+  setPreference('richTextComposer', true);
   const { screen, editor, content } = await mount(
     '<p>Hello <img data-mx-emoticon src="mxc://example.org/wave" alt=":wave:"> <img src="mxc://example.org/cat" alt="Cat"></p>'
   );
@@ -88,6 +90,45 @@ test('renders saved inline images and preserves them after editing and reset', a
   await userEvent.click(screen.getByRole('button', { name: 'Reset' }));
   await expect.poll(() => content().body).not.toContain('edited');
   await expect.element(editor.getByRole('img', { name: ':wave:' })).toBeVisible();
+});
+
+test('follows the markdown composer setting', async () => {
+  setPreference('richTextComposer', false);
+  const html =
+    '<p>Hello <strong>bold</strong> <img data-mx-emoticon src="mxc://example.org/wave" alt=":wave:"></p>';
+  const { editor, content } = await mount(html);
+  await expect.element(editor).toHaveTextContent('Hello **bold**');
+  await expect.element(editor.getByRole('img', { name: ':wave:' })).toBeVisible();
+  expect(content().formatted).toBe(bioContent(html).formatted);
+  await userEvent.click(editor);
+  await userEvent.keyboard('{End} *more*');
+  await expect.poll(() => content().formatted).toContain('<em>more</em>');
+});
+
+test('loading a saved value in the markdown composer leaves it as saved', async () => {
+  setPreference('richTextComposer', false);
+  for (const html of [
+    '<span data-plain-body>1. Be nice<br>2. No spam</span>',
+    '<span data-plain-body>see <a href="https://example.org">https://example.org</a></span>',
+  ]) {
+    const { screen, editor, content } = await mount(html);
+    await expect.element(editor).toBeVisible();
+    expect(content()).toEqual(bioContent(html));
+    await screen.unmount();
+  }
+});
+
+test('italic custom emoji slant in the rich text composer', async () => {
+  const { editor } = await mount(
+    '<p><em><img data-mx-emoticon src="mxc://example.org/wave" alt=":italic:"></em> <img data-mx-emoticon src="mxc://example.org/wave" alt=":plain:"></p>'
+  );
+  const italic = editor.getByRole('img', { name: ':italic:' });
+  const plain = editor.getByRole('img', { name: ':plain:' });
+  await expect.element(italic).toBeVisible();
+  await expect.element(plain).toBeVisible();
+  const skew = new DOMMatrix(getComputedStyle(italic.element()).transform);
+  expect(skew.c).toBeCloseTo(Math.tan((-10 * Math.PI) / 180));
+  expect(getComputedStyle(plain.element()).transform).toBe('none');
 });
 
 test('autocomplete inserts custom emoji and can be dismissed and reopened', async () => {

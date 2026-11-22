@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { copyText } from '#lib/platform/clipboard.js';
+  import { Copied } from '#lib/ui/copied.svelte.js';
   import type { ClassValue } from 'svelte/elements';
   import type { Snippet } from 'svelte';
   import type { PresenceView } from '#src/generated/protocol';
@@ -110,15 +110,8 @@
   });
 
   const nameId = $props.id();
-  let copied = $state(false);
+  const copied = new Copied();
   let statusHovered = $state(false);
-  async function copyUserId(): Promise<void> {
-    await copyText(userId);
-    copied = true;
-    setTimeout(() => {
-      copied = false;
-    }, 2000);
-  }
   function resetStatusScroll(e: { currentTarget: HTMLElement }): void {
     const text = e.currentTarget.querySelector('.profile-card-status-text');
     if (text instanceof HTMLElement && !text.matches(':hover, :focus')) {
@@ -151,7 +144,13 @@
   style:--profile-name-on-hero={nameOnHero}
   data-inset-owner={variant === 'sheet' ? 'bottom' : undefined}
 >
-  <div class={['profile-card-cover', { 'has-banner': banner }]} style:background={color}>
+  <div
+    class={[
+      'profile-card-cover',
+      { 'has-banner': banner, 'fit-banner': banner && preferences.bannerFit === 'image' },
+    ]}
+    style:background={color}
+  >
     {#if banner}
       <Banner source={banner} name={displayName} width={720} height={240} />
     {:else if cover}
@@ -177,6 +176,7 @@
           id={userId}
           color={heroColor ? undefined : color}
           original
+          autoplay
         />
       {/snippet}
       {#if onAvatarEdit}
@@ -240,16 +240,16 @@
         {#if pronouns}{@render pronouns()}{/if}
         {#if headerAction}{@render headerAction()}{/if}
       </div>
-      <Tooltip label={i18n.t(copied ? 'common.copied' : 'common.copy')}>
+      <Tooltip label={i18n.t(copied.value ? 'common.copied' : 'common.copy')}>
         {#snippet trigger({ props })}
           <button
             {...props}
             class="profile-card-user-id"
             type="button"
-            onclick={() => void copyUserId()}
+            onclick={() => void copied.copy(userId)}
           >
             {userId}
-            {#if copied}
+            {#if copied.value}
               <CheckIcon size="1em" aria-hidden="true" />
             {:else}
               <CopySimpleIcon size="1em" aria-hidden="true" />
@@ -271,7 +271,7 @@
           <div
             class="profile-card-bio explicit-scrollbar"
             role="region"
-            aria-labelledby={nameField ? undefined : nameId}
+            aria-label={i18n.t('settings.biography')}
             tabindex="0"
             {@attach scrollHint}
           >
@@ -383,10 +383,20 @@
     --profile-cover-height: 7rem;
   }
 
+  .profile-card-cover.fit-banner {
+    height: auto;
+  }
+
   /* Both dimensions, so the ratio MediaImage sets inline stops applying. */
   .profile-card-cover :global(.banner-image) {
     height: 100%;
     width: 100%;
+  }
+
+  .profile-card-cover.fit-banner :global(.banner-image) {
+    height: auto;
+    max-height: 14rem;
+    min-height: 4rem;
   }
 
   .profile-card-cover :global(.banner-image img) {
@@ -447,9 +457,9 @@
   :global(.profile-card-presence) {
     --presence-ring: var(--profile-card-ground);
 
+    inset-inline-end: 0;
     bottom: 0;
     position: absolute;
-    right: 0;
     z-index: 1;
   }
 
@@ -465,7 +475,7 @@
     color: var(--surface-var-on-container);
     font-size: var(--font-size-label);
     line-height: var(--line-height-small);
-    margin-left: var(--space-100);
+    margin-inline-start: var(--space-100);
     margin-top: calc(-1 * var(--space-600));
     min-width: var(--space-700);
     padding: var(--space-200) var(--space-200);
@@ -480,7 +490,7 @@
     border-radius: var(--radius-pill) var(--radius-pill) 0 0;
     content: '';
     height: 0.4rem;
-    left: 0.25rem;
+    inset-inline-start: 0.25rem;
     position: absolute;
     top: calc(-1 * var(--space-150));
     width: 0.8rem;
@@ -493,7 +503,7 @@
     border-radius: var(--radius-pill);
     content: '';
     height: 8px;
-    left: -3px;
+    inset-inline-start: -3px;
     position: absolute;
     top: -12px;
     width: 8px;
@@ -529,7 +539,7 @@
 
   .profile-card-status-emoji {
     font-size: var(--font-size-heading);
-    margin-right: var(--space-150);
+    margin-inline-end: var(--space-150);
   }
 
   .profile-card-identity {
@@ -566,7 +576,7 @@
   }
 
   .profile-card-heading :global(.btn:last-child) {
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 
   .profile-card-name,

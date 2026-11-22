@@ -3,7 +3,10 @@
 </script>
 
 <script lang="ts">
+  import { cubicOut } from 'svelte/easing';
   import { MediaQuery } from 'svelte/reactivity';
+  import { slide } from 'svelte/transition';
+  import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
   import type {
     ImageUsageView,
     MemberView,
@@ -12,9 +15,6 @@
     PackImageView,
     PersonaView,
   } from '#src/generated/protocol';
-  import { mergeProps } from 'bits-ui';
-  import MicrophoneIcon from 'phosphor-svelte/lib/MicrophoneIcon';
-  import TextAaIcon from 'phosphor-svelte/lib/TextAaIcon';
   import type { Node as ProseMirrorNode } from 'prosemirror-model';
   import { onDestroy, tick, untrack } from 'svelte';
 
@@ -28,8 +28,9 @@
   import { previewSources } from '#lib/features/room/media/link-preview-cache.js';
   import { previewableLinks } from '#lib/features/room/media/link-preview.js';
   import { i18n } from '#lib/i18n.js';
+  import { serverNameOf } from '#lib/matrix-id.js';
   import { isPackChange } from '#lib/emoji/load-packs.js';
-  import { capturesFromCamera, pickFiles } from '#lib/platform/files.js';
+  import { capturesFromCamera, pickFiles, withResolvedMime } from '#lib/platform/files.js';
   import { isAndroid } from '#lib/platform/os.js';
   import { usePersonaStore } from '#lib/personas/personas.svelte.js';
   import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
@@ -37,17 +38,20 @@
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { enterInsertsNewline } from '#lib/settings/enter-key.svelte.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { SETTINGS_DEVICES_SECTION } from '#lib/settings/registry.js';
+  import { showSettingsOver } from '#lib/features/settings/settings-navigation.js';
   import { type ImageMetadata } from '#lib/settings/definitions.js';
   import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
   import { cachedMediaUrl, holdMediaUrl, loadMediaUrl } from '#lib/ui/media-url.js';
-  import IconButton from '#lib/ui/primitives/IconButton.svelte';
-  import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
 
   import BotCommandForm from './BotCommandForm.svelte';
   import ComposerAttachments from './ComposerAttachments.svelte';
   import ComposerAutocomplete from './ComposerAutocomplete.svelte';
+  import ComposerOffer, { type OfferChoice } from './ComposerOffer.svelte';
+  import { OFFER_RULES } from './editor/offer-rules';
+  import type { ComposerOffer as Offer } from './editor/offers';
   import type { GifResult } from '#lib/gif/providers.js';
   import ComposerBoard from './ComposerBoard.svelte';
   import ComposerContextBanner from './ComposerContextBanner.svelte';
@@ -59,7 +63,10 @@
   import ComposerSendButton from './ComposerSendButton.svelte';
   import PersonaPicker from './PersonaPicker.svelte';
   import PollComposer from './PollComposer.svelte';
+  import ComposerFormatButton from './ComposerFormatButton.svelte';
   import ComposerFormatting from './ComposerFormatting.svelte';
+  import ComposerReadOnly from './ComposerReadOnly.svelte';
+  import ComposerVoiceButton from './ComposerVoiceButton.svelte';
   import ComposerLinkDialog from './ComposerLinkDialog.svelte';
   import ComposerSpoilerDialog from './ComposerSpoilerDialog.svelte';
   import LocationComposer from './LocationComposer.svelte';
@@ -77,6 +84,8 @@
     previewKind,
     restoreFile,
     stageFiles,
+    replaceFile,
+    setGif,
     setMetadata,
     toggleSpoiler,
     unstageFile,
@@ -117,10 +126,11 @@
     buildInvocation,
     draftsFromText,
     matchBotCommand,
+    prefillDrafts,
     type BotCommand,
     type BotCommandInvocation,
   } from './bot-commands';
-  import { parseSlash } from './slash-commands';
+  import { parseSlash, SlashError } from './slash-commands';
   import { editStep, replyStep } from './step-shortcuts';
   import { suggestionNode } from './suggestion-node';
   import { rememberSuggestion } from './suggestion-usage';
@@ -291,6 +301,7 @@
   let inFlight = $state(0);
   let error = $state<string | null>(null);
   let retry = $state<{ text: string; run: () => void } | null>(null);
+  let securityLink = $state<string | null>(null);
   let pollOpen = $state(false);
   let locationOpen = $state(false);
   let scheduleOpen = $state(false);
@@ -306,7 +317,7 @@
   let multiline = $state(false);
   let pointerHidden = $state(false);
   const shortLayout = $derived(
-    compactHeight || (composerShort && (!multiline || preferences.alwaysInlineEditor))
+    compactHeight || (!expanded && composerShort && (!multiline || preferences.alwaysInlineEditor))
   );
   let layoutFrame: number | undefined;
   let empty = $state(true);
@@ -320,6 +331,9 @@
   let configuredRich = preferences.richTextComposer;
   let query = $state.raw<AutocompleteQuery | null>(null);
   let dismissedAt = $state<number | null>(null);
+  let offer = $state.raw<Offer | null>(null);
+  let dismissedOffer = $state<string | null>(null);
+  let offerIndex = $state(0);
   let activeIndex = $state(0);
   let previousContext: ComposerContext | null = untrack(() => restoredContext);
   let deleteEditTarget = $state.raw<ComposerContext | null>(null);
@@ -377,6 +391,31 @@
   let panelOpen = $derived(
     query !== null && dismissedAt !== query.start && (query.sigil !== '+:' || quickReactEnabled)
   );
+  const offerKeyOf = (current: Offer) =>
+    `${current.rule.id}:${String(current.from)}:${current.text}`;
+  let offerOpen = $derived(
+    !panelOpen &&
+      offer !== null &&
+      preferences[offer.rule.mode] === 'ask' &&
+      dismissedOffer !== offerKeyOf(offer)
+  );
+  let offerChoices = $derived(
+    offer
+      ? [
+          { choice: 'once' as const, label: i18n.t(offer.rule.strings.once) },
+          {
+            choice: 'always' as const,
+            label: i18n.t(offer.rule.strings.always),
+            hint: i18n.t(offer.rule.strings.alwaysHint),
+          },
+          {
+            choice: 'never' as const,
+            label: i18n.t(offer.rule.strings.never),
+            hint: i18n.t(offer.rule.strings.neverHint),
+          },
+        ]
+      : []
+  );
   let admin = $derived(adminScope(roomId, roomList.rooms, core.session?.user_id));
   let botCommandsEnabled = $derived(
     onSendBotCommand !== undefined && context?.kind !== 'edit' && !editingScheduled
@@ -408,7 +447,8 @@
       advertisedAdminCommands.length > 0
         ? adminCommandTree(advertisedAdminCommands)
         : sources.adminCommands,
-      slashBotCommands
+      slashBotCommands,
+      roomList.roomSpaces
     )
   );
 
@@ -461,7 +501,17 @@
     label: () => i18n.t('timeline.messagePlaceholder'),
     describedBy: hintId,
     listboxId,
-    activeOptionId: () => (panelOpen && suggestions.length > 0 ? optionId(active) : null),
+    activeOptionId: () =>
+      panelOpen && suggestions.length > 0
+        ? optionId(active)
+        : offerOpen
+          ? optionId(offerIndex)
+          : null,
+    offers: OFFER_RULES,
+    onOffer: (next) => {
+      if (next?.from !== offer?.from || next?.text !== offer?.text) offerIndex = 0;
+      offer = next;
+    },
     editable: () => !readOnly,
     onSubmit: () => {
       void send();
@@ -633,6 +683,7 @@
   function openBotCommand(command: BotCommand, args: string, prefix: string): void {
     const drafts = $state(draftsFromText(command, args));
     storeBotCommand({ command, drafts, prefix });
+    void prefillDrafts(command, drafts, serverNameOf(core.session?.user_id ?? ''));
     error = null;
     void sources.loadMembers();
   }
@@ -693,6 +744,7 @@
     const accountId = core.session?.account_id ?? '';
     const restore = () => restoreUnsent(targetKey, accountId, doc, []);
     editor.clear();
+    expanded = false;
     if (matched.command.parameters.length === 0 && matched.args !== '') {
       const body = `${typed.prefix}${matched.command.command}${matched.raw_args}`;
       if (
@@ -743,7 +795,7 @@
 
   function cancelContext(): void {
     onCancelContext?.();
-    if (context?.kind === 'edit' || editingScheduled || !desktop) blurEditor();
+    if (context?.kind === 'edit' || editingScheduled) blurEditor();
   }
 
   let shownLinks = $derived.by(() => {
@@ -774,9 +826,13 @@
     }
   }
 
-  function failureText(cause: unknown): string {
-    const { key, values } = sendFailure(cause);
-    return i18n.t(key, values);
+  function failureText(cause: unknown, failure = sendFailure(cause)): string {
+    const text = i18n.t(failure.key, failure.values);
+    securityLink =
+      cause instanceof SlashError && cause.key === 'composer.slashShareHistory.no_cross_signing'
+        ? text
+        : null;
+    return text;
   }
 
   /** A send outlives a room switch, so its failure is put back in the room it was meant for. */
@@ -807,7 +863,7 @@
 
   function failRetryably(cause: unknown, run: () => void): void {
     const failure = sendFailure(cause);
-    error = i18n.t(failure.key, failure.values);
+    error = failureText(cause, failure);
     retry = failure.retryable ? { text: error, run } : null;
   }
 
@@ -827,14 +883,15 @@
     const typedLine = commandLine();
     if (typedLine !== null && (await typedBotCommand(typedLine))) return;
 
-    const doc = editor.doc();
+    const typed = editor.doc();
     const untouched =
       context?.kind === 'edit' &&
       prefilledDoc !== undefined &&
-      doc?.eq(prefilledDoc) === true &&
+      typed?.eq(prefilledDoc) === true &&
       staged.length === 0
         ? { body: context.body, formatted: context.html ?? null }
         : null;
+    const doc = untouched ? typed : editor.linkStandingOffers();
     const rich = richSend;
     const attachmentsCancelEdit = context?.kind === 'edit' && staged.length > 0;
     const captionEdit = editingCaption && !attachmentsCancelEdit;
@@ -847,6 +904,7 @@
     inFlight += 1;
     error = null;
     editor.clear();
+    expanded = false;
     sourceMode = editor.leaveSource();
     staged = [];
     typing.stop();
@@ -881,6 +939,7 @@
             formattedCaption: message.formatted,
             mentions: message.mentions,
             spoilers: unsent.map((item) => item.spoiler),
+            gifs: unsent.map((item) => item.gif),
           });
           unsent = [];
           return;
@@ -897,8 +956,9 @@
                   formattedCaption: message.formatted,
                   mentions: message.mentions,
                   spoiler: next.spoiler,
+                  gif: next.gif,
                 }
-              : { spoiler: next.spoiler }
+              : { spoiler: next.spoiler, gif: next.gif }
           );
           unsent = rest;
         }
@@ -964,11 +1024,9 @@
             await outgoingFile(attachment),
             dueTs,
             attachment.spoiler,
-            outgoingPersona(
-              personas,
-              target,
-              personaSpaces(roomList.rooms, target, undefined).order
-            ).persona
+            outgoingPersona(personas, target, personaSpaces(roomList, target, undefined).order)
+              .persona,
+            attachment.gif
           )
         );
       }
@@ -1105,7 +1163,12 @@
       }
 
       error = null;
-      staged = stageFiles(staged, files, () => nextStagedId++, preferences.imageMetadata);
+      staged = stageFiles(
+        staged,
+        files.map(withResolvedMime),
+        () => nextStagedId++,
+        preferences.imageMetadata
+      );
       if (desktop) editor.focus();
     } catch (cause) {
       if (current()) {
@@ -1295,7 +1358,41 @@
     else if (context) onEditNext(context.eventId);
   }
 
+  function chooseOffer(choice: OfferChoice): void {
+    const current = offer;
+    if (!current) return;
+    if (choice !== 'never') editor.acceptOffer(current);
+    if (choice === 'once') return;
+    const key = current.rule.mode;
+    setPreference(key, choice);
+    const notice =
+      choice === 'always' ? current.rule.strings.enabled : current.rule.strings.disabled;
+    toasts.undoable(i18n.t(notice), {
+      label: i18n.t('common.undo'),
+      onUndo: () => {
+        setPreference(key, 'ask');
+      },
+    });
+  }
+
+  function navigateOffer(key: 'ArrowUp' | 'ArrowDown' | 'Enter' | 'Tab' | 'Escape'): boolean {
+    if (!offer) return false;
+    if (key === 'Escape') {
+      dismissedOffer = offerKeyOf(offer);
+      return true;
+    }
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      const step = key === 'ArrowDown' ? 1 : offerChoices.length - 1;
+      offerIndex = (offerIndex + step) % offerChoices.length;
+      return true;
+    }
+    if (key === 'Enter') return false;
+    chooseOffer(offerChoices[offerIndex].choice);
+    return true;
+  }
+
   function navigate(key: 'ArrowUp' | 'ArrowDown' | 'Enter' | 'Tab' | 'Escape'): boolean {
+    if (offerOpen) return navigateOffer(key);
     if (!panelOpen) {
       if (
         key === 'ArrowUp' &&
@@ -1377,13 +1474,7 @@
   class={['composer-stack', { short: composerShort && !readOnly, 'pointer-hidden': pointerHidden }]}
 >
   {#if readOnly}
-    <div class="composer-shell">
-      <div class="composer">
-        <div class="composer-row">
-          <p class="locked">{i18n.t('composer.readOnly')}</p>
-        </div>
-      </div>
-    </div>
+    <ComposerReadOnly />
   {:else}
     <div class="composer-shell">
       <div class="composer" role="group" aria-label={i18n.t('timeline.messagePlaceholder')}>
@@ -1419,6 +1510,15 @@
           <ComposerError
             message={error}
             onRetry={retry?.text === error ? retry.run : undefined}
+            action={securityLink === error
+              ? {
+                  label: i18n.t('composer.openSecuritySettings'),
+                  run: () => {
+                    error = null;
+                    showSettingsOver(SETTINGS_DEVICES_SECTION);
+                  },
+                }
+              : undefined}
             onDismiss={() => {
               error = null;
             }}
@@ -1445,6 +1545,12 @@
             }}
             onSetMetadata={(id: number, metadata: ImageMetadata) => {
               staged = setMetadata(staged, id, metadata);
+            }}
+            onSetGif={(id: number, gif: boolean | undefined) => {
+              staged = setGif(staged, id, gif);
+            }}
+            onReplace={(id: number, file: File) => {
+              staged = replaceFile(staged, id, file);
             }}
           />
         {/if}
@@ -1497,6 +1603,7 @@
                 {desktop}
                 onPick={pick}
                 onCapture={capturesFromCamera() ? capture : undefined}
+                onFiles={(files) => void stage(files)}
                 onPoll={onCreatePoll
                   ? () => {
                       pollOpen = true;
@@ -1533,7 +1640,10 @@
             />
             <ComposerField {editor} {showPlaceholder} {placeholder} bind:expanded />
             {#if formattingOpen}
-              <div class="composer-formatting">
+              <div
+                class="composer-formatting"
+                transition:slide={{ duration: motionMs(MOTION_MS.quick), easing: cubicOut }}
+              >
                 <ComposerFormatting
                   active={activeFormats}
                   source={sourceMode}
@@ -1552,25 +1662,12 @@
               </div>
             {/if}
             {#snippet formatButton()}
-              <Tooltip label={i18n.t('composer.formatting')}>
-                {#snippet trigger({ props })}
-                  <IconButton
-                    {...mergeProps(props, {
-                      onclick: () => {
-                        setPreference('formattingToolbar', !formattingOpen);
-                      },
-                    })}
-                    variant="ghost"
-                    size="small"
-                    class="composer-format selection-open"
-                    aria-pressed={formattingOpen}
-                    data-state={formattingOpen ? 'open' : 'closed'}
-                    label={i18n.t('composer.formatting')}
-                  >
-                    <TextAaIcon />
-                  </IconButton>
-                {/snippet}
-              </Tooltip>
+              <ComposerFormatButton
+                open={formattingOpen}
+                onToggle={() => {
+                  setPreference('formattingToolbar', !formattingOpen);
+                }}
+              />
             {/snippet}
             <div class="composer-after" bind:this={afterEl}>
               <ComposerBoard
@@ -1591,21 +1688,7 @@
                 }}
               />
               {#if showVoice}
-                <Tooltip label={i18n.t('composer.voiceRecord')}>
-                  {#snippet trigger({ props })}
-                    <IconButton
-                      {...mergeProps(props, {
-                        onclick: startRecording,
-                      })}
-                      variant="ghost"
-                      size="small"
-                      class="composer-voice"
-                      label={i18n.t('composer.voiceRecord')}
-                    >
-                      <MicrophoneIcon />
-                    </IconButton>
-                  {/snippet}
-                </Tooltip>
+                <ComposerVoiceButton onStart={startRecording} />
               {/if}
               <ComposerSendButton
                 {context}
@@ -1638,6 +1721,16 @@
             {suggestions}
             {active}
             onSelect={commit}
+          />
+        {:else if offerOpen && offer}
+          <ComposerOffer
+            id={listboxId}
+            {optionId}
+            heading={i18n.t(offer.rule.strings.heading, { text: offer.text })}
+            target={offer.rule.apply(offer.match).href.replace(/^https:\/\//u, '')}
+            choices={offerChoices}
+            active={offerIndex}
+            onChoose={chooseOffer}
           />
         {/if}
         <div class="composer-measurer" bind:this={measurerEl} aria-hidden="true"></div>
@@ -1724,18 +1817,6 @@
     position: absolute;
     visibility: hidden;
     white-space: pre-wrap;
-  }
-
-  .locked {
-    align-items: center;
-    color: var(--surface-var-on-container);
-    display: flex;
-    font-size: max(var(--font-size-editor), var(--font-size-input-min));
-    grid-column: 1 / -1;
-    justify-content: center;
-    margin: 0;
-    min-height: var(--target);
-    padding: var(--space-200) var(--space-300);
   }
 
   .composer-file {

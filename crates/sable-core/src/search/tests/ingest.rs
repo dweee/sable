@@ -14,7 +14,7 @@ use crate::search::MessageIndex;
 pub(super) async fn empty_cache(
     server: &MatrixMockServer,
     client: &matrix_sdk::Client,
-    room_id: &matrix_sdk::ruma::OwnedRoomId,
+    room_id: &ruma::OwnedRoomId,
 ) -> (
     matrix_sdk::Room,
     matrix_sdk::event_cache::RoomEventCache,
@@ -94,7 +94,7 @@ fn test_a_cache_refill_costs_nothing_when_the_index_already_holds_it() {
             TimelineEvent::from_plaintext(
                 factory
                     .text_msg(*body)
-                    .event_id(&EventId::parse(format!("$refill{index}")).expect("an event id"))
+                    .event_id(EventId::parse(format!("$refill{index}")).expect("an event id"))
                     .into_raw_sync(),
             )
         })
@@ -603,7 +603,7 @@ fn test_a_plaintext_edit_cannot_rewrite_an_encrypted_message() {
     let encrypted = TimelineEvent::from_decrypted(
         DecryptedRoomEvent {
             event: serde_json::from_value(original.clone()).expect("original"),
-            encryption_info: std::sync::Arc::new(EncryptionInfo {
+            encryption_info: Arc::new(EncryptionInfo {
                 sender: user_id!("@alice:localhost").to_owned(),
                 sender_device: None,
                 forwarder: None,
@@ -665,7 +665,7 @@ async fn test_ignored_senders_are_read_from_the_store() {
 
     assert_eq!(
         client.subscribe_to_ignore_user_list_changes().get(),
-        [] as [matrix_sdk::ruma::OwnedUserId; 0]
+        Vec::<ruma::OwnedUserId>::new()
     );
     assert_eq!(
         core.ignored_senders().await,

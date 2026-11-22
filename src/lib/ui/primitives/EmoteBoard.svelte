@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { inlineKey } from '#lib/language.svelte.js';
+  import { clamp } from '#lib/clamp.js';
   import { MediaQuery } from 'svelte/reactivity';
   import { innerWidth } from 'svelte/reactivity/window';
   import type {
@@ -15,7 +17,6 @@
   import { isPackChange, loadPacks } from '#lib/emoji/load-packs.js';
   import { packName } from '#lib/emoji/pack-name.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
-  import VirtualList from 'svelte-tiny-virtual-list';
   import ResizeHandle from '#lib/ui/primitives/ResizeHandle.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
@@ -27,10 +28,11 @@
     readBoardSize,
     trackBoardSize,
   } from '#lib/ui/primitives/board-size.svelte.js';
-  import { tick, untrack } from 'svelte';
+  import { flushSync, tick, untrack } from 'svelte';
+  import { VirtualWindow } from '#lib/ui/virtual-window.svelte.js';
 
   import { emojiGroups, searchReactionEmoji, shortcodeFor } from '#lib/emoji/emoji.js';
-  import { RecentReactions } from '#lib/emoji/recents.svelte.js';
+  import { useRecentReactions } from '#lib/emoji/recents.svelte.js';
   import { emoteRecents } from '#lib/model/model.js';
   import { readRecentStickers, rememberSticker } from '#lib/emoji/recent-packs.svelte.js';
 
@@ -46,7 +48,7 @@
     /** A reaction key cannot be a sticker. */
     stickers?: boolean;
     reactions?: boolean;
-    gifs?: { config: GifsConfig; providerSetting: GifProviderSetting } | null;
+    gifs?: { config: GifsConfig; serviceUrl: string; providerSetting: GifProviderSetting } | null;
     onPick: (image: PackImageView, usage: ImageUsageView, keepOpen: boolean) => void;
     onPickUnicode?: (emoji: string, keepOpen: boolean) => void;
     onPickGif?: (gif: GifResult) => void;
@@ -68,7 +70,7 @@
     onPickGif,
   }: Props = $props();
   const core = useCoreClient();
-  const history = new RecentReactions(core);
+  const history = useRecentReactions(core);
 
   type PickerRow =
     | { id: string; kind: 'lead' }
@@ -98,16 +100,11 @@
   let preview = $state.raw<{ image: PackImageView; pack: ImagePackView } | null>(null);
   let activeCell = $state.raw<{ section: string; index: number }>({ section: '', index: 0 });
   let gridWidth = $state(0);
-  let gridHeight = $state(0);
-  let scrollToRow = $state(-1);
   let leadHeight = $state(0);
   let cellRowHeight = $state(48 + GRID_GAP);
   let imageMeasure = $state.raw<{ tab: BoardTab; width: number; gap: number; row: number } | null>(
     null
   );
-  let scrollAlign = $state<'start' | 'auto'>('start');
-  let mounted = $state.raw({ start: 0, end: 0 });
-  let pendingFocus: { section: string; index: number } | null = null;
   let searchFocused = $state(false);
   let chosen = $state.raw<{ key: string; row: number; col: number; source?: string }>({
     key: '',
@@ -326,6 +323,15 @@
     };
   });
   let rowIndex = $derived(new Map(pickerRows.map((row, index) => [row.id, index])));
+  const gridWindow = new VirtualWindow(() => ({
+    count: pickerRows.length,
+    key: (index) => pickerRows[index].id,
+    overscan: 2,
+    size: rowSize,
+    keep: rowIndex.get(
+      `cells-${activeCell.section}-${String(Math.floor(activeCell.index / emojiColumns) * emojiColumns)}`
+    ),
+  }));
 
   let navRows = $derived(
     pickerRows.filter(
@@ -397,10 +403,6 @@
     return true;
   }
 
-  function pickerRowKey(index: number): string | number {
-    return pickerRows[index]?.id ?? index;
-  }
-
   function jumpTo(id: string): void {
     const index = rowIndex.get(id);
     if (index !== undefined) {
@@ -411,10 +413,9 @@
   }
 
   function requestScroll(index: number, align: 'start' | 'auto'): void {
-    scrollAlign = align;
-    scrollToRow = index;
-    void tick().then(() => {
-      scrollToRow = -1;
+    gridWindow.scrollToIndex(index, {
+      align,
+      behavior: align === 'start' || shouldReduceMotion() ? 'auto' : 'smooth',
     });
   }
 
@@ -422,25 +423,11 @@
     return `pack-${pack.origin}-${pack.room_id ?? 'account'}-${pack.id}`;
   }
 
-  function trackGridSize(element: HTMLElement): () => void {
-    const update = (size?: ResizeObserverSize): void => {
-      gridHeight = size?.blockSize ?? element.clientHeight;
-    };
-    update();
-    if (typeof ResizeObserver === 'undefined') return () => {};
-
-    const observer = new ResizeObserver(([entry]) => {
-      update(entry.contentBoxSize[0]);
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }
-
   function measureImageRow(list: HTMLElement): () => void {
     const measuredTab = tab;
     const update = (size?: ResizeObserverSize): void => {
       const cell = list.firstElementChild;
-      if (!(cell instanceof HTMLElement)) return;
+      if (!(cell instanceof HTMLElement) || list.offsetParent === null) return;
       const style = getComputedStyle(list);
       // Measure the row width after space is reserved for the scrollbar.
       const measured = size?.inlineSize ?? Number.parseFloat(style.width);
@@ -521,32 +508,21 @@
     count: number
   ): void {
     const from = activeCell.section === id ? activeCell.index : 0;
-    const target = targetCell(event.key, from, count - 1);
+    const target = targetCell(inlineKey(event.key), from, count - 1);
     if (target === null) return;
 
     event.preventDefault();
     const index = Math.min(Math.max(target, 0), count - 1);
     activeCell = { section: id, index };
     const grid = event.currentTarget.closest('.grids');
-    const cell = grid?.querySelector<HTMLElement>(
-      `[data-section="${id}"] [data-cell="${String(index)}"]`
-    );
-    if (cell) {
-      cell.focus();
-      return;
-    }
-    pendingFocus = { section: id, index };
+    // `keep` mounts the active row, so the cell exists once flushed.
+    flushSync();
+    grid
+      ?.querySelector<HTMLElement>(`[data-section="${id}"] [data-cell="${String(index)}"]`)
+      ?.focus();
     const start = Math.floor(index / emojiColumns) * emojiColumns;
     const row = rowIndex.get(`cells-${id}-${String(start)}`);
     if (row !== undefined) requestScroll(row, 'auto');
-  }
-
-  function focusWhenPending(section: string, index: number) {
-    return (element: HTMLElement): void => {
-      if (pendingFocus?.section !== section || pendingFocus.index !== index) return;
-      pendingFocus = null;
-      element.focus();
-    };
   }
 
   function tabStop(section: string, index: number, column: number): boolean {
@@ -555,7 +531,7 @@
     if (column !== 0) return false;
     const start = Math.floor(cursor / emojiColumns) * emojiColumns;
     const row = rowIndex.get(`cells-${section}-${String(start)}`);
-    return row === undefined || row < mounted.start || row > mounted.end;
+    return row === undefined || row < gridWindow.first || row >= gridWindow.last;
   }
 
   /** Clicking a cell moves focus too, so the roving tab stop follows it. */
@@ -571,7 +547,7 @@
       if (event.key === 'Enter') submitQuery(event);
       return;
     }
-    if (moveSelection(event.key)) {
+    if (moveSelection(inlineKey(event.key))) {
       event.preventDefault();
       return;
     }
@@ -634,7 +610,7 @@
 
   function resizeBoard(width: number): void {
     writeBoardSize({
-      width: Math.max(MIN_BOARD_WIDTH, Math.min(maxBoardWidth, width)),
+      width: clamp(width, MIN_BOARD_WIDTH, maxBoardWidth),
       height: readBoardSize()?.height ?? 457,
     });
   }
@@ -711,7 +687,7 @@
       }}
       {@attach focusSearch}
     />
-    <span class="sr-only" role="status">{enterTarget}</span>
+    <span class="screen-reader-only" role="status">{enterTarget}</span>
     {#if !gifTab && sections.length > 0}
       <p class="pack-visibility">{i18n.t('composer.packMediaVisibility')}</p>
     {/if}
@@ -720,6 +696,7 @@
   {#if gifs && gifTab}
     <GifGrid
       config={gifs.config}
+      serviceUrl={gifs.serviceUrl}
       providerSetting={gifs.providerSetting}
       {query}
       onPick={(gif: GifResult) => {
@@ -736,31 +713,13 @@
     </div>
   {:else}
     <div class="board-body">
-      <div
-        class={['grids', { sticker: tab === 'sticker', emoji: tab === 'emoticon' }]}
-        {@attach trackGridSize}
-      >
+      <div class={['grids', { sticker: tab === 'sticker', emoji: tab === 'emoticon' }]}>
         {#key `${tab}:${query.trim()}`}
-          <VirtualList
-            height={gridHeight}
-            width="100%"
-            itemCount={pickerRows.length}
-            itemSize={rowSize}
-            estimatedItemSize={cellSize + GRID_GAP}
-            overscanCount={2}
-            getKey={pickerRowKey}
-            scrollToIndex={scrollToRow === -1 ? undefined : scrollToRow}
-            scrollToAlignment={scrollAlign}
-            onItemsUpdated={(range) => {
-              mounted = range;
-            }}
-            scrollToBehaviour={scrollAlign === 'start' || shouldReduceMotion()
-              ? 'instant'
-              : 'smooth'}
-          >
-            {#snippet item({ index, style })}
+          <div class="grid-scroller" {@attach gridWindow.scroller}>
+            <div aria-hidden="true" style:height="{gridWindow.spaceBefore}px"></div>
+            {#each gridWindow.items as { index, key, size, gap } (key)}
               {@const row = pickerRows[index]}
-              <div {style} class="virtual-row">
+              <div class="virtual-row" style:height="{size}px" style:margin-top="{gap}px">
                 {#if row.kind === 'lead'}
                   <div bind:clientHeight={leadHeight}>
                     {#if showFreeText}
@@ -795,7 +754,13 @@
                     <div
                       class="row"
                       role="row"
-                      bind:clientHeight={cellRowHeight}
+                      bind:clientHeight={
+                        () => cellRowHeight,
+                        (height) => {
+                          // A board laid out while hidden measures 0 and would collapse every row.
+                          if (height > 0) cellRowHeight = height;
+                        }
+                      }
                       bind:clientWidth={emojiRowWidth}
                       style={`grid-template-columns: repeat(${String(emojiColumns)}, minmax(0, var(--emote-cell)))`}
                     >
@@ -823,7 +788,6 @@
                               onfocus={() => {
                                 if (cell.image !== undefined) showPreview(cell.image, null);
                               }}
-                              {@attach focusWhenPending(row.section, index)}
                             >
                               {#if source.startsWith('mxc://')}
                                 <MediaImage
@@ -885,12 +849,16 @@
                   </ul>
                 {/if}
               </div>
-            {/snippet}
-          </VirtualList>
+            {/each}
+            <div aria-hidden="true" style:height="{gridWindow.spaceAfter}px"></div>
+          </div>
         {/key}
       </div>
 
-      <nav class={['rail', { hidden: searching }]} aria-label={i18n.t('composer.packs')}>
+      <nav
+        class={['rail', 'scrollbar-hidden', { hidden: searching }]}
+        aria-label={i18n.t('composer.packs')}
+      >
         {#if frequentCells.length > 0}
           {@const frequentLabel = i18n.t('timeline.frequentlyUsed')}
           <Tooltip label={frequentLabel}>
@@ -1044,14 +1012,13 @@
   /* Fixed, or a long pack name widens the rail and squeezes the grid. */
   .rail {
     align-items: center;
-    border-left: var(--border-width) solid var(--surface-container-line);
+    border-inline-start: var(--border-width) solid var(--surface-container-line);
     display: flex;
     flex: 0 0 3.25rem;
     flex-direction: column;
     gap: var(--space-200);
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-width: none;
   }
 
   .rail-divider {
@@ -1093,7 +1060,10 @@
     min-width: 0;
   }
 
-  .grids :global(.virtual-list-wrapper) {
+  .grid-scroller {
+    height: 100%;
+    overflow: hidden auto;
+    overflow-anchor: none;
     scrollbar-gutter: stable;
   }
 
@@ -1201,15 +1171,6 @@
     display: none;
   }
 
-  .sr-only {
-    clip-path: inset(50%);
-    height: 1px;
-    overflow: hidden;
-    position: absolute;
-    white-space: nowrap;
-    width: 1px;
-  }
-
   .free-text {
     background: var(--surface-var-container);
     border: var(--border-width) solid var(--surface-var-container-line);
@@ -1221,7 +1182,7 @@
     margin: var(--space-200);
     overflow: hidden;
     padding: var(--space-150) var(--space-200);
-    text-align: left;
+    text-align: start;
     text-overflow: ellipsis;
     white-space: nowrap;
     width: 98%;
@@ -1267,6 +1228,7 @@
 
   .preview code {
     color: inherit;
+    font-family: inherit;
     font-size: var(--font-size-subheading);
     min-width: 0;
   }

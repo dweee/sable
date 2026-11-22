@@ -30,8 +30,8 @@
     <span class="context-kind">{i18n.t('composer.editingScheduled')}</span>
   {:else}
     <span class="context-kind context-reply">
-      <span class="context-reply-icon" aria-hidden="true"><ReplyIcon /></span>
-      <span class="context-sender" aria-hidden="true">{context.sender}</span>
+      <span class="context-reply-icon" aria-hidden="true"><ReplyIcon class="mirror-rtl" /></span>
+      <span class="context-sender" dir="auto" aria-hidden="true">{context.sender}</span>
       <span class="screen-reader-only"
         >{i18n.t('composer.replyingTo', { name: context.sender ?? '' })}</span
       >
@@ -44,11 +44,11 @@
       title={i18n.t('common.jumpToMessage')}
       onclick={() => onJump(context.eventId)}
     >
-      {context.body}
+      <bdi>{context.body}</bdi>
     </button>
   {:else}
     <div class="context-body">
-      {context.body}
+      <bdi>{context.body}</bdi>
     </div>
   {/if}
   {#if context.kind === 'reply'}
@@ -66,7 +66,15 @@
       {/if}
     </IconButton>
   {/if}
-  <IconButton size="small" variant="ghost" label={i18n.t('common.cancel')} onclick={onCancel}>
+  <IconButton
+    size="small"
+    variant="ghost"
+    label={i18n.t('common.cancel')}
+    onmousedown={(event: MouseEvent) => {
+      event.preventDefault();
+    }}
+    onclick={onCancel}
+  >
     <XIcon />
   </IconButton>
 </div>
@@ -136,7 +144,7 @@
     cursor: pointer;
     font: inherit;
     padding: 0;
-    text-align: left;
+    text-align: start;
   }
 
   .context-jump:hover,

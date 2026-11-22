@@ -30,7 +30,7 @@ pub(in crate::calls) fn member(mode: CallMode, created_ts: u64, foci: &[&str]) -
         foci: foci.iter().map(ToString::to_string).collect(),
         screen_sharing: false,
         wire: super::membership::RtcWire::Deployed,
-        focus_servers: std::collections::HashMap::default(),
+        focus_servers: HashMap::default(),
     }
 }
 
@@ -626,14 +626,14 @@ async fn sdk_redaction_removes_sticky_membership_and_wakes_the_call() {
         Raw::new(&json!({
             "type":"m.room.redaction", "event_id":"$redaction", "sender":"@moderator:example.org",
             "origin_server_ts":200, "redacts":"$member", "content":{"redacts":"$member"}
-        })).unwrap().cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>()
+        })).unwrap().cast_unchecked::<ruma::events::AnySyncTimelineEvent>()
     )).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
         .await
         .unwrap();
     assert_eq!(
         state.lock().await.sticky.members(200),
-        [] as [crate::calls::membership::CallMember; 0]
+        Vec::<CallMember>::new()
     );
 }
 
@@ -856,6 +856,39 @@ async fn refreshing_a_delayed_leave_cancels_the_old_event_and_respects_hangup() 
     delay.lock().await.active = false;
     super::refresh_encrypted_hangup(core, room, own, delay.clone()).await;
     assert_eq!(delay.lock().await.id.as_deref(), Some("new"));
+}
+
+#[tokio::test]
+async fn a_screen_share_update_after_hangup_does_not_republish_the_membership() {
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let (server, _core, room) = delayed_leave_fixture().await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"/rooms/.*/state/.*call\.member/.*"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"event_id":"$member"})),
+        )
+        .expect(1)
+        .mount(server.server())
+        .await;
+    let state = Mutex::new(State::new(
+        member(CallMode::Legacy, 1, &["https://focus.example.org"]),
+        Vec::new(),
+        super::StickyMemberships::default(),
+        &room.room_id().to_owned(),
+        false,
+        None,
+        false,
+    ));
+    let delay = super::super::DelayState::shared(None);
+    super::set_screen_sharing(&room, &state, &delay, true)
+        .await
+        .unwrap();
+    delay.lock().await.active = false;
+    super::set_screen_sharing(&room, &state, &delay, false)
+        .await
+        .unwrap();
 }
 
 async fn legacy_move_fixture(

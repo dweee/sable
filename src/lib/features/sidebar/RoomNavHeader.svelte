@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import type { Component, Snippet } from 'svelte';
   import type { RoomListItemView } from '#src/generated/protocol';
   import { useCoreClient } from '#lib/core/context.js';
@@ -17,8 +18,11 @@
     activeSpace: RoomListItemView | null;
     activeRoom: RoomListItemView | null;
     title: string;
+    titleHref?: string;
+    onNavigate?: (href: string) => void;
     titleIcon: Component;
     collapsed: boolean;
+    actions?: Snippet;
     menuItems: Snippet;
   }
 
@@ -26,8 +30,11 @@
     activeSpace,
     activeRoom,
     title,
+    titleHref,
+    onNavigate,
     titleIcon: TitleIcon,
     collapsed,
+    actions,
     menuItems,
   }: Props = $props();
 
@@ -71,7 +78,13 @@
 
 <div class="room-nav-top">
   {#if bannerShown && banner}
-    <div class="room-banner" style:height={`${preferences.roomBannerHeight}px`}>
+    <div
+      class={['room-banner', { fit: preferences.bannerFit === 'image' }]}
+      style:height={preferences.bannerFit === 'image'
+        ? undefined
+        : `${preferences.roomBannerHeight}px`}
+      style:--room-banner-max={`${preferences.roomBannerHeight}px`}
+    >
       <Banner source={banner} name={bannerName} width={640} height={190} />
       <ResizeHandle
         value={preferences.roomBannerHeight}
@@ -81,7 +94,7 @@
         grow="down"
         step={16}
         shiftStep={64}
-        onResize={(next) => setPreference('roomBannerHeight', Math.max(min, Math.min(max, next)))}
+        onResize={(next) => setPreference('roomBannerHeight', clamp(next, min, max))}
       />
     </div>
   {/if}
@@ -110,6 +123,15 @@
           {/snippet}
           {@render menuItems()}
         </ActionMenu>
+      {:else if titleHref}
+        <!-- eslint-disable svelte/no-navigation-without-resolve -- the caller passes a resolved href -->
+        <a
+          class="title-link"
+          href={titleHref}
+          draggable="false"
+          onclick={() => onNavigate?.(titleHref)}>{title}</a
+        >
+        <!-- eslint-enable svelte/no-navigation-without-resolve -->
       {:else}
         {title}
       {/if}
@@ -125,6 +147,7 @@
             <LockSimpleIcon />
           </span>
         {/if}
+        {@render actions?.()}
         <ActionMenu label={i18n.t('nav.listOptions')}>
           {#snippet trigger({ props })}
             <button
@@ -159,13 +182,21 @@
     z-index: 1;
   }
 
-  .room-banner :global(.room-banner-image),
-  .room-banner :global(.banner-button),
-  .room-banner :global(img) {
+  .room-banner :global(.banner-button) {
     display: block;
+  }
+
+  .room-banner:not(.fit) :global(.banner-image),
+  .room-banner:not(.fit) :global(img) {
     height: 100%;
     object-fit: cover;
     width: 100%;
+  }
+
+  .room-banner.fit :global(.banner-image) {
+    height: auto;
+    max-height: var(--room-banner-max);
+    min-height: var(--header-height);
   }
 
   .room-nav-header {
@@ -181,18 +212,20 @@
   .room-nav-header.on-banner {
     background: linear-gradient(180deg, var(--media-scrim-solid) 0%, var(--media-scrim-clear) 100%);
     color: var(--media-on-scrim);
-    left: 0;
+    inset-inline: 0;
     position: absolute;
-    right: 0;
     top: 0;
   }
 
-  .room-nav-header.on-banner :global(.room-nav-menu) {
+  .room-nav-header.on-banner :global(.room-nav-menu),
+  .room-nav-header.on-banner :global(.room-sort-button) {
     color: inherit;
   }
 
   .room-nav-header.on-banner :global(.room-nav-menu:hover),
-  .room-nav-header.on-banner :global(.room-nav-menu[data-state='open']) {
+  .room-nav-header.on-banner :global(.room-nav-menu[data-state='open']),
+  .room-nav-header.on-banner :global(.room-sort-button:hover),
+  .room-nav-header.on-banner :global(.room-sort-button[data-state='open']) {
     background: var(--media-scrim-hover);
     color: inherit;
   }
@@ -211,6 +244,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .title-link {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .title-link:hover {
+    text-decoration: underline;
   }
 
   :global(.room-nav-badge) {

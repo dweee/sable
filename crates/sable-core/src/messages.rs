@@ -14,6 +14,7 @@ use matrix_sdk::ruma::api::client::reporting::report_user;
 use matrix_sdk::ruma::api::client::room::get_room_event;
 use matrix_sdk::ruma::api::client::room::{report_content, report_room};
 use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
+use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::relation::RelationType;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent;
@@ -38,12 +39,55 @@ use crate::outgoing::message_content;
 use crate::personas::PER_MESSAGE_PROFILE;
 use crate::protocol::{
     EditVersionView, MessageKind, PerMessageProfileView, RpcCode, RpcError, TimelineItemView,
+    UnredactedEventView,
 };
 use crate::view::{
     FAMEDLY_FORWARDED, FORWARDED, SABLE_FORWARDED, SPOILER_PROPERTY, SPOILER_REASON_PROPERTY,
     per_message_profile, standalone_item,
 };
 use serde_with::{DefaultOnError, VecSkipError, serde_as};
+
+const MSC2815: &str = "fi.mau.msc2815";
+const MSC2815_CONTENT_DELETED: &str = "FI.MAU.MSC2815_UNREDACTED_CONTENT_DELETED";
+const MSC2815_CONTENT_NOT_RECEIVED: &str = "FI.MAU.MSC2815_UNREDACTED_CONTENT_NOT_RECEIVED";
+const MSC2815_CONTENT_KEEP_MS: &str = "fi.mau.msc2815.content_keep_ms";
+
+mod get_unredacted_event {
+    use matrix_sdk::ruma::{
+        OwnedEventId, OwnedRoomId,
+        api::{auth_scheme::AccessToken, request, response},
+        events::AnyTimelineEvent,
+        metadata,
+        serde::Raw,
+    };
+
+    metadata! {
+        method: GET,
+        rate_limited: false,
+        authentication: AccessToken,
+        history: {
+            1.0 => "/_matrix/client/r0/rooms/{room_id}/event/{event_id}",
+            1.1 => "/_matrix/client/v3/rooms/{room_id}/event/{event_id}",
+        }
+    }
+
+    #[request]
+    pub(super) struct Request {
+        #[ruma_api(path)]
+        pub room_id: OwnedRoomId,
+        #[ruma_api(path)]
+        pub event_id: OwnedEventId,
+        #[ruma_api(query)]
+        #[serde(rename = "fi.mau.msc2815.include_unredacted_content")]
+        pub include_unredacted_content: bool,
+    }
+
+    #[response]
+    pub(super) struct Response {
+        #[ruma_api(body)]
+        pub event: Raw<AnyTimelineEvent>,
+    }
+}
 
 pub(crate) fn outgoing_mentions(user_ids: Vec<OwnedUserId>, room: bool) -> Mentions {
     let mut mentions = Mentions::with_user_ids(user_ids);
@@ -62,8 +106,7 @@ pub(crate) fn edit_content(
     if media_caption {
         EditedContent::MediaCaption {
             caption: (!body.is_empty()).then_some(body),
-            formatted_caption: formatted
-                .map(matrix_sdk::ruma::events::room::message::FormattedBody::html),
+            formatted_caption: formatted.map(ruma::events::room::message::FormattedBody::html),
             mentions: Some(outgoing_mentions(mentions, room)),
         }
     } else {
@@ -290,7 +333,7 @@ impl Core {
     async fn edit_queued_message(
         &self,
         room: &matrix_sdk::Room,
-        transaction_id: matrix_sdk::ruma::OwnedTransactionId,
+        transaction_id: ruma::OwnedTransactionId,
         mut edited: EditedContent,
         persona: Option<&PerMessageProfileView>,
         thread_root: Option<&OwnedEventId>,
@@ -532,12 +575,78 @@ impl Core {
         Ok(())
     }
 
+    /// Kicks or bans with MSC4293's `redact_events`. Servers without MSC4293
+    /// drop the flag, so when the new membership lost it, the user's messages
+    /// since they joined are redacted one by one; the count is of those.
+    pub(crate) async fn remove_redacting_events(
+        &self,
+        room: &matrix_sdk::Room,
+        user_id: &UserId,
+        reason: Option<&str>,
+        ban: bool,
+    ) -> Result<u32, RpcError> {
+        use matrix_sdk::ruma::api::client::membership::{ban_user, kick_user};
+
+        let joined_at = room
+            .get_member_no_sync(user_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|member| member.event().origin_server_ts());
+        let (room_id, user) = (room.room_id().to_owned(), user_id.to_owned());
+        let sent = if ban {
+            let mut request = ban_user::v3::Request::new(room_id, user);
+            request.reason = reason.map(ToOwned::to_owned);
+            request.redact_events = true;
+            room.client().send(request).await.map(drop)
+        } else {
+            let mut request = kick_user::v3::Request::new(room_id, user);
+            request.reason = reason.map(ToOwned::to_owned);
+            request.redact_events = true;
+            room.client().send(request).await.map(drop)
+        };
+        sent.or_failed(self, "remove_redacting_events")?;
+        let Some(joined_at) = joined_at else {
+            return Ok(0);
+        };
+        let kept = room
+            .client()
+            .send(get_state_event_for_key::v3::Request::new(
+                room.room_id().to_owned(),
+                StateEventType::RoomMember,
+                user_id.to_string(),
+            ))
+            .await
+            .ok()
+            .and_then(|response| {
+                response
+                    .into_content()
+                    .get_field::<bool>("org.matrix.msc4293.redact_events")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(false);
+        if kept {
+            return Ok(0);
+        }
+        self.bulk_redact(
+            &room.room_id().to_owned(),
+            &[user_id.to_string()],
+            joined_at.0.into(),
+            &[],
+            true,
+            reason,
+        )
+        .await
+    }
+
     pub(crate) async fn bulk_redact(
         &self,
         room_id: &OwnedRoomId,
         senders: &[String],
         after_ts: u64,
         event_types: &[String],
+        messages_only: bool,
         reason: Option<&str>,
     ) -> Result<u32, RpcError> {
         let room = self.room(room_id).await?;
@@ -573,6 +682,7 @@ impl Core {
                             .iter()
                             .any(|event_type| raw.event_type.as_deref() == Some(event_type)))
                     || raw.redacted()
+                    || (messages_only && raw.state_key.is_some())
                 {
                     continue;
                 }
@@ -770,6 +880,99 @@ impl Core {
             original,
             encryption,
         ))
+    }
+
+    /// MSC2815: a moderator re-reads the content of an event the server has
+    /// redacted, or one a ban hides here (MSC4293). Nothing is stored, so the
+    /// timeline keeps it removed.
+    pub(crate) async fn unredacted_event(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &OwnedEventId,
+    ) -> Result<UnredactedEventView, RpcError> {
+        const LABEL: &str = "unredacted_event";
+        if let Some(content) = self.ban_hidden_content(room_id, event_id).await {
+            return Ok(UnredactedEventView::Content {
+                content: Box::new(content),
+            });
+        }
+        let client = self.client().await?;
+        if !client
+            .unstable_features()
+            .await
+            .or_failed(self, LABEL)?
+            .iter()
+            .any(|feature| feature.as_str() == MSC2815)
+        {
+            return Err(RpcCode::Unsupported.into());
+        }
+        let room = self.room(room_id).await?;
+        let request = get_unredacted_event::Request {
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            include_unredacted_content: true,
+        };
+        let raw = match client.send(request).await {
+            Ok(response) => response.event,
+            Err(error) => {
+                let kind = error.client_api_error_kind();
+                return match kind.map(ErrorKind::errcode) {
+                    Some(code) if code.as_str() == MSC2815_CONTENT_DELETED => {
+                        Ok(UnredactedEventView::Deleted {
+                            content_keep_ms: kind
+                                .and_then(|kind| kind.custom_json_data())
+                                .and_then(|data| data.get(MSC2815_CONTENT_KEEP_MS))
+                                .and_then(serde_json::Value::as_u64),
+                        })
+                    }
+                    Some(code) if code.as_str() == MSC2815_CONTENT_NOT_RECEIVED => {
+                        Ok(UnredactedEventView::NotReceived)
+                    }
+                    _ => Err(error).or_failed(self, LABEL),
+                };
+            }
+        };
+
+        let mut json: serde_json::Value =
+            serde_json::from_str(raw.json().get()).or_failed(self, LABEL)?;
+        // A server that only ever saw the redacted event answers with it.
+        if json
+            .get("content")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(serde_json::Map::is_empty)
+        {
+            return Ok(UnredactedEventView::NotReceived);
+        }
+        // An event carrying `redacted_because` reads as redacted whatever its content.
+        if let Some(unsigned) = json
+            .get_mut("unsigned")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            unsigned.remove("redacted_because");
+        }
+        let encrypted =
+            json.get("type").and_then(serde_json::Value::as_str) == Some("m.room.encrypted");
+        let raw = Raw::<AnySyncTimelineEvent>::from_json_string(json.to_string())
+            .or_failed(self, LABEL)?;
+        let event = if encrypted {
+            let Some(decrypted) = room
+                .decrypt_event(raw.cast_ref_unchecked(), None)
+                .await
+                .ok()
+                .filter(|event| event.encryption_info().is_some())
+            else {
+                return Ok(UnredactedEventView::Undecryptable);
+            };
+            decrypted
+        } else {
+            TimelineEvent::from_plaintext(raw)
+        };
+        let item = standalone_item(self, &room, event, None, None)
+            .await
+            .ok_or(RpcCode::Unavailable)?;
+        Ok(UnredactedEventView::Content {
+            content: Box::new(item.content),
+        })
     }
 
     pub(crate) async fn forward_message(
@@ -1010,6 +1213,9 @@ struct RawEventHead {
     #[serde_as(deserialize_as = "DefaultOnError")]
     #[serde(default)]
     unsigned: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde_as(deserialize_as = "DefaultOnError")]
+    #[serde(default)]
+    state_key: Option<String>,
 }
 
 impl RawEventHead {
@@ -1161,15 +1367,13 @@ fn prior_forward(
 
 fn strip_reply_fallback(content: &mut serde_json::Map<String, serde_json::Value>) {
     if let Some(serde_json::Value::String(body)) = content.get_mut("body") {
-        *body =
-            matrix_sdk::ruma::events::room::message::sanitize::remove_plain_reply_fallback(body)
-                .to_owned();
+        *body = ruma::events::room::message::sanitize::remove_plain_reply_fallback(body).to_owned();
     }
     let html = content
         .get("format")
         .is_some_and(|format| format == "org.matrix.custom.html");
     if html && let Some(serde_json::Value::String(formatted)) = content.get_mut("formatted_body") {
-        *formatted = matrix_sdk::ruma::html::remove_html_reply_fallback(formatted);
+        *formatted = ruma::html::remove_html_reply_fallback(formatted);
     }
 }
 
@@ -2134,7 +2338,7 @@ mod tests {
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let room_id = room_id!("!stale:example.org");
-        let stale: matrix_sdk::ruma::serde::Raw<_> = matrix_sdk::ruma::serde::Raw::new(&json!({
+        let stale: ruma::serde::Raw<_> = ruma::serde::Raw::new(&json!({
             "type": "m.room.pinned_events", "state_key": "", "event_id": "$state",
             "sender": "@alice:example.org", "origin_server_ts": 1,
             "content": {"pinned": ["$a"]}
@@ -2375,7 +2579,7 @@ mod tests {
                 "/_matrix/client/v3/rooms/{target}/send/m.room.message/.*"
             )))
             .and(|request: &wiremock::Request| {
-                let body: serde_json::Value = request.body_json().unwrap();
+                let body: Value = request.body_json().unwrap();
                 body["org.matrix.msc4553.forwarded"]
                     == json!({
                         "content": {"msgtype": "m.text", "body": "original"}
@@ -3066,7 +3270,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn receipt_body(read: &str, viewed: Option<&str>) -> serde_json::Value {
+    async fn receipt_body(read: &str, viewed: Option<&str>) -> Value {
         use crate::api::timeline::MarkReadParams;
         use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
         let server = MatrixMockServer::new().await;

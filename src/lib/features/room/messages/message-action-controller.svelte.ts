@@ -1,21 +1,36 @@
 import { copyText as writeClipboard } from '#lib/platform/clipboard.js';
-import type { TimelineItemView, ImageSourcePackView } from '#src/generated/protocol';
+import type {
+  TimelineItemView,
+  ImageSourcePackView,
+  UrlPreviewView,
+} from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import type { PersonaStore } from '#lib/personas/personas.svelte.js';
 import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
 import { t } from '#lib/i18n.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
-import { saveBytes, savesNatively, saveVideoToPhotos } from '#lib/platform/files.js';
+import { saveBytes, saveVideoToPhotos } from '#lib/platform/files.js';
+import { confirmSaved, reportSave } from '#lib/ui/download.js';
 import { favoriteGifs, isFavorite, toggleFavorite } from '#lib/gif/favorites.svelte.js';
 import { isNativeMobile, isAndroid } from '#lib/platform/os.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 import { gifFromProxiedMxc, gifFromUploadedMxc } from '#lib/gif/providers.js';
 import { downloadCandidates, emoteCandidates } from '#lib/features/emotes/steal-emotes.js';
+import { previewGif } from '../media/link-preview.js';
 import { pinErrorMessage, type PinnedEvents } from '../timeline/pinned-events.svelte.js';
 import type { Bookmarks } from '#lib/rooms/bookmarks.svelte.js';
+import { meowlnirFor } from '#lib/rooms/meowlnir-registry.svelte.js';
+import { serverFeatures } from '#lib/core/server-features.svelte.js';
+import { isCoreError } from '#src/transport';
 import type { MessageDialogs } from './message-dialogs.svelte.js';
 import type { ReplyVersion } from './reply-preview';
 import { messageActionPolicy } from './message-action-policy';
+import {
+  hideContent,
+  revealState,
+  setRevealState,
+  type RevealState,
+} from './revealed-redactions.svelte.js';
 
 export interface MessageCallbacks {
   onToggleReaction?: (
@@ -29,7 +44,7 @@ export interface MessageCallbacks {
   onEdit?: (eventId: string, body: string, html: string | null, mediaCaption?: boolean) => void;
   onDelete?: (eventId: string, reason: string | null) => void;
   onOpenThread?: (rootEventId: string) => void;
-  onCopyLink?: (eventId: string) => void;
+  onCopyLink?: (eventId: string, format?: 'matrix' | 'external') => void;
 }
 
 interface MessageActionContext extends MessageCallbacks {
@@ -41,6 +56,7 @@ interface MessageActionContext extends MessageCallbacks {
   senderTimezone: string | null;
   anchor: HTMLElement | CursorAnchor | null;
   hasLinkPreviews: boolean;
+  linkPreviews: readonly UrlPreviewView[];
 }
 
 interface MessageActionDeps {
@@ -52,6 +68,8 @@ interface MessageActionDeps {
 }
 
 const SAVE_FEEDBACK_DELAY_MS = 300;
+const MSC2815 = 'fi.mau.msc2815';
+const DAY_MS = 86_400_000;
 
 export class MessageActionExecutor {
   savingSource = $state<string | null>(null);
@@ -72,6 +90,7 @@ export class MessageActionExecutor {
       senderTimezone,
       anchor,
       hasLinkPreviews,
+      linkPreviews,
       onToggleReaction,
       onMarkUnread,
       onReply,
@@ -90,6 +109,11 @@ export class MessageActionExecutor {
       canPin,
       canRedactOwn,
       canRedactOthers,
+      canViewRedacted:
+        item.content.kind === 'redacted' &&
+        ((canRedactOthers && item.redacted_on_ban === true) ||
+          ((canRedactOthers || preferences.developerTools) &&
+            serverFeatures(core).includes(MSC2815))),
       canToggleReaction: onToggleReaction !== undefined,
       canMarkUnread: onMarkUnread !== undefined,
       canReply: onReply !== undefined,
@@ -102,6 +126,7 @@ export class MessageActionExecutor {
       bookmarked,
       stealCount: stealable.length,
     });
+    const linkGif = policy.media === null ? previewGif(linkPreviews) : null;
     const gif =
       item.content.kind === 'image'
         ? (gifFromProxiedMxc(
@@ -121,7 +146,7 @@ export class MessageActionExecutor {
             item.content.mime,
             item.content.animated
           ))
-        : undefined;
+        : linkGif?.favorite;
     const downloadMedia = async (media: {
       source: string;
       filename: string;
@@ -144,8 +169,7 @@ export class MessageActionExecutor {
           media.mime ?? 'application/octet-stream',
           preferences.askDownloadLocation
         );
-        if (outcome === 'saved' && savesNatively()) toasts.info(t('viewer.saved'));
-        if (outcome === 'failed') toasts.error(t('errors.actionFailed'));
+        reportSave(outcome);
       } catch (error) {
         console.warn('[sable timeline] media download failed', error);
         toasts.error(t('errors.actionFailed'));
@@ -184,9 +208,9 @@ export class MessageActionExecutor {
 
     async function downloadEmotes(): Promise<void> {
       try {
-        if ((await downloadCandidates(core, stealable)) === 'failed') {
-          toasts.error(t('errors.actionFailed'));
-        }
+        const outcome = await downloadCandidates(core, stealable);
+        if (outcome === 'failed') toasts.error(t('errors.actionFailed'));
+        if (outcome === 'saved') confirmSaved();
       } catch (error) {
         console.warn('[sable timeline] emote download failed', error);
         toasts.error(t('errors.actionFailed'));
@@ -222,6 +246,50 @@ export class MessageActionExecutor {
       } catch (error) {
         console.warn('[sable timeline] source unavailable', error);
         toasts.error(t('errors.actionFailed'));
+      }
+    }
+
+    const reveal = revealState(roomId, item.event_id);
+    const redactedRevealed = reveal?.kind === 'shown';
+
+    async function toggleRedacted(eventId: string): Promise<void> {
+      if (reveal?.kind === 'loading') return;
+      if (redactedRevealed) {
+        hideContent(roomId, eventId);
+        return;
+      }
+      setRevealState(roomId, eventId, { kind: 'loading' });
+      setRevealState(roomId, eventId, await unredacted(eventId));
+    }
+
+    async function unredacted(eventId: string): Promise<RevealState> {
+      const failed = (message: string): RevealState => ({ kind: 'failed', message });
+      try {
+        const found = await core.rpc.timeline.unredactedEvent({
+          room_id: roomId,
+          event_id: eventId,
+        });
+        switch (found.kind) {
+          case 'content':
+            return { kind: 'shown', content: found.content };
+          case 'undecryptable':
+            return failed(t('timeline.redactedUndecryptable'));
+          case 'deleted':
+            return failed(
+              found.content_keep_ms === null
+                ? t('timeline.redactedErased')
+                : t('timeline.redactedErasedAfter', {
+                    count: Math.max(1, Math.round(found.content_keep_ms / DAY_MS)),
+                  })
+            );
+          case 'not_received':
+            return failed(t('timeline.redactedNotReceived'));
+        }
+      } catch (error) {
+        console.warn('[sable timeline] redacted content unavailable', error);
+        return failed(
+          isCoreError(error, 'denied') ? t('timeline.redactedDenied') : t('errors.actionFailed')
+        );
       }
     }
 
@@ -328,6 +396,11 @@ export class MessageActionExecutor {
             if (item.event_id) onCopyLink?.(item.event_id);
           }
         : undefined,
+      onCopyMatrixLink: policy.copyLink
+        ? () => {
+            if (item.event_id) onCopyLink?.(item.event_id, 'matrix');
+          }
+        : undefined,
       pinned: policy.pinned,
       bookmarked: policy.bookmarked,
       onPin: policy.pin ? () => void togglePin(policy.eventId) : undefined,
@@ -344,7 +417,9 @@ export class MessageActionExecutor {
         ? () => {
             if (policy.media) void downloadMedia(policy.media);
           }
-        : undefined,
+        : linkGif
+          ? () => void downloadMedia(linkGif.media)
+          : undefined,
       onSaveToPhotos:
         item.content.kind === 'video' && isNativeMobile() && !isAndroid()
           ? () => void saveVideoToLibrary()
@@ -368,11 +443,19 @@ export class MessageActionExecutor {
         : undefined,
       onEditHistory: policy.editHistory ? () => void openEditHistory(policy.eventId) : undefined,
       onViewSource: policy.viewSource ? () => void openSource(policy.eventId) : undefined,
+      redactedRevealed,
+      onViewRedacted: policy.viewRedacted ? () => void toggleRedacted(policy.eventId) : undefined,
       onReport: policy.report
         ? () => {
             dialogs.open(item, { kind: 'report' });
           }
         : undefined,
+      onMeowlnirBan:
+        !item.is_own && item.sender && meowlnirFor(roomId, core.session?.user_id)
+          ? () => {
+              dialogs.open(item, { kind: 'meowlnir-ban' });
+            }
+          : undefined,
     };
   }
 }

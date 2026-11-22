@@ -4,8 +4,6 @@ import { render } from 'vitest-browser-svelte';
 
 import { core } from '#lib/core/__mocks__/context.js';
 
-import en from '../../../locales/en.json' with { type: 'json' };
-
 vi.mock('#lib/core/context.js', async () => {
   const mock = await import('#lib/core/__mocks__/context.js');
   return { useCoreClient: () => mock.core, provideCoreClient: vi.fn() };
@@ -118,7 +116,7 @@ function box(selector: string): DOMRect {
 
 test('keyboard focus reveals the status and lets the reader scroll it', async () => {
   const screen = await statusCard();
-  const status = screen.getByRole('region', { name: en.settings.status });
+  const status = screen.getByRole('region').nth(1);
   const node = () => status.element();
   document.querySelector<HTMLElement>('.profile-card-user-id')?.focus();
   await userEvent.unhover(node());
@@ -146,7 +144,7 @@ test('keyboard focus reveals the status and lets the reader scroll it', async ()
 
 test('a hovered status clears the name and the actions below it', async () => {
   const screen = await statusCard();
-  const status = screen.getByRole('region', { name: en.settings.status });
+  const status = screen.getByRole('region').nth(1);
   document.querySelector<HTMLElement>('.profile-card-user-id')?.focus();
   const bubble = document.querySelector<HTMLElement>('.profile-card-status');
   if (!bubble) throw new Error('the status bubble is not rendered');
@@ -176,7 +174,7 @@ test('leaving the status for a card action keeps its position stable', async () 
 
 test('an expanded status stays inside the card and above its controls', async () => {
   const screen = await statusCard();
-  const status = screen.getByRole('region', { name: en.settings.status });
+  const status = screen.getByRole('region').nth(1);
   status.element().focus();
 
   expect(overflowY(status.element())).toBe('auto');

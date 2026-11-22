@@ -63,6 +63,8 @@ function item(id: string, body: string, patch: Partial<TimelineItemView> = {}): 
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    shared_by: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,
@@ -144,18 +146,16 @@ function lineCount(itemId: string): number {
   return new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
 }
 
-for (const layout of ['bubble', 'compact'] as const) {
-  test(`the ${layout} layout keeps the badge beside the last line`, async () => {
-    await page.viewport(390, 780);
-    await mountItem(item('receipted', WRAPPED, { read_by: TWO_READERS }), { layout });
+test('the compact layout keeps the badge beside the last line', async () => {
+  await page.viewport(390, 780);
+  await mountItem(item('receipted', WRAPPED, { read_by: TWO_READERS }), { layout: 'compact' });
 
-    const receipted = measure('receipted');
-    expect(Math.abs(receipted.badge.right - receipted.content.right)).toBeLessThanOrEqual(1);
-    expect(receipted.lastLine.right).toBeLessThanOrEqual(receipted.badge.left);
-    expect(Math.abs(receipted.badge.bottom - receipted.content.bottom)).toBeLessThanOrEqual(1);
-    expect(receipted.content.bottom - receipted.body.bottom).toBeLessThanOrEqual(2);
-  });
-}
+  const receipted = measure('receipted');
+  expect(Math.abs(receipted.badge.right - receipted.content.right)).toBeLessThanOrEqual(1);
+  expect(receipted.lastLine.right).toBeLessThanOrEqual(receipted.badge.left);
+  expect(Math.abs(receipted.badge.bottom - receipted.content.bottom)).toBeLessThanOrEqual(1);
+  expect(receipted.content.bottom - receipted.body.bottom).toBeLessThanOrEqual(2);
+});
 
 test('a receipt badge sits beside the last line and leaves the timestamp on the right', async () => {
   await page.viewport(390, 780);
@@ -213,11 +213,32 @@ test('a short receipted bubble keeps its text on one line', async () => {
   });
 
   for (const id of ['receipted', 'own-receipted']) {
-    const receipted = measure(id);
     expect(lineCount(id)).toBe(1);
-    expect(receipted.lastLine.right).toBeLessThanOrEqual(receipted.badge.left);
   }
 });
+
+for (const own of [false, true]) {
+  for (const [id, body] of [
+    ['short', 'should be a simple fix'],
+    ['wide', WRAPPED],
+  ] as const) {
+    test(`a ${id} bubble lines its receipt up with the timeline end (own: ${String(own)})`, async () => {
+      await page.viewport(390, 780);
+      const rowId = `${own ? 'own-' : ''}${id}`;
+      await mountItem(item(rowId, body, { is_own: own, read_by: TWO_READERS }), {
+        layout: 'bubble',
+      });
+
+      const row = document.querySelector(`[data-item-id="${rowId}"]`);
+      const bubble = row?.querySelector('.formatted-body')?.getBoundingClientRect();
+      const badge = row?.querySelector('.read-receipt-stack')?.getBoundingClientRect();
+      const main = row?.querySelector('.message-main')?.getBoundingClientRect();
+      if (!bubble || !badge || !main) throw new Error('no box');
+      expect(badge.top).toBeGreaterThanOrEqual(bubble.bottom);
+      expect(Math.abs(badge.right - main.right)).toBeLessThanOrEqual(1);
+    });
+  }
+}
 
 test('a short receipted notice keeps its text on one line', async () => {
   await page.viewport(390, 780);
@@ -235,14 +256,11 @@ test('a short receipted notice keeps its text on one line', async () => {
     { layout: 'bubble' }
   );
 
-  const receipted = measure('receipted-notice');
   expect(lineCount('receipted-notice')).toBe(1);
-  expect(Math.abs(receipted.badge.bottom - receipted.content.bottom)).toBeLessThanOrEqual(1);
-  expect(receipted.content.bottom - receipted.body.bottom).toBeLessThanOrEqual(2);
 });
 
 for (const alignOwn of [true, false]) {
-  test(`a long receipted bubble is no wider than its box (align own: ${String(alignOwn)})`, async () => {
+  test(`a long receipted bubble keeps its width cap (align own: ${String(alignOwn)})`, async () => {
     await page.viewport(1600, 900);
     const long = 'long message that goes on and on '.repeat(60);
     await mountItem(item('own-long', long, { is_own: true, read_by: TWO_READERS }), {
@@ -250,17 +268,15 @@ for (const alignOwn of [true, false]) {
       alignOwn,
     });
 
-    const row = document.querySelector('[data-item-id="own-long"]');
-    const body = row?.querySelector('.formatted-body')?.getBoundingClientRect();
-    const wrapper = row?.querySelector('.has-receipts')?.getBoundingClientRect();
-    if (!body || !wrapper) throw new Error('no box');
-    expect(Math.round(wrapper.right) - Math.round(wrapper.left)).toBeLessThanOrEqual(
-      Math.round(body.right) - Math.round(body.left) + 60
-    );
+    const body = document
+      .querySelector('[data-item-id="own-long"] .formatted-body')
+      ?.getBoundingClientRect();
+    if (!body) throw new Error('no box');
+    expect(body.width).toBeLessThanOrEqual(801);
   });
 }
 
-test('own trailing reactions clear a wide receipt stack', async () => {
+test('own trailing reactions share a line with a wide receipt stack', async () => {
   await page.viewport(500, 800);
   await mountItem(
     item('own-reacted', 'hello there', {
@@ -276,7 +292,8 @@ test('own trailing reactions clear a wide receipt stack', async () => {
     const reactions = row?.querySelector('.reactions')?.getBoundingClientRect();
     const badge = row?.querySelector('.read-receipt-stack')?.getBoundingClientRect();
     if (!reactions || !badge) throw new Error('layout not ready');
-    expect(badge.x - (reactions.x + reactions.width)).toBeGreaterThanOrEqual(0);
+    expect(Math.abs(badge.bottom - reactions.bottom)).toBeLessThanOrEqual(1);
+    expect(badge.left - reactions.right).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -334,3 +351,65 @@ test('the text wraps the same for one reader as for many', async () => {
     expect(new Set(widths).size, `length ${String(length)}: ${widths.join(',')}`).toBe(1);
   }
 }, 120_000);
+
+for (const layout of ['modern', 'compact', 'bubble'] as const) {
+  test(`the ${layout} layout keeps the badge off text in either direction`, async () => {
+    await page.viewport(414, 800);
+    for (const [dir, body] of [
+      ['ltr', 'سلام دنیا'],
+      ['ltr', `سلام ${'دنیا و بیشتر '.repeat(10)}`],
+      ['ltr', 'Sable یک کلاینت است'],
+      ['rtl', 'سلام دنیا'],
+      ['rtl', 'hello world'],
+      ['rtl', `hello ${'and more words '.repeat(10)}`],
+    ]) {
+      document.documentElement.dir = dir;
+      const screen = await mountItem(item('rtl', body, { read_by: TWO_READERS }), { layout });
+      const text = document.querySelector('[data-item-id="rtl"] .formatted-body');
+      const badge = document.querySelector('[data-item-id="rtl"] .read-receipt-stack');
+      if (!text || !badge) throw new Error('missing body or badge');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const badgeBox = badge.getBoundingClientRect();
+      expect(
+        [...range.getClientRects()].some(
+          (rect) =>
+            rect.width > 0 &&
+            rect.right > badgeBox.left + 0.5 &&
+            rect.left < badgeBox.right - 0.5 &&
+            rect.bottom > badgeBox.top + 0.5 &&
+            rect.top < badgeBox.bottom - 0.5
+        ),
+        `${dir}: ${body}`
+      ).toBe(false);
+      await screen.unmount();
+    }
+    document.documentElement.dir = 'ltr';
+  });
+}
+
+test.each(['modern', 'compact'] as const)(
+  'the %s layout keeps the badge clear of the message shield',
+  async (layout) => {
+    await page.viewport(390, 780);
+    await mountItem(
+      item('shielded', 'Short', {
+        thread_root: '$root:example.test',
+        read_by: TWO_READERS,
+        shield: { code: 'sent_in_clear', critical: true },
+      }),
+      { layout }
+    );
+
+    const row = document.querySelector('[data-item-id="shielded"]');
+    const shield = row?.querySelector('.message-crypto-status')?.getBoundingClientRect();
+    const badge = row?.querySelector('.read-receipt-stack')?.getBoundingClientRect();
+    if (!shield || !badge) throw new Error('no shield or badge');
+    const overlaps =
+      badge.left < shield.right &&
+      shield.left < badge.right &&
+      badge.top < shield.bottom &&
+      shield.top < badge.bottom;
+    expect(overlaps).toBe(false);
+  }
+);

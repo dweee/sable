@@ -986,7 +986,7 @@ async fn healthy_space_summary_does_not_fetch_missing_tombstone_state() {
     let summary = crate::view::room_list_item(
         &item,
         &cache,
-        &matrix_sdk::ruma::push::Ruleset::new(),
+        &ruma::push::Ruleset::new(),
         &crate::nicknames::Nicknames::default(),
     );
     assert_eq!(summary.room_kind, Some(RoomKind::Space));
@@ -1051,8 +1051,6 @@ async fn unreadable_space_children_keep_the_last_edges() {
     assert_eq!(cache[room_id].children.len(), 2);
     assert!(cache[room_id].children_stale);
 }
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn space_client(server: &MatrixMockServer, store: &std::path::Path) -> matrix_sdk::Client {
     let client = server
         .client_builder()
@@ -1085,8 +1083,6 @@ async fn space_client(server: &MatrixMockServer, store: &std::path::Path) -> mat
         .await;
     client
 }
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn next_room_list_diff(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
     subscription: crate::protocol::SubscriptionId,
@@ -1326,6 +1322,26 @@ async fn local_read_waits_for_open_stores() {
 }
 
 #[tokio::test]
+async fn a_command_sent_while_the_stores_are_closed_waits_for_them() {
+    let server = MatrixMockServer::new().await;
+    let store = tempfile::tempdir().unwrap();
+    let client = space_client(&server, store.path()).await;
+    let core = core(&server, client.clone()).await;
+    core.activity.set_stores_open(false);
+    client.pause().await.unwrap();
+
+    let pending = core.call("members.join_requests", "{}");
+    tokio::pin!(pending);
+    tokio::time::timeout(std::time::Duration::from_millis(200), &mut pending)
+        .await
+        .expect_err("the command waits for reopened stores");
+
+    client.resume().await.unwrap();
+    core.activity.set_stores_open(true);
+    pending.await.unwrap();
+}
+
+#[tokio::test]
 async fn background_work_stops_when_the_stores_close() {
     let server = MatrixMockServer::new().await;
     let store = tempfile::tempdir().unwrap();
@@ -1424,6 +1440,97 @@ async fn space_sidebar_does_not_read_while_stores_are_closing() {
     client.resume().await.unwrap();
     core.activity.set_stores_open(true);
     assert_eq!(pending.await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn voice_room_roster_follows_sticky_members_without_joining() {
+    use crate::test_support::sticky_update;
+    use ruma::{MilliSecondsSinceUnixEpoch, user_id};
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    server.mock_room_state_encryption().plain().mount().await;
+    let room_id = room_id!("!voice:example.org");
+    let now = u64::from(MilliSecondsSinceUnixEpoch::now().get());
+    let alice = user_id!("@alice:example.org");
+    let bob = user_id!("@bob:example.org");
+    let create = json!({
+        "type": "m.room.create", "state_key": "", "event_id": "$create",
+        "origin_server_ts": 1, "sender": "@alice:example.org",
+        "content": {"creator": "@alice:example.org", "room_version": "10", "type": "org.matrix.msc3417.call"}
+    });
+    let legacy = json!({
+        "type": "org.matrix.msc3401.call.member", "sender": alice,
+        "state_key": "_@alice:example.org_phone_m.call", "event_id": "$legacy", "origin_server_ts": now - 3,
+        "content": {"application": "m.call", "scope": "m.room", "call_id": "", "device_id": "phone",
+            "created_ts": now - 3, "expires": 60_000, "focus_active": {"type": "livekit", "focus_selection": "oldest_membership"},
+            "foci_preferred": []}
+    });
+    let room = server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_state_event(Raw::new(&create).unwrap().cast_unchecked())
+                .add_state_event(Raw::new(&legacy).unwrap().cast_unchecked()),
+        )
+        .await;
+    assert_eq!(room.active_room_call_participants(), [alice]);
+    let membership = |sender: &ruma::UserId, id: &str, ts: u64, sharing: bool| {
+        json!({
+            "type": "org.matrix.msc4143.rtc.member", "sender": sender, "event_id": id, "origin_server_ts": ts,
+            "msc4354_sticky": {"duration_ms": 60_000},
+            "content": {"msc4354_sticky_key": "member", "slot_id": "m.call#ROOM",
+                "application": {"type": "m.call"}, "member": {"id": "member", "device_id": "phone"},
+                "org.sable.screen_sharing": sharing}
+        })
+    };
+    sticky_update(&room, vec![membership(alice, "$a", now - 2, false)]).await;
+    let (core, mut events) = core_with_events(&server, client).await;
+    let SubscribeRoomListOk { subscription, .. } =
+        core.run(SubscribeRoomListParams::default()).await.unwrap();
+    let mut rows = Vec::new();
+    let mut expect_roster = async |participants: &[&ruma::UserId], sharers: &[&ruma::UserId]| {
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                if let CoreEvent::RoomListDiff {
+                    subscription: current,
+                    diffs,
+                    ..
+                } = event
+                    && current == subscription
+                {
+                    for diff in &diffs {
+                        crate::view::apply_diff(&mut rows, diff);
+                    }
+                    if rows.iter().any(|row| {
+                        row.room_id == room_id
+                            && row.call_participants == participants
+                            && row.screen_sharers == sharers
+                    }) {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await;
+        assert!(
+            matches!(observed, Ok(true)),
+            "expected {participants:?} with sharers {sharers:?}, got {rows:?}"
+        );
+    };
+    expect_roster(&[alice], &[]).await;
+
+    let mut event = membership(bob, "$b", now - 1, true);
+    sticky_update(&room, vec![event.clone()]).await;
+    expect_roster(&[alice, bob], &[bob]).await;
+
+    event["event_id"] = "$leave".into();
+    event["origin_server_ts"] = now.into();
+    event["content"] = json!({"msc4354_sticky_key": "member"});
+    sticky_update(&room, vec![event]).await;
+    expect_roster(&[alice], &[]).await;
+    core.run(UnsubscribeParams { subscription }).await.unwrap();
 }
 
 #[tokio::test]
@@ -1771,6 +1878,105 @@ async fn scheduled_attachments_keep_the_spoiler_on_the_wire() {
 }
 
 #[tokio::test]
+async fn pack_subscriptions_are_not_rewritten_from_the_store_when_the_server_read_fails() {
+    use crate::api::packs::SetSubscriptionsParams;
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    server
+        .mock_sync()
+        .ok_and_run(&client, |builder| {
+            builder.add_custom_global_account_data(json!({
+                "type": "im.ponies.emote_rooms",
+                "content": { "rooms": { "!stored:example.org": { "pack": {} } } }
+            }));
+        })
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("/_matrix/client/v3/user/.*/account_data/.*"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "errcode": "M_FORBIDDEN", "error": "unreachable"
+        })))
+        .mount(server.server())
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(0)
+        .mount(server.server())
+        .await;
+    let core = core(&server, client).await;
+
+    let params = serde_json::from_value::<SetSubscriptionsParams>(json!({
+        "added": [{ "room_id": "!added:example.org", "state_key": "pack" }],
+        "removed": []
+    }))
+    .unwrap();
+
+    core.run(params).await.unwrap_err();
+}
+
+const TEST_DOCUMENT: &str = "org.example.document";
+
+async fn mount_document(server: &MatrixMockServer, get: ResponseTemplate, puts: u64) {
+    Mock::given(method("GET"))
+        .and(path_regex("/_matrix/client/v3/user/.*/account_data/.*"))
+        .respond_with(get)
+        .mount(server.server())
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(puts)
+        .mount(server.server())
+        .await;
+}
+
+#[tokio::test]
+async fn updating_account_data_refuses_a_failed_or_malformed_server_read() {
+    for get in [
+        ResponseTemplate::new(403)
+            .set_body_json(json!({ "errcode": "M_FORBIDDEN", "error": "unreachable" })),
+        ResponseTemplate::new(200).set_body_json(json!([1])),
+    ] {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        mount_document(&server, get, 0).await;
+        let core = core(&server, client).await;
+
+        let result = core
+            .update_account_data(&[TEST_DOCUMENT], "test", async |_| {
+                Ok(Some(json!({ "a": 1 })))
+            })
+            .await;
+
+        result.unwrap_err();
+    }
+}
+
+#[tokio::test]
+async fn updating_an_absent_account_document_starts_from_nothing() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    mount_document(
+        &server,
+        ResponseTemplate::new(404)
+            .set_body_json(json!({ "errcode": "M_NOT_FOUND", "error": "absent" })),
+        1,
+    )
+    .await;
+    let core = core(&server, client).await;
+
+    let written = core
+        .update_account_data(&[TEST_DOCUMENT], "test", async |current| {
+            assert!(current.is_none());
+            Ok(Some(json!({ "a": 1 })))
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(written, Some(json!({ "a": 1 })));
+}
+
+#[tokio::test]
 async fn cached_image_packs_return_without_waiting_for_room_state() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
@@ -1944,6 +2150,11 @@ async fn an_unencrypted_dm_request_reuses_an_unencrypted_dm() {
 async fn a_new_dm_makes_the_invitee_a_creator() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
+    Mock::given(method("GET"))
+        .and(path("/_matrix/client/v3/profile/@bob:example.org"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(server.server())
+        .await;
     Mock::given(method("POST"))
         .and(path("/_matrix/client/v3/createRoom"))
         .and(wiremock::matchers::body_partial_json(json!({
@@ -1956,7 +2167,7 @@ async fn a_new_dm_makes_the_invitee_a_creator() {
         .mount(server.server())
         .await;
     Mock::given(method("PUT"))
-        .and(wiremock::matchers::path_regex(r"/account_data/m\.direct$"))
+        .and(path_regex(r"/account_data/m\.direct$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(server.server())
         .await;
@@ -1966,6 +2177,47 @@ async fn a_new_dm_makes_the_invitee_a_creator() {
             .unwrap();
     let created = core.run(params).await.unwrap();
     assert_eq!(created, "!new-dm:example.org");
+}
+
+#[tokio::test]
+async fn a_dm_with_yourself_lists_no_other_creator_and_is_still_a_dm() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let own = client.user_id().unwrap().to_owned();
+    Mock::given(method("POST"))
+        .and(path("/_matrix/client/v3/createRoom"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = request.body_json().unwrap();
+            assert!(body.get("creation_content").is_none(), "{body}");
+            assert!(body.get("invite").is_none(), "{body}");
+            ResponseTemplate::new(200).set_body_json(json!({"room_id": "!notes:example.org"}))
+        })
+        .expect(1)
+        .mount(server.server())
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"/account_data/m\.direct$"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(
+                json!({"errcode": "M_NOT_FOUND", "error": "Account data not found"}),
+            ),
+        )
+        .mount(server.server())
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"/account_data/m\.direct$"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({ own.as_str(): ["!notes:example.org"] }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(server.server())
+        .await;
+    let core = core(&server, client).await;
+    let params: crate::api::rooms::CreateDmParams =
+        serde_json::from_value(json!({"user_id": own, "encrypt_new": false})).unwrap();
+
+    assert_eq!(core.run(params).await.unwrap(), "!notes:example.org");
 }
 
 #[tokio::test]
@@ -2029,7 +2281,7 @@ async fn our_own_membership_is_fetched_for_small_rooms_that_lack_it() {
                 .add_joined_room(JoinedRoomBuilder::new(large).set_joined_members_count(500));
         })
         .await;
-    let member: Raw<matrix_sdk::ruma::events::AnyStateEvent> = EventFactory::new()
+    let member: Raw<ruma::events::AnyStateEvent> = EventFactory::new()
         .room(direct)
         .event(RoomMemberEventContent::new(MembershipState::Join))
         .sender(&own)
@@ -2174,8 +2426,8 @@ async fn an_encrypted_thumbnail_downloads_the_original() {
     let mut ciphertext = Vec::new();
     encryptor.read_to_end(&mut ciphertext).unwrap();
     let keys = encryptor.finish();
-    let file = matrix_sdk::ruma::events::room::EncryptedFile::new(
-        matrix_sdk::ruma::OwnedMxcUri::from("mxc://example.org/sealed"),
+    let file = ruma::events::room::EncryptedFile::new(
+        ruma::OwnedMxcUri::from("mxc://example.org/sealed"),
         keys.encryption_info,
         keys.hashes,
     );
@@ -2194,10 +2446,8 @@ async fn an_encrypted_thumbnail_downloads_the_original() {
         .mount(server.server())
         .await;
     let core = core(&server, client).await;
-    let source = serde_json::to_string(&matrix_sdk::ruma::events::room::MediaSource::Encrypted(
-        Box::new(file),
-    ))
-    .unwrap();
+    let source =
+        serde_json::to_string(&ruma::events::room::MediaSource::Encrypted(Box::new(file))).unwrap();
 
     assert_eq!(
         core.fetch_media(source.clone(), 800, 600, false)
@@ -2233,7 +2483,7 @@ async fn corrupt_encrypted_media_is_rejected_before_returning_plaintext() {
     encryptor.read_to_end(&mut ciphertext).unwrap();
     let keys = encryptor.finish();
     ciphertext[0] ^= 1;
-    let file = matrix_sdk::ruma::events::room::EncryptedFile::new(
+    let file = ruma::events::room::EncryptedFile::new(
         "mxc://example.org/corrupt".into(),
         keys.encryption_info,
         keys.hashes,
@@ -2247,10 +2497,8 @@ async fn corrupt_encrypted_media_is_rejected_before_returning_plaintext() {
         .mount(server.server())
         .await;
     let core = core(&server, client).await;
-    let source = serde_json::to_string(&matrix_sdk::ruma::events::room::MediaSource::Encrypted(
-        Box::new(file),
-    ))
-    .unwrap();
+    let source =
+        serde_json::to_string(&ruma::events::room::MediaSource::Encrypted(Box::new(file))).unwrap();
     assert!(matches!(
         core.fetch_media(source, 0, 0, false).await,
         Err(RpcError {
@@ -2938,8 +3186,6 @@ async fn forgotten_media_is_fetched_again() {
     core.forget_media(source.clone()).await.unwrap();
     core.fetch_media(source, 0, 0, false).await.unwrap();
 }
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn space_child_writes(
     child: Option<serde_json::Value>,
     command: impl Handler,
@@ -2960,7 +3206,7 @@ async fn space_child_writes(
     }
     server.sync_room(&client, space).await;
     Mock::given(method("PUT"))
-        .and(wiremock::matchers::path_regex(
+        .and(path_regex(
             r"^/_matrix/client/v3/rooms/[^/]+/state/m\.space\.child/",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$written"})))
@@ -3111,8 +3357,6 @@ async fn forgetting_an_invalid_uri_is_refused() {
         })
     ));
 }
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn sync_secret_storage_key(
     server: &MatrixMockServer,
     client: &matrix_sdk::Client,
@@ -3544,8 +3788,6 @@ async fn account_data_types_include_what_the_server_lists_but_sync_never_deliver
             .any(|event_type| event_type == "org.example.legacy")
     );
 }
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn last_put_body(server: &MatrixMockServer, event_type: &str) -> serde_json::Value {
     let requests = server.server().received_requests().await.unwrap();
     let request = requests
@@ -3669,7 +3911,7 @@ async fn markdown_to_content_needs_no_session() {
     assert_eq!(content.body, "**hi** Ana");
     assert_eq!(
         content.formatted_body.as_deref(),
-        Some("<strong>hi</strong> <a href=\"https://matrix.to/#/@ana:example.org\">Ana</a>")
+        Some("<strong>hi</strong> <a href=\"matrix:u/ana:example.org\">Ana</a>")
     );
     assert_eq!(content.mentions.user_ids, ["@ana:example.org"]);
 }
@@ -3782,6 +4024,301 @@ async fn server_features_lists_only_enabled_unstable_features() {
         unstable_features,
         ["org.matrix.msc4354", "org.matrix.simplified_msc3575"]
     );
+}
+
+#[tokio::test]
+async fn qr_grant_needs_a_rendezvous_server() {
+    for (features, supported) in [
+        (json!({"org.matrix.msc4108": true}), true),
+        (json!({"org.matrix.msc4108": false}), false),
+        (json!({}), false),
+    ] {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().no_server_versions().build().await;
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/versions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"versions": ["v1.19"], "unstable_features": features})),
+            )
+            .mount(server.server())
+            .await;
+        let core = core(&server, client).await;
+        assert_eq!(
+            core.run(crate::api::session::QrGrantSupportedParams {})
+                .await
+                .ok(),
+            Some(supported),
+            "{features}"
+        );
+    }
+}
+
+async fn ban_redacting_events(server_kept_flag: bool) {
+    use matrix_sdk::ruma::{room_id, user_id};
+    use matrix_sdk_test::event_factory::EventFactory;
+    use wiremock::matchers::body_partial_json;
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!moderated:example.org");
+    let spammer = user_id!("@spam:example.org");
+    let joined = EventFactory::new()
+        .room(room_id)
+        .sender(spammer)
+        .member(spammer)
+        .server_ts(5);
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id).add_state_event(joined),
+        )
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/_matrix/client/v3/rooms/.*/ban$"))
+        .and(body_partial_json(json!({
+            "user_id": spammer,
+            "reason": "spam",
+            "org.matrix.msc4293.redact_events": true,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(server.server())
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/_matrix/client/v3/rooms/.*/state/m\.room\.member/.*",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "membership": "ban",
+            "reason": "spam",
+            "org.matrix.msc4293.redact_events": server_kept_flag,
+        })))
+        .mount(server.server())
+        .await;
+    let message = |id: &str, sender: &str| {
+        json!({
+            "type": "m.room.message",
+            "event_id": id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 10,
+            "content": {"msgtype": "m.text", "body": "x"},
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_matrix/client/v3/rooms/.*/messages$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "start": "t0",
+            "chunk": [
+                message("$spam", spammer.as_str()),
+                {
+                    "type": "m.room.member",
+                    "state_key": spammer,
+                    "event_id": "$join",
+                    "room_id": room_id,
+                    "sender": spammer,
+                    "origin_server_ts": 10,
+                    "content": {"membership": "join"},
+                },
+                message("$other", "@ok:example.org"),
+            ],
+        })))
+        .expect(u64::from(!server_kept_flag))
+        .mount(server.server())
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_matrix/client/v3/rooms/.*/redact/[^/]*spam/.*",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$r"})))
+        .expect(u64::from(!server_kept_flag))
+        .mount(server.server())
+        .await;
+    let core = core(&server, client).await;
+
+    let banned = core
+        .run(crate::api::members::BanParams {
+            room_id: room_id.to_owned(),
+            user_id: spammer.to_owned(),
+            reason: Some("spam".to_owned()),
+            redact_events: true,
+        })
+        .await;
+    assert!(
+        matches!(banned, Ok(count) if count == u32::from(!server_kept_flag)),
+        "{banned:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_ban_that_redacts_events_relies_on_a_server_that_kept_the_flag() {
+    ban_redacting_events(true).await;
+}
+
+#[tokio::test]
+async fn a_ban_whose_flag_the_server_dropped_redacts_the_messages_itself() {
+    ban_redacting_events(false).await;
+}
+
+async fn read_unredacted(
+    status: u16,
+    body: serde_json::Value,
+) -> Result<crate::protocol::UnredactedEventView, RpcError> {
+    use matrix_sdk::ruma::{event_id, room_id};
+    use wiremock::matchers::query_param;
+
+    let room_id = room_id!("!moderated:example.org");
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().no_server_versions().build().await;
+    Mock::given(method("GET"))
+        .and(path("/_matrix/client/versions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "versions": ["v1.19"],
+            "unstable_features": {"fi.mau.msc2815": true},
+        })))
+        .mount(server.server())
+        .await;
+    server.sync_joined_room(&client, room_id).await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_matrix/client/v3/rooms/.*/event/.*"))
+        .and(query_param(
+            "fi.mau.msc2815.include_unredacted_content",
+            "true",
+        ))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .expect(1)
+        .mount(server.server())
+        .await;
+    let core = core(&server, client).await;
+    core.run(crate::api::timeline::UnredactedEventParams {
+        room_id: room_id.to_owned(),
+        event_id: event_id!("$gone").to_owned(),
+    })
+    .await
+}
+
+fn redacted_event(event_type: &str, content: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "type": event_type,
+        "event_id": "$gone",
+        "room_id": "!moderated:example.org",
+        "sender": "@spammer:example.org",
+        "origin_server_ts": 1,
+        "content": content,
+        "unsigned": {"redacted_because": {"type": "m.room.redaction", "sender": "@mod:example.org"}},
+    })
+}
+
+#[tokio::test]
+async fn unredacted_event_reads_what_the_server_still_holds() {
+    use crate::protocol::{TimelineItemContentView, UnredactedEventView};
+
+    let Ok(UnredactedEventView::Content { content }) = read_unredacted(
+        200,
+        redacted_event(
+            "m.room.message",
+            &json!({"msgtype": "m.text", "body": "spam"}),
+        ),
+    )
+    .await
+    else {
+        panic!("the content was not read");
+    };
+    let TimelineItemContentView::Message { body, .. } = *content else {
+        panic!("the content was not read as a message");
+    };
+    assert_eq!(body, "spam");
+
+    assert!(matches!(
+        read_unredacted(200, redacted_event("m.room.message", &json!({}))).await,
+        Ok(UnredactedEventView::NotReceived)
+    ));
+    assert!(matches!(
+        read_unredacted(
+            404,
+            json!({
+                "errcode": "FI.MAU.MSC2815_UNREDACTED_CONTENT_DELETED",
+                "error": "erased",
+                "fi.mau.msc2815.content_keep_ms": 604_800_000,
+            })
+        )
+        .await,
+        Ok(UnredactedEventView::Deleted {
+            content_keep_ms: Some(604_800_000)
+        })
+    ));
+    assert!(matches!(
+        read_unredacted(
+            404,
+            json!({"errcode": "FI.MAU.MSC2815_UNREDACTED_CONTENT_NOT_RECEIVED", "error": "late"})
+        )
+        .await,
+        Ok(UnredactedEventView::NotReceived)
+    ));
+    assert!(matches!(
+        read_unredacted(403, json!({"errcode": "M_FORBIDDEN", "error": "no"})).await,
+        Err(RpcError {
+            code: RpcCode::Denied,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn unredacted_ciphertext_without_a_key_is_undecryptable() {
+    use crate::protocol::UnredactedEventView;
+
+    assert!(matches!(
+        read_unredacted(
+            200,
+            redacted_event(
+                "m.room.encrypted",
+                &json!({
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "AwgAEnAC",
+                    "device_id": "DEVICE",
+                    "sender_key": "AAAA",
+                    "session_id": "SESSION",
+                }),
+            ),
+        )
+        .await,
+        Ok(UnredactedEventView::Undecryptable)
+    ));
+}
+
+#[tokio::test]
+async fn unredacted_event_needs_the_server_to_advertise_msc2815() {
+    use matrix_sdk::ruma::{event_id, room_id};
+
+    use crate::api::timeline::UnredactedEventParams;
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().no_server_versions().build().await;
+    Mock::given(method("GET"))
+        .and(path("/_matrix/client/versions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "versions": ["v1.19"],
+            "unstable_features": {"fi.mau.msc2815": false},
+        })))
+        .mount(server.server())
+        .await;
+    let room_id = room_id!("!plain:example.org");
+    server.sync_joined_room(&client, room_id).await;
+    let core = core(&server, client).await;
+
+    assert!(matches!(
+        core.run(UnredactedEventParams {
+            room_id: room_id.to_owned(),
+            event_id: event_id!("$gone").to_owned(),
+        })
+        .await,
+        Err(RpcError {
+            code: RpcCode::Unsupported,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -4365,7 +4902,7 @@ async fn opening_a_room_returns_its_power_levels() {
         )
         .await;
     Mock::given(method("GET"))
-        .and(wiremock::matchers::path_regex(r"/state(/[^/]+/)?$"))
+        .and(path_regex(r"/state(/[^/]+/)?$"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
             "errcode": "M_NOT_FOUND", "error": "not found"
         })))
@@ -4408,16 +4945,16 @@ async fn missing_media_is_reported_apart_from_a_failing_server() {
     assert!(matches!(
         core.fetch_media("mxc://example.org/gone".to_owned(), 0, 0, true)
             .await,
-        Err(crate::protocol::RpcError {
-            code: crate::protocol::RpcCode::MediaNotFound,
+        Err(RpcError {
+            code: RpcCode::MediaNotFound,
             ..
         })
     ));
     assert!(matches!(
         core.fetch_media("mxc://example.org/flaky".to_owned(), 0, 0, true)
             .await,
-        Err(crate::protocol::RpcError {
-            code: crate::protocol::RpcCode::Unavailable,
+        Err(RpcError {
+            code: RpcCode::Unavailable,
             ..
         })
     ));

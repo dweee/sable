@@ -11,6 +11,7 @@
   import SettingsShell, {
     type SettingsShellNav,
   } from '#lib/features/settings/SettingsShell.svelte';
+  import { isMeowlnirRoom } from '#lib/rooms/meowlnir.svelte.js';
   import { holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
   import AppPageShell from '#lib/ui/primitives/AppPageShell.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
@@ -26,7 +27,9 @@
   import RoomEmojiSettings from './RoomEmojiSettings.svelte';
   import RoomGeneralSettings from './RoomGeneralSettings.svelte';
   import RoomMembersSettings from './RoomMembersSettings.svelte';
+  import RoomModerationSettings from './RoomModerationSettings.svelte';
   import RoomPermissionsSettings from './RoomPermissionsSettings.svelte';
+  import RoomRulesSettings from './RoomRulesSettings.svelte';
   import { roomSettingsSections, type RoomSettingsSectionId } from './room-settings-sections';
 
   interface Props {
@@ -42,6 +45,7 @@
   let permissions = $state.raw<RoomPermissionsView | null>(null);
   let levels = $state<RoomPowerLevelsView | null>(null);
   let section = $state<RoomSettingsSectionId | null>(null);
+  let moderation = $state(false);
 
   holdOverlayBack(
     () => open && section !== null,
@@ -50,7 +54,9 @@
 
   let roomId = $derived(room?.room_id ?? null);
   let roomName = $derived(room?.name ?? room?.room_id ?? '');
-  let sections = $derived(roomSettingsSections(room?.room_kind === 'space', room?.bridge != null));
+  let sections = $derived(
+    roomSettingsSections(room?.room_kind === 'space', room?.bridge != null, moderation)
+  );
 
   $effect(() => {
     void roomId;
@@ -67,6 +73,10 @@
     let current = true;
     permissions = null;
     levels = null;
+    moderation = false;
+    void isMeowlnirRoom(core, target).then((found) => {
+      if (current) moderation = found;
+    });
     void core.rpc.members
       .permissions({ room_id: target })
       .then((next) => {
@@ -162,6 +172,12 @@
     <RoomMembersSettings {room} {permissions} />
   {:else if active === 'permissions'}
     <RoomPermissionsSettings {room} {permissions} />
+  {:else if active === 'rules'}
+    <svelte:boundary>
+      <RoomRulesSettings {room} {permissions} {levels} />
+
+      {#snippet pending()}{/snippet}
+    </svelte:boundary>
   {:else if active === 'abbreviations'}
     <svelte:boundary>
       <RoomAbbreviationsSettings {room} {permissions} {levels} />
@@ -169,10 +185,16 @@
       {#snippet pending()}{/snippet}
     </svelte:boundary>
   {:else if active === 'appearance'}
-    <RoomAppearanceSettings {room} />
+    <RoomAppearanceSettings {room} {permissions} {levels} />
   {:else if active === 'bridges'}
     <svelte:boundary>
       <RoomBridgesSettings {room} />
+
+      {#snippet pending()}{/snippet}
+    </svelte:boundary>
+  {:else if active === 'moderation'}
+    <svelte:boundary>
+      <RoomModerationSettings {room} {permissions} {levels} />
 
       {#snippet pending()}{/snippet}
     </svelte:boundary>

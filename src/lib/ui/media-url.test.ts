@@ -1,18 +1,24 @@
+import { readFileSync } from 'node:fs';
+
 import { afterEach, expect, test, vi } from 'vitest';
 
 import { CoreError } from '#src/transport';
 
 import {
+  animatedImage,
   cachedMediaUrl,
   discardMediaUrl,
   holdMediaUrl,
-  isAnimatedImage,
   loadMediaUrl,
   mediaAspectRatio,
   retryMediaUrl,
 } from './media-url.js';
 
+const heicTo = vi.hoisted(() => vi.fn());
+vi.mock('heic-to/csp', () => ({ heicTo }));
+
 afterEach(() => {
+  heicTo.mockReset();
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -581,31 +587,46 @@ test('an image sent as octet-stream is served with its own type', async () => {
   expect(createObjectURL.mock.calls[0]?.[0]).toMatchObject({ type: 'image/png' });
 });
 
-function ascii(text: string): number[] {
-  return Array.from(text, (char) => char.charCodeAt(0));
-}
+test('only an animatable image small enough to copy is checked for frames', () => {
+  const gif = new Uint8Array(readFileSync('crates/sable-model/tests/fixtures/images/animated.gif'));
 
-test('only a multi-frame picture counts as animated', () => {
-  const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  const webp = (flags: number) => [
-    ...ascii('RIFF'),
-    0,
-    0,
-    0,
-    0,
-    ...ascii('WEBP'),
-    ...ascii('VP8X'),
-    0,
-    0,
-    0,
-    0,
-    flags,
-  ];
+  expect(animatedImage('image/gif', gif)).toBe(true);
+  expect(animatedImage('video/mp4', gif)).toBeNull();
+  expect(animatedImage('image/gif', new Uint8Array(16 * 1024 * 1024 + 1))).toBeNull();
+});
 
-  expect(isAnimatedImage(new Uint8Array(ascii('GIF89a')))).toBe(true);
-  expect(isAnimatedImage(new Uint8Array([...png, ...ascii('acTL'), ...ascii('IDAT')]))).toBe(true);
-  expect(isAnimatedImage(new Uint8Array([...png, ...ascii('IDAT'), ...ascii('acTL')]))).toBe(false);
-  expect(isAnimatedImage(new Uint8Array(webp(0x02)))).toBe(true);
-  expect(isAnimatedImage(new Uint8Array(webp(0)))).toBe(false);
-  expect(isAnimatedImage(new Uint8Array([0xff, 0xd8, 0xff, 0]))).toBe(false);
+test('a heic the engine cannot decode is shown as a jpeg', async () => {
+  const shown = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:heic');
+  vi.stubGlobal(
+    'createImageBitmap',
+    vi.fn(() => Promise.reject(new Error('unsupported')))
+  );
+  heicTo.mockResolvedValue(new Blob([new Uint8Array([0xff, 0xd8])], { type: 'image/jpeg' }));
+  const heic = new Uint8Array([0, 0, 0, 24, ...Buffer.from('ftypheic'), 0, 0, 0, 0]);
+  const core = {
+    session: session('account-heic', '@a:example.org', 'device-a'),
+    media: { fetchMedia: vi.fn(() => Promise.resolve(heic)) },
+  };
+
+  await loadMediaUrl(core, 'mxc://example.org/heic', 0, 0, 'image/heic');
+
+  expect(shown).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/jpeg' }));
+});
+
+test('a heic the engine decodes is shown untouched', async () => {
+  const shown = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:heic-native');
+  vi.stubGlobal(
+    'createImageBitmap',
+    vi.fn(() => Promise.resolve({ width: 4, height: 3, close: vi.fn() }))
+  );
+  const heic = new Uint8Array([0, 0, 0, 24, ...Buffer.from('ftypheic'), 0, 0, 0, 0]);
+  const core = {
+    session: session('account-heic-native', '@a:example.org', 'device-a'),
+    media: { fetchMedia: vi.fn(() => Promise.resolve(heic)) },
+  };
+
+  await loadMediaUrl(core, 'mxc://example.org/heic-native', 0, 0, 'image/heic');
+
+  expect(shown).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/heic' }));
+  expect(heicTo).not.toHaveBeenCalled();
 });

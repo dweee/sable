@@ -7,6 +7,7 @@
   import { nativeFilePicker } from '#lib/platform/native-file-picker.js';
   import { MAX_DISPLAY_NAME_LENGTH, MAX_STATUS_TEXT_BYTES } from '#lib/profile/fields.js';
   import { MAX_PRONOUN_INPUT } from '#lib/profile/pronouns.js';
+  import { requestCrop } from '#lib/ui/image-crop/crop-request.svelte.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -14,7 +15,6 @@
   import FormField from '#lib/ui/primitives/FormField.svelte';
   import AuthField from '../shared/AuthField.svelte';
   import AuthInfoBox from '../shared/AuthInfoBox.svelte';
-  import AuthSecondaryAction from '../shared/AuthSecondaryAction.svelte';
   import AuthStatusSlot from '../shared/AuthStatusSlot.svelte';
 
   interface Props {
@@ -34,7 +34,6 @@
     onBanner: (file: File | null) => void;
     onAvatar: (file: File | null) => void;
     onContinue: () => void;
-    onSkip: () => void;
   }
 
   let {
@@ -54,7 +53,6 @@
     onBanner,
     onAvatar,
     onContinue,
-    onSkip,
   }: Props = $props();
 
   let moreOpen = $state(false);
@@ -79,7 +77,7 @@
         class="avatar-preview"
         id={userId}
         src={avatarPreview}
-        alt=""
+        decorative
         name={displayName || userId}
         size="large"
       />
@@ -95,8 +93,12 @@
             type="file"
             accept="image/*"
             aria-label={i18n.t(avatarPreview ? 'auth.replaceAvatar' : 'settings.uploadAvatar')}
-            onchange={(event: Event & { currentTarget: HTMLInputElement }) => {
-              onAvatar(event.currentTarget.files?.[0] ?? null);
+            onchange={async (event: Event & { currentTarget: HTMLInputElement }) => {
+              const input = event.currentTarget;
+              const file = input.files?.[0];
+              const cropped = file && (await requestCrop(file, 'avatar'));
+              if (file && !cropped) input.value = '';
+              else onAvatar(cropped ?? null);
             }}
           />
           {i18n.t(avatarPreview ? 'auth.replaceAvatar' : 'settings.uploadAvatar')}
@@ -188,8 +190,12 @@
               type="file"
               accept="image/*"
               aria-label={i18n.t(bannerPreview ? 'common.changeBanner' : 'settings.saveBanner')}
-              onchange={(event: Event & { currentTarget: HTMLInputElement }) => {
-                onBanner(event.currentTarget.files?.[0] ?? null);
+              onchange={async (event: Event & { currentTarget: HTMLInputElement }) => {
+                const input = event.currentTarget;
+                const file = input.files?.[0];
+                const cropped = file && (await requestCrop(file, 'banner'));
+                if (file && !cropped) input.value = '';
+                else onBanner(cropped ?? null);
               }}
             />
             {i18n.t(bannerPreview ? 'common.changeBanner' : 'settings.saveBanner')}
@@ -219,8 +225,6 @@
   </Button>
 </form>
 
-<AuthSecondaryAction label={i18n.t('auth.skipForNow')} onclick={onSkip} disabled={isSaving} />
-
 <style>
   .profile-card {
     min-width: 0;
@@ -249,9 +253,9 @@
     color: var(--primary-on-main);
     display: flex;
     height: 1.75rem;
+    inset-inline-end: calc(var(--space-100) * -1);
     justify-content: center;
     position: absolute;
-    right: calc(var(--space-100) * -1);
     width: 1.75rem;
   }
 

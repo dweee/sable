@@ -98,7 +98,7 @@ impl Core {
     pub(crate) async fn dehydrated_device(&self) -> Result<DehydratedDeviceView, RpcError> {
         let client = self.client().await?;
         let present = match client
-            .send(get_dehydrated_device::unstable::Request::new())
+            .send(get_dehydrated_device::msc3814::Request::new())
             .await
         {
             Ok(_) => true,
@@ -126,12 +126,15 @@ impl Core {
         enabled: bool,
     ) -> Result<DehydratedDeviceView, RpcError> {
         let client = self.client().await?;
-        self.put_global_account_data(
-            PREFERENCE_EVENT.into(),
-            &Preference { enabled },
-            "set_dehydrated_device",
-        )
-        .await?;
+        {
+            let _guard = self.account_data_lock.lock().await;
+            self.put_global_account_data(
+                PREFERENCE_EVENT.into(),
+                &Preference { enabled },
+                "set_dehydrated_device",
+            )
+            .await?;
+        }
         let devices = client.encryption().dehydrated_devices();
         if enabled {
             devices

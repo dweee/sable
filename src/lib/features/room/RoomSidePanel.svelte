@@ -5,9 +5,9 @@
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
   import PanelHeader from '#lib/ui/primitives/PanelHeader.svelte';
   import PanelHeaderButton from '#lib/ui/primitives/PanelHeaderButton.svelte';
+  import PanelBody from '#lib/ui/primitives/PanelBody.svelte';
   import ResizeHandle from '#lib/ui/primitives/ResizeHandle.svelte';
   import { PanelWidth, remFromPixels } from '#lib/ui/panel-width.svelte.js';
-  import { scrollHint } from '#lib/ui/scroll-hint.js';
   import { panelIn, panelOut, usePanelStage } from '#lib/ui/motion.js';
 
   interface Props {
@@ -17,9 +17,8 @@
     widthKey: string;
     width?: number;
     modal?: boolean;
-    /** `none` hands the area under the header to `children`, which then scroll themselves. */
-    body?: 'padded' | 'flush' | 'none';
-    icon: Snippet;
+    body?: 'padded' | 'flush';
+    toolbar?: Snippet;
     children: Snippet;
     onClose: () => void;
   }
@@ -32,7 +31,7 @@
     width = 26,
     modal = false,
     body: bodyStyle = 'padded',
-    icon,
+    toolbar,
     children,
     onClose,
   }: Props = $props();
@@ -71,22 +70,15 @@
       />
     {/if}
     <PanelHeader {title}>
-      {#snippet prefix()}
-        {@render icon()}
-      {/snippet}
       {#snippet suffix()}
         <PanelHeaderButton label={closeLabel} onclick={onClose}>
           <XIcon />
         </PanelHeaderButton>
       {/snippet}
     </PanelHeader>
-    {#if bodyStyle === 'none'}
+    <PanelBody padded={bodyStyle === 'padded'} {toolbar}>
       {@render children()}
-    {:else}
-      <div class={['side-panel-body', bodyStyle]} {@attach scrollHint}>
-        {@render children()}
-      </div>
-    {/if}
+    </PanelBody>
   </aside>
 {/snippet}
 
@@ -111,7 +103,7 @@
     --ghost-active: var(--bg-container-active);
 
     background: var(--bg-container);
-    border-left: var(--border-width) solid var(--bg-container-line);
+    border-inline-start: var(--border-width) solid var(--bg-container-line);
     color: var(--bg-on-container);
     display: flex;
     flex: 0 0 auto;
@@ -121,24 +113,13 @@
   }
 
   .side-panel.modal {
-    border-left: none;
+    border-inline-start: none;
     height: 100%;
     width: 100%;
   }
 
   .side-panel :global(.resize-handle) {
-    left: -0.25rem;
+    inset-inline-start: -0.25rem;
     z-index: 1;
-  }
-
-  .side-panel-body {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-
-  .side-panel-body.padded {
-    padding: var(--space-300);
   }
 </style>

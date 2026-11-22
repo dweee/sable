@@ -31,8 +31,6 @@ on:
       - '.forgejo/actions/rust/**'
       - '.forgejo/webdriver.json'
 
-permissions: {}
-
 concurrency:
   group: rust-quality-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -43,10 +41,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  SCCACHE_BUCKET: sccache
+  SCCACHE_BUCKET: ow-oops-sccache
   SCCACHE_S3_KEY_PREFIX: sable-next
-  SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
-  SCCACHE_REGION: us-east-1
+  SCCACHE_ENDPOINT: https://s3.gra.io.cloud.ovh.net
+  SCCACHE_REGION: gra
   SCCACHE_S3_USE_SSL: 'true'
 
 jobs:
@@ -57,8 +55,6 @@ jobs:
     name: Workspace
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
     env:
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
@@ -79,7 +75,7 @@ jobs:
         run: cargo clippy --locked --workspace --exclude app --all-targets --all-features -- -D warnings
 
       - name: Install cargo-nextest
-        uses: https://github.com/taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        uses: https://github.com/taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@0.9.146
 
@@ -95,8 +91,6 @@ jobs:
     name: App crate
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
     env:
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
@@ -117,7 +111,7 @@ jobs:
         run: cargo clippy --locked -p app --all-targets -- -D warnings
 
       - name: Install cargo-nextest
-        uses: https://github.com/taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        uses: https://github.com/taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@0.9.146
 
@@ -128,8 +122,6 @@ jobs:
     name: WASM target
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
     env:
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
@@ -147,6 +139,14 @@ jobs:
           targets: wasm32-unknown-unknown
           mise: 'true'
           cache-key: wasm
+
+      - name: Install the WASM C toolchain
+        run: |
+          command -v clang && command -v llvm-ar && exit 0
+          sudo_cmd=()
+          [ "$(id -u)" -eq 0 ] || sudo_cmd=(sudo)
+          "${sudo_cmd[@]}" apt-get update
+          "${sudo_cmd[@]}" apt-get install --no-install-recommends -y clang llvm
 
       - name: Run Clippy
         run: cargo clippy --locked -p sable-wasm --target wasm32-unknown-unknown --all-targets --all-features -- -D warnings
@@ -186,8 +186,6 @@ jobs:
     name: Android target
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
     env:
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
@@ -222,8 +220,6 @@ jobs:
     name: iOS target
     runs-on: macos-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
     env:
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
@@ -247,8 +243,6 @@ jobs:
     name: Format and dependency policy
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
     steps:
       - name: Check out repository
         uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -259,13 +253,13 @@ jobs:
       - name: Set up Rust
         uses: https://github.com/dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
           components: rustfmt
 
       - name: Set up mise
-        uses: https://github.com/jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        uses: https://github.com/jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: '2026.10.25'
+          version: '2026.11.5'
           github_token: ''
           cache: true
           env: false

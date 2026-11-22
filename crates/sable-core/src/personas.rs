@@ -40,8 +40,12 @@ pub(crate) fn is_persona_event(event_type: &str) -> bool {
             .is_some_and(|scope| scope.starts_with('.'))
 }
 
+fn selection_type(scope: &str) -> String {
+    format!("{SELECTION_PREFIX}.{scope}")
+}
+
 fn selection_event(scope: &str) -> GlobalAccountDataEventType {
-    GlobalAccountDataEventType::from(format!("{SELECTION_PREFIX}.{scope}"))
+    GlobalAccountDataEventType::from(selection_type(scope))
 }
 
 #[serde_as]
@@ -852,7 +856,7 @@ fn catalog_from_backup(backup: &str) -> Option<Value> {
 #[cfg(not(target_family = "wasm"))]
 async fn space_associations(
     client: &matrix_sdk::Client,
-    room_id: &matrix_sdk::ruma::RoomId,
+    room_id: &ruma::RoomId,
     associations: &BTreeMap<String, RoomAssociation>,
 ) -> Vec<RoomAssociation> {
     let mut rooms = vec![room_id.to_owned()];
@@ -878,10 +882,81 @@ async fn space_associations(
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) async fn notification_profile(
+fn persona_profile(
+    persona: &PersonaView,
+    alternate_avatar_id: Option<&str>,
+) -> PerMessageProfileView {
+    let avatar_url = alternate_avatar_id
+        .and_then(|id| {
+            persona
+                .alternate_avatars
+                .as_ref()?
+                .iter()
+                .find(|avatar| avatar.id == id)
+        })
+        .map_or_else(
+            || persona.avatar_url.clone(),
+            |avatar| Some(avatar.avatar_url.clone()),
+        );
+    PerMessageProfileView {
+        id: Some(persona.id.clone()),
+        display_name: sable_model::text::visible_name(persona.display_name.clone()),
+        avatar_url,
+        pronouns: persona.pronouns.clone(),
+        color_on_light: persona.color_on_light.clone(),
+        color_on_dark: persona.color_on_dark.clone(),
+        has_fallback: false,
+        biography: None,
+        banner_url: None,
+        is_animal: None,
+        has_animal: None,
+        animal_need: None,
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn proxied<'catalog>(
+    personas: &'catalog [PersonaView],
+    body: &str,
+) -> Option<(String, &'catalog PersonaView, Option<&'catalog str>)> {
+    personas.iter().find_map(|persona| {
+        persona.triggers.iter().find_map(|trigger| {
+            let text = sable_model::proxy::proxy_body(
+                trigger.prefix.as_deref(),
+                trigger.suffix.as_deref(),
+                trigger.keep_trigger,
+                body,
+            )?;
+            Some((text, persona, trigger.alternate_avatar_id.as_deref()))
+        })
+    })
+}
+
+/// Off when the synced settings cannot be read: shorthands are opt-in.
+#[cfg(not(target_family = "wasm"))]
+async fn proxying_enabled(client: &matrix_sdk::Client) -> bool {
+    const SETTINGS: &str = "moe.sable.next.settings";
+    let key = crate::sealed_account_data::cached_key(client).await;
+    match crate::sealed_account_data::read_document(client, SETTINGS, true, key).await {
+        Ok(settings) => settings
+            .content
+            .as_ref()
+            .and_then(|content| content.pointer("/settings/personaProxying"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        Err(error) => {
+            tracing::warn!("synced settings unavailable for a notification reply: {error}");
+            false
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn notification_reply(
     client: &matrix_sdk::Client,
-    room_id: &matrix_sdk::ruma::RoomId,
-) -> matrix_sdk::Result<Option<PerMessageProfileView>> {
+    room_id: &ruma::RoomId,
+    body: &str,
+) -> matrix_sdk::Result<(String, Option<PerMessageProfileView>)> {
     async fn data(
         client: &matrix_sdk::Client,
         event_type: GlobalAccountDataEventType,
@@ -893,6 +968,20 @@ pub(crate) async fn notification_profile(
             .map(|raw| raw.deserialize_as::<Value>().map_err(Into::into))
             .transpose()
     }
+    let catalog = match data(client, CATALOG_V3.into()).await? {
+        Some(catalog) => Some(catalog),
+        None => data(client, CATALOG_V2.into()).await?,
+    };
+    let personas = catalog
+        .as_ref()
+        .map(personas_from_catalog)
+        .unwrap_or_default();
+    if proxying_enabled(client).await
+        && let Some((text, persona, alternate)) = proxied(&personas, body)
+    {
+        return Ok((text, Some(persona_profile(persona, alternate))));
+    }
+
     let associations = data(client, selection_event("roomassociation"))
         .await?
         .as_ref()
@@ -902,7 +991,7 @@ pub(crate) async fn notification_profile(
         associations.get(room_id.as_str()),
         Some(RoomAssociation::Account | RoomAssociation::Disabled)
     ) {
-        return Ok(None);
+        return Ok((body.to_owned(), None));
     }
     let account = data(client, selection_event("globalassociation"))
         .await?
@@ -913,20 +1002,12 @@ pub(crate) async fn notification_profile(
                 .association?
                 .into_view()
         });
-    let catalog = match data(client, CATALOG_V3.into()).await? {
-        Some(catalog) => Some(catalog),
-        None => data(client, CATALOG_V2.into()).await?,
-    };
-    let personas = catalog
-        .as_ref()
-        .map(personas_from_catalog)
-        .unwrap_or_default();
     let mut selections = space_associations(client, room_id, &associations).await;
     selections.extend(account.map(RoomAssociation::Persona));
     let now = crate::now_ms();
     for association in selections {
         let selection = match association {
-            RoomAssociation::Account | RoomAssociation::Disabled => return Ok(None),
+            RoomAssociation::Account | RoomAssociation::Disabled => break,
             RoomAssociation::Persona(selection) => selection,
         };
         if selection.valid_until.is_some_and(|until| until <= now) {
@@ -936,37 +1017,11 @@ pub(crate) async fn notification_profile(
             .iter()
             .find(|profile| profile.id == selection.persona_id)
         {
-            let avatar_url = selection
-                .alternate_avatar_id
-                .as_ref()
-                .and_then(|id| {
-                    persona
-                        .alternate_avatars
-                        .as_ref()?
-                        .iter()
-                        .find(|avatar| &avatar.id == id)
-                })
-                .map_or_else(
-                    || persona.avatar_url.clone(),
-                    |avatar| Some(avatar.avatar_url.clone()),
-                );
-            return Ok(Some(PerMessageProfileView {
-                id: Some(persona.id.clone()),
-                display_name: sable_model::text::visible_name(persona.display_name.clone()),
-                avatar_url,
-                pronouns: persona.pronouns.clone(),
-                color_on_light: persona.color_on_light.clone(),
-                color_on_dark: persona.color_on_dark.clone(),
-                has_fallback: false,
-                biography: None,
-                banner_url: None,
-                is_animal: None,
-                has_animal: None,
-                animal_need: None,
-            }));
+            let profile = persona_profile(persona, selection.alternate_avatar_id.as_deref());
+            return Ok((body.to_owned(), Some(profile)));
         }
     }
-    Ok(None)
+    Ok((body.to_owned(), None))
 }
 
 impl Core {
@@ -1036,7 +1091,7 @@ impl Core {
         content: &AnyMessageLikeEventContent,
         profile: Option<&PerMessageProfileView>,
         forum_title: Option<String>,
-        retained: serde_json::Map<String, Value>,
+        retained: Map<String, Value>,
     ) -> Result<(), RpcError> {
         let event_type = content.event_type().to_string();
         let title = crate::outgoing::forum_title_value(forum_title);
@@ -1091,9 +1146,11 @@ impl Core {
             return Ok(None);
         };
 
-        raw.deserialize_as::<Value>()
-            .map(Some)
-            .or_failed(self, "personas_deserialize")
+        match raw.deserialize_as::<Value>() {
+            Ok(content @ Value::Object(_)) => Ok(Some(content)),
+            Ok(_) => Err(self.failed("personas_deserialize", "the document is not a JSON object")),
+            Err(error) => Err(self.rpc_error("personas_deserialize", &error)),
+        }
     }
 
     async fn load_personas(&self, fetch: bool) -> Result<Vec<PersonaView>, RpcError> {
@@ -1290,64 +1347,85 @@ impl Core {
     }
 
     async fn repoint_selections(&self, from: &str, to: Option<&str>) -> Result<(), RpcError> {
-        if let Some(account) = self.account_selection(true).await?
-            && account.persona_id == from
-        {
-            let selection = to.map(|id| PersonaSelectionView {
-                persona_id: id.to_owned(),
-                alternate_avatar_id: account.alternate_avatar_id,
-                valid_until: account.valid_until,
-            });
-            self.put_global_account_data(
-                selection_event("globalassociation"),
-                &AccountSelectionOut {
+        self.update_account_data_locked(
+            &[&selection_type("globalassociation")],
+            "personas",
+            async |current| {
+                let Some(account) = current.as_ref().and_then(|content| {
+                    AccountSelectionIn::deserialize(content)
+                        .ok()?
+                        .association?
+                        .into_view()
+                }) else {
+                    return Ok(None);
+                };
+                if account.persona_id != from {
+                    return Ok(None);
+                }
+                let selection = to.map(|id| PersonaSelectionView {
+                    persona_id: id.to_owned(),
+                    alternate_avatar_id: account.alternate_avatar_id,
+                    valid_until: account.valid_until,
+                });
+                serde_json::to_value(AccountSelectionOut {
                     association: selection.as_ref().map(Into::into),
-                },
-                "personas",
-            )
-            .await?;
-        }
+                })
+                .map(Some)
+                .or_failed(self, "personas")
+            },
+        )
+        .await?;
 
-        let mut rooms = self.room_selections(true).await?;
-        let affected: Vec<String> = rooms
-            .iter()
-            .filter(|(_, association)| {
-                matches!(association, RoomAssociation::Persona(selection) if selection.persona_id == from)
-            })
-            .map(|(room_id, _)| room_id.clone())
-            .collect();
-        if affected.is_empty() {
-            return Ok(());
-        }
+        self.edit_room_selections(|rooms| {
+            let affected: Vec<String> = rooms
+                .iter()
+                .filter(|(_, association)| {
+                    matches!(association, RoomAssociation::Persona(selection) if selection.persona_id == from)
+                })
+                .map(|(room_id, _)| room_id.clone())
+                .collect();
+            if affected.is_empty() {
+                return false;
+            }
 
-        for room_id in affected {
-            match to {
-                Some(id) => {
-                    if let Some(RoomAssociation::Persona(selection)) = rooms.get_mut(&room_id) {
-                        id.clone_into(&mut selection.persona_id);
+            for room_id in affected {
+                match to {
+                    Some(id) => {
+                        if let Some(RoomAssociation::Persona(selection)) = rooms.get_mut(&room_id) {
+                            id.clone_into(&mut selection.persona_id);
+                        }
+                    }
+                    None => {
+                        rooms.remove(&room_id);
                     }
                 }
-                None => {
-                    rooms.remove(&room_id);
-                }
             }
-        }
-
-        self.write_room_selections(rooms).await
+            true
+        })
+        .await
     }
 
-    async fn write_room_selections(
+    async fn edit_room_selections(
         &self,
-        rooms: BTreeMap<String, RoomAssociation>,
+        edit: impl FnOnce(&mut BTreeMap<String, RoomAssociation>) -> bool,
     ) -> Result<(), RpcError> {
-        self.put_global_account_data(
-            selection_event("roomassociation"),
-            &RoomAssociationsOut {
-                associations: rooms,
-            },
+        self.update_account_data_locked(
+            &[&selection_type("roomassociation")],
             "personas",
+            async |current| {
+                let mut rooms = current.as_ref().map(room_associations).unwrap_or_default();
+                if !edit(&mut rooms) {
+                    return Ok(None);
+                }
+                serde_json::to_value(RoomAssociationsOut {
+                    associations: rooms,
+                })
+                .map(Some)
+                .or_failed(self, "personas")
+            },
         )
         .await
+        .map(drop)
     }
 
     pub(crate) async fn set_persona_selection(
@@ -1378,17 +1456,18 @@ impl Core {
                 .await;
         };
 
-        let mut rooms = self.room_selections(true).await?;
-        match selection {
-            Some(selection) => {
-                rooms.insert(room_id.to_string(), RoomAssociation::Persona(selection));
+        self.edit_room_selections(|rooms| {
+            match selection {
+                Some(selection) => {
+                    rooms.insert(room_id.to_string(), RoomAssociation::Persona(selection));
+                }
+                None => {
+                    rooms.remove(room_id.as_str());
+                }
             }
-            None => {
-                rooms.remove(room_id.as_str());
-            }
-        }
-
-        self.write_room_selections(rooms).await
+            true
+        })
+        .await
     }
 
     pub(crate) async fn disable_room_personas(
@@ -1396,9 +1475,11 @@ impl Core {
         DisableRoomParams { room_id }: DisableRoomParams,
     ) -> Result<(), RpcError> {
         let _guard = self.account_data_lock.lock().await;
-        let mut rooms = self.room_selections(true).await?;
-        rooms.insert(room_id.to_string(), RoomAssociation::Disabled);
-        self.write_room_selections(rooms).await
+        self.edit_room_selections(|rooms| {
+            rooms.insert(room_id.to_string(), RoomAssociation::Disabled);
+            true
+        })
+        .await
     }
 
     pub(crate) async fn account_room_personas(
@@ -1406,9 +1487,11 @@ impl Core {
         AccountRoomParams { room_id }: AccountRoomParams,
     ) -> Result<(), RpcError> {
         let _guard = self.account_data_lock.lock().await;
-        let mut rooms = self.room_selections(true).await?;
-        rooms.insert(room_id.to_string(), RoomAssociation::Account);
-        self.write_room_selections(rooms).await
+        self.edit_room_selections(|rooms| {
+            rooms.insert(room_id.to_string(), RoomAssociation::Account);
+            true
+        })
+        .await
     }
 }
 

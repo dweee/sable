@@ -1,15 +1,20 @@
 {
   "upcoming": {
     "added": [
-      "showBridgeBadges",
-      "personaPickerShowAccountWhenDeselected",
-      "jumpToLatestOnSend"
+      "deploymentTheme",
+      "showEncryptionStatusIcon"
     ],
     "changed": []
   },
-  "v2.3.8": {
+  "v26.11.4": {
     "added": [
-      "hideMessageShields"
+      "hideSentBeforeJoined"
+    ],
+    "changed": []
+  },
+  "v26.11.3": {
+    "added": [
+      "bannerFit"
     ],
     "changed": []
   }

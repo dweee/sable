@@ -1,5 +1,6 @@
 package moe.sable.push
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -43,6 +44,7 @@ object PushNotifier {
     private const val DIRECT_FLAG = "moe.sable.direct"
     private const val SENDER_NAME_KEY = "moe.sable.sender_name"
     private const val SENDER_AVATAR_KEY = "moe.sable.sender_avatar"
+    private const val SENDER_PROFILE_KEY = "moe.sable.sender_profile"
     private const val ROOM_AVATAR_KEY = "moe.sable.room_avatar"
     private const val OWN_AVATAR_KEY = "moe.sable.own_avatar"
     private const val OWN_NAME_KEY = "moe.sable.own_name"
@@ -180,8 +182,8 @@ object PushNotifier {
                 PushNotificationGate.post(context, id, revision) { postIncomingCall(context, notification, notification) }
                 return
             }
-            if (quietForActiveElsewhere(context, store, notification)) {
-                PushDiagnostics.record(context, PushOutcome.ACTIVE_ELSEWHERE, trace)
+            quietOutcome(context, store, notification)?.let {
+                PushDiagnostics.record(context, it, trace)
                 return
             }
             val previews = store.showContent &&
@@ -207,8 +209,8 @@ object PushNotifier {
             is PushDecryptResult.Success -> {
                 PushDiagnostics.record(context, PushOutcome.DECRYPTED, trace)
                 val clear = runCatching { JSONObject(local.clearEventJson) }.getOrNull()
-                if (clear == null && quietForActiveElsewhere(context, store, notification)) {
-                    PushDiagnostics.record(context, PushOutcome.ACTIVE_ELSEWHERE, trace)
+                if (clear == null) quietOutcome(context, store, notification)?.let {
+                    PushDiagnostics.record(context, it, trace)
                     return
                 }
                 if (clear == null) {
@@ -231,13 +233,26 @@ object PushNotifier {
             showDecrypted(context, notification, clear, id, revision)
         } else if (!quietly && outcome != PushOutcome.DISCARDED && outcome != PushOutcome.RULES_UNEVALUATED) {
             if (dismissReadUpdate(context, notification, id)) return
-            if (quietForActiveElsewhere(context, store, notification)) {
-                PushDiagnostics.record(context, PushOutcome.ACTIVE_ELSEWHERE, trace)
+            quietOutcome(context, store, notification)?.let {
+                PushDiagnostics.record(context, it, trace)
                 return
             }
             attachMedia(context, notification, roomId, content = null)
             PushNotificationGate.post(context, id, revision) { post(context, notification, "Encrypted message") }
         }
+    }
+
+    /** The open app shows messages as in-app banners and posts the rest itself. */
+    private fun quietOutcome(context: Context, store: PushPolicy, notification: JSONObject): PushOutcome? = when {
+        !isInvite(notification) && store.inAppBanners && appInForeground() -> PushOutcome.IN_APP
+        quietForActiveElsewhere(context, store, notification) -> PushOutcome.ACTIVE_ELSEWHERE
+        else -> null
+    }
+
+    internal fun appInForeground(): Boolean {
+        val state = ActivityManager.RunningAppProcessInfo()
+        ActivityManager.getMyMemoryState(state)
+        return state.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
     }
 
     private fun quietForActiveElsewhere(context: Context, store: PushPolicy, notification: JSONObject): Boolean {
@@ -281,8 +296,8 @@ object PushNotifier {
             }
             return
         }
-        if (quietForActiveElsewhere(context, store, notification)) {
-            PushDiagnostics.record(context, PushOutcome.ACTIVE_ELSEWHERE, traceOf(notification))
+        quietOutcome(context, store, notification)?.let {
+            PushDiagnostics.record(context, it, traceOf(notification))
             return
         }
         if (clear.optBoolean(NOISY_KEY)) notification.put(NOISY_KEY, true)
@@ -305,22 +320,24 @@ object PushNotifier {
         val userId = notification.optString("user_id")
         val deviceId = PushPolicy(context).deviceIdFor(userId).orEmpty()
         val sender = notification.optString("sender").takeIf { it.isNotEmpty() }
-        // Android 9 is where the system grants itself read access to a message's image URI.
-        val image = content?.takeIf {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                (it.optString("msgtype") == "m.image" || it.optString("msgtype") == "m.video")
-        }
+        // Android 9 is where the system grants itself read access to a message's image URI,
+        // so before it the message is not an image as far as the preview goes.
+        val mediaContent = content?.takeIf { Build.VERSION.SDK_INT >= Build.VERSION_CODES.P }
+            ?: content?.let { JSONObject(it.toString()).apply { remove("msgtype") } }
         val media = PushPayloadDecryptor.media(context, userId, deviceId, roomId, sender,
-            notification.optString("sender_display_name"), image) ?: return
+            notification.optString("sender_display_name"), notification.optString("sender_avatar_url"),
+            mediaContent) ?: return
         val fields = if (isInvite(notification)) {
             listOf("sender_name" to SENDER_NAME_KEY)
         } else {
             listOf(
                 "sender_name" to SENDER_NAME_KEY,
                 "sender" to SENDER_AVATAR_KEY,
+                "sender_profile" to SENDER_PROFILE_KEY,
                 "room" to ROOM_AVATAR_KEY,
                 "own_avatar" to OWN_AVATAR_KEY,
                 "own_name" to OWN_NAME_KEY,
+                "room_name" to "room_name",
             )
         }
         for ((field, key) in fields) {
@@ -355,7 +372,9 @@ object PushNotifier {
 
     private fun person(name: String, notification: JSONObject): Person.Builder =
         Person.Builder().setName(name).apply {
-            notification.optString("sender").takeIf { it.isNotEmpty() }?.let { setKey(it) }
+            notification.optString("sender").takeIf { it.isNotEmpty() }?.let { sender ->
+                setKey(listOf(sender, notification.optString(SENDER_PROFILE_KEY)).filter { it.isNotEmpty() }.joinToString("|"))
+            }
             avatar(notification, SENDER_AVATAR_KEY)?.let { setIcon(IconCompat.createWithBitmap(it)) }
         }
 

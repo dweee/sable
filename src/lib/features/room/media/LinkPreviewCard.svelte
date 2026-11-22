@@ -6,8 +6,13 @@
   import MediaImage from '#lib/ui/MediaImage.svelte';
   import { preferences } from '#lib/settings/preferences.svelte.js';
 
-  import { GIF_PLAYBACK, hasPreviewData, imageMimeFromUrl, isGifHostUrl } from './link-preview.js';
-  import { previewSources, resolveUrlPreview } from './link-preview-cache';
+  import { GIF_PLAYBACK, hasPreviewData, imageMimeFromUrl, isGifPreview } from './link-preview.js';
+  import {
+    previewSources,
+    resolveUrlPreview,
+    shownLinkPreviews,
+    usesTunnel,
+  } from './link-preview-cache';
   import { findLinkPresentation } from './link-presentations';
   import { hasRoomMediaPreviews, useRoomMediaPreviews } from './room-media-previews.svelte.js';
   import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
@@ -22,7 +27,9 @@
   const core = useCoreClient();
   let preview = $state<UrlPreviewView | null>(null);
   let resolvedUrl: string | null = null;
+  const roomMedia = hasRoomMediaPreviews() ? useRoomMediaPreviews() : null;
   let sources = $derived(previewSources(encrypted));
+  let tunnel = $derived(usesTunnel(encrypted, roomMedia?.isPublic ?? false));
 
   $effect(() => {
     if (bundled !== null && hasPreviewData(bundled)) {
@@ -40,7 +47,7 @@
     let cancelled = false;
     const wanted = url;
     if (resolvedUrl !== wanted) preview = null;
-    void resolveUrlPreview(core.rpc.messages, wanted, sources).then((result) => {
+    void resolveUrlPreview(core.rpc.messages, wanted, sources, tunnel).then((result) => {
       if (cancelled) return;
       preview = result;
       resolvedUrl = wanted;
@@ -50,11 +57,19 @@
     };
   });
 
+  $effect(() => {
+    if (preview === null) return;
+    const key = url;
+    const view = preview;
+    shownLinkPreviews.set(key, view);
+    return () => {
+      if (shownLinkPreviews.get(key) === view) shownLinkPreviews.delete(key);
+    };
+  });
+
   let shown = $derived(preview ? [preview] : []);
   let title = $derived(preview?.title ?? preview?.site_name ?? url);
-  let gif = $derived(
-    preview?.video?.gif === true || preview?.image_mime === 'image/gif' || isGifHostUrl(url)
-  );
+  let gif = $derived(isGifPreview(url, preview));
   let compactImage = $derived(
     !gif &&
       (preview?.card === 'summary'
@@ -66,7 +81,6 @@
             preview.image_width > 0 &&
             preview.image_width <= preview.image_height)
   );
-  const roomMedia = hasRoomMediaPreviews() ? useRoomMediaPreviews() : null;
   let mediaHidden = $derived(roomMedia?.hidden ?? false);
   let Presentation = $derived(preview && findLinkPresentation(url, preview));
   let videoPlayback = $derived.by(() => {
@@ -96,7 +110,7 @@
 <!-- An each block holds its item through teardown, where a getter reading `preview` would see null. -->
 {#each shown as view, index (index)}
   {#if Presentation}
-    <Presentation {url} preview={view} {mediaHidden} />
+    <Presentation {url} preview={view} {mediaHidden} {tunnel} />
   {:else if view.video && !mediaHidden && view.title === null && view.site_name === null}
     <MediaContent
       class="link-preview-inline"
@@ -162,18 +176,12 @@
           onclick={openPreviewImage}
         />
       {/if}
-      <a
-        class="link-preview-text"
-        href={url}
-        target="_blank"
-        rel="external noopener noreferrer"
-        aria-label={title}
-      >
-        {#if view.site_name}<span class="link-preview-site">{view.site_name}</span>{/if}
+      <a class="link-preview-text" href={url} target="_blank" rel="external noopener noreferrer">
+        {#if view.site_name}<span class="link-preview-site" dir="auto">{view.site_name}</span>{/if}
         {#if view.author_name}<span class="link-preview-author">{view.author_name}</span>{/if}
-        <span class="link-preview-title">{title}</span>
+        <span class="link-preview-title" dir="auto">{title}</span>
         {#if view.description}
-          <span class="link-preview-description">{view.description}</span>
+          <span class="link-preview-description" dir="auto">{view.description}</span>
         {/if}
       </a>
     </div>

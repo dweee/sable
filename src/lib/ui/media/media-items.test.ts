@@ -29,6 +29,8 @@ function gallery(items: Extract<TimelineItemView['content'], { kind: 'gallery' }
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    shared_by: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,
@@ -84,7 +86,48 @@ test('lists a gallery pdf as a file the viewer can open, and skips other files',
   ]);
 });
 
+test('lists videos so a GIF opened from the timeline is the one the viewer shows', () => {
+  const clip = {
+    kind: 'video',
+    filename: 'clip.mp4',
+    caption: null,
+    source: 'mxc://example.org/clip',
+    mime: 'video/mp4',
+    width: null,
+    height: null,
+    blurhash: null,
+    thumbnail: null,
+    spoiler: null,
+  } as const;
+  const items = timelineMediaItems([gallery([clip])]);
+
+  expect(items).toMatchObject([{ kind: 'video', eventId: '$gallery:gallery:0' }]);
+});
+
 test('a gallery item id leads back to its event', () => {
   expect(galleryEventId(galleryItemId('$gallery', 3))).toBe('$gallery');
   expect(galleryEventId('$plain:example.org')).toBe('$plain:example.org');
+});
+
+test('credits media to the per-message profile it was sent with', () => {
+  const entry = {
+    ...gallery([
+      {
+        kind: 'image',
+        filename: 'a.png',
+        caption: null,
+        source: 'mxc://example.org/a',
+        mime: 'image/png',
+        width: null,
+        height: null,
+        size: null,
+        blurhash: null,
+        thumbnail: null,
+        spoiler: null,
+      },
+    ]),
+    per_message_profile: { id: 'p', display_name: 'Silver', avatar_url: null, pronouns: [] },
+  } as unknown as TimelineItemView;
+
+  expect(timelineMediaItems([entry])[0]?.sender).toBe('Silver');
 });

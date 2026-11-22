@@ -6,12 +6,7 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
-  import {
-    openExternalAuthWindow,
-    isDesktopAuthClient,
-    openSystemAuthUrl,
-    type ExternalAuthWindow,
-  } from '#lib/platform/external-auth.js';
+  import { openExternalAuthWindow, type ExternalAuthWindow } from '#lib/platform/external-auth.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
@@ -40,8 +35,6 @@
   const checkCodeId = $props.id();
   let checkCode = $state('');
   let openingApproval = $state(false);
-  let openingSystemBrowser = $state(false);
-  const desktopAuth = isDesktopAuthClient();
   let approvalError = $state(false);
   let approvalBrowser: ExternalAuthWindow | null = null;
 
@@ -166,21 +159,6 @@
     void approvalBrowser?.close();
     approvalBrowser = null;
   }
-
-  async function openSystemApproval(url: string): Promise<void> {
-    if (openingSystemBrowser) return;
-    openingSystemBrowser = true;
-    approvalError = false;
-    try {
-      await openSystemAuthUrl(url);
-      closeApproval();
-    } catch (error) {
-      console.warn('[sable qr] system browser failed', error);
-      approvalError = true;
-    } finally {
-      openingSystemBrowser = false;
-    }
-  }
 </script>
 
 <DialogFrame
@@ -210,14 +188,16 @@
       </div>
     {:else if progress === null}
       <div class="qr-actions">
-        <Button
-          variant="primary"
-          class="qr-action"
-          disabled={flow.pending}
-          onclick={() => void flow.showCode()}
-        >
-          <QrCodeIcon size={18} aria-hidden="true" />{i18n.t('qrLogin.showCode')}
-        </Button>
+        {#if target?.canShowCode() !== false}
+          <Button
+            variant="primary"
+            class="qr-action"
+            disabled={flow.pending}
+            onclick={() => void flow.showCode()}
+          >
+            <QrCodeIcon size={18} aria-hidden="true" />{i18n.t('qrLogin.showCode')}
+          </Button>
+        {/if}
         <Button class="qr-action" disabled={flow.pending} onclick={() => flow.startScanning()}>
           <CameraIcon size={18} aria-hidden="true" />{i18n.t('qrLogin.scanCode')}
         </Button>
@@ -273,20 +253,11 @@
         <Button
           variant="primary"
           class="qr-action"
-          disabled={openingApproval || openingSystemBrowser}
+          disabled={openingApproval}
           onclick={() => void openApproval(uri)}
         >
           {i18n.t('qrLogin.openApproval')}
         </Button>
-        {#if desktopAuth}
-          <Button
-            class="qr-action"
-            loading={openingSystemBrowser}
-            onclick={() => void openSystemApproval(uri)}
-          >
-            {i18n.t('auth.openInBrowser')}
-          </Button>
-        {/if}
       </div>
     {:else if progress.stage === 'starting' || progress.stage === 'syncing_secrets' || progress.stage === 'signed_in'}
       <p class="wait" aria-hidden="true">{announcement}</p>
@@ -381,19 +352,13 @@
     content: '';
     display: inline-block;
     height: 0.55rem;
-    margin-right: var(--space-200);
+    margin-inline-end: var(--space-200);
     width: 0.55rem;
   }
 
   @media (prefers-reduced-motion: no-preference) {
     :global(html:not([data-reduced-motion='on'])) .wait::before {
       animation: pulse 1.25s ease-in-out infinite;
-    }
-  }
-
-  @keyframes pulse {
-    50% {
-      opacity: 0.3;
     }
   }
 

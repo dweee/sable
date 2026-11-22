@@ -1076,7 +1076,7 @@ impl Core {
 
         self.watch_session_changes(session_changes, generation);
         self.watch_encryption(&client, generation);
-        self.watch_room_keys(&client).await;
+        self.watch_room_keys(&client);
         self.watch_account_data_key_sharing(&client, generation);
         self.watch_search_peers(&client, generation);
         self.watch_rtc(&client, generation);
@@ -1104,6 +1104,7 @@ impl Core {
             .abort_on_drop(),
         );
         self.watch_bot_commands(&client, generation);
+        self.watch_room_rules(&client, generation);
         self.watch_image_packs(&client, generation);
         self.watch_joined_invites(&client);
         self.watch_send_queue(&client);
@@ -1117,7 +1118,6 @@ impl Core {
         self.watch_search_index(&account_id, &client, &store_id);
         self.watch_ignored_users(&client);
         self.watch_ignored_history(&client, &sync_service);
-        #[cfg(target_family = "wasm")]
         self.watch_sync_stall(&client, &sync_service, crate::sync_support::SYNC_STALL);
         self.watch_backup_preference(&client);
         sync_service.start().await;
@@ -1317,7 +1317,7 @@ fn refresh_tag(client: &matrix_sdk::Client) -> String {
 
 fn oauth_device_delete_url(
     metadata: &AuthorizationServerMetadata,
-    device_id: &matrix_sdk::ruma::DeviceId,
+    device_id: &ruma::DeviceId,
 ) -> Result<String, RpcError> {
     use matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::{
         AccountManagementAction, AccountManagementActionData, DeviceDeleteData,
@@ -1336,7 +1336,7 @@ fn oauth_device_delete_url(
 }
 
 fn oauth_account_deactivate_url(
-    metadata: &matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::AuthorizationServerMetadata,
+    metadata: &AuthorizationServerMetadata,
 ) -> Result<String, RpcError> {
     use matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::{
         AccountManagementAction, AccountManagementActionData,
@@ -1403,7 +1403,8 @@ async fn reset_account_cache(account: &PersistedAccount) -> Result<(), crate::Co
     Ok(())
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod regression_tests {
     use crate::api::encryption::DeleteDeviceParams;
     use crate::session::{self, Credentials, PersistedAccount};
@@ -1454,8 +1455,6 @@ mod regression_tests {
             Ok(())
         }
     }
-
-    #[expect(clippy::unwrap_used, reason = "test code")]
     async fn core_with_room() -> (tempfile::TempDir, MatrixMockServer, Arc<Core>, Room) {
         let server = MatrixMockServer::new().await;
         server
@@ -1738,7 +1737,7 @@ mod regression_tests {
         });
         *core.accounts.lock().await = Some(registry);
         let pending = core.claim_session_generation().await;
-        let mut rejected = matrix_sdk::ruma::api::error::UnknownTokenErrorData::new();
+        let mut rejected = ruma::api::error::UnknownTokenErrorData::new();
         rejected.soft_logout = true;
         assert!(core.handle_session_change(&matrix_sdk::SessionChange::UnknownToken(rejected), 1));
         tokio::task::yield_now().await;
@@ -1842,7 +1841,7 @@ mod regression_tests {
             device_invalidated: false,
         });
         *core.accounts.lock().await = Some(registry);
-        let rejected = matrix_sdk::ruma::api::error::UnknownTokenErrorData::new();
+        let rejected = ruma::api::error::UnknownTokenErrorData::new();
         assert!(core.handle_session_change(&matrix_sdk::SessionChange::UnknownToken(rejected), 1));
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -2098,6 +2097,48 @@ mod regression_tests {
     }
 
     #[tokio::test]
+    async fn a_manual_retry_starts_sync_on_a_network_reported_gone() {
+        use matrix_sdk_ui::sync_service::State;
+
+        let (_store, _server, core, _room) = core_with_room().await;
+        let sync_service = core.sync_service().await.unwrap();
+        core.update_network_conditions(false, true).await;
+        core.update_app_active(true).await;
+        assert!(matches!(sync_service.state().get(), State::Idle));
+        assert!(matches!(
+            core.shown_sync_status(sync_service.state().get()),
+            crate::protocol::SyncStatus::Offline
+        ));
+
+        core.retry_sync(&sync_service).await;
+
+        assert!(!matches!(sync_service.state().get(), State::Idle));
+    }
+
+    #[tokio::test]
+    async fn a_reachable_server_overrules_a_network_reported_gone() {
+        use std::time::Duration;
+
+        use matrix_sdk_ui::sync_service::State;
+
+        let (_store, server, core, _room) = core_with_room().await;
+        server.mock_versions().ok().mount().await;
+        let client = core.client().await.unwrap();
+        let sync_service = core.sync_service().await.unwrap();
+        core.update_network_conditions(false, true).await;
+        core.update_app_active(true).await;
+        assert!(matches!(sync_service.state().get(), State::Idle));
+        let mut states = sync_service.state();
+
+        core.watch_sync_stall(&client, &sync_service, Duration::from_millis(200));
+
+        tokio::time::timeout(Duration::from_secs(5), states.next())
+            .await
+            .expect("sync starts once the server answers");
+        assert!(core.activity.network_available());
+    }
+
+    #[tokio::test]
     async fn a_shut_down_core_stops_its_session_and_refuses_calls() {
         let (_store, _server, core, _room) = core_with_room().await;
 
@@ -2138,7 +2179,7 @@ mod regression_tests {
                 server.server().uri(),
                 "first".to_owned(),
                 &generation,
-                &crate::session::store_lease(&core.store_id).await,
+                &session::store_lease(&core.store_id).await,
             )
             .await
             .unwrap();
@@ -2180,7 +2221,7 @@ mod regression_tests {
                 server.server().uri(),
                 "first".to_owned(),
                 &generation,
-                &crate::session::store_lease(&core.store_id).await,
+                &session::store_lease(&core.store_id).await,
             ),
         )
         .await
@@ -2213,7 +2254,7 @@ mod regression_tests {
             server.server().uri(),
             "first".to_owned(),
             &generation,
-            &crate::session::store_lease(&core.store_id).await,
+            &session::store_lease(&core.store_id).await,
         )
         .await
         .unwrap();
@@ -2309,10 +2350,8 @@ mod regression_tests {
         use crate::session::{AccountRegistry, Credentials, PersistedAccount, PersistedSession};
 
         let server = MatrixMockServer::new().await;
-        let base = std::env::temp_dir().join(format!(
-            "sable-offline-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("sable-offline-{}", ruma::TransactionId::new()));
         let base_id = base.to_str().unwrap().to_owned();
         let (core, _events) = Core::new(base_id.clone(), Box::new(MemorySessionStore::default()));
         let mut registry = AccountRegistry::empty();
@@ -2366,10 +2405,7 @@ mod regression_tests {
         use matrix_sdk_base::crypto::store::CryptoStore as _;
 
         let server = MatrixMockServer::new().await;
-        let base = std::env::temp_dir().join(format!(
-            "sable-reset-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let base = std::env::temp_dir().join(format!("sable-reset-{}", ruma::TransactionId::new()));
         let base_id = base.to_str().unwrap().to_owned();
         let (core, _events) = Core::new(base_id.clone(), Box::new(MemorySessionStore::default()));
         let mut registry = AccountRegistry::empty();
@@ -2579,7 +2615,7 @@ mod regression_tests {
         server.mock_versions().ok().mount().await;
         let base = std::env::temp_dir().join(format!(
             "sable-restore-refresh-{}",
-            matrix_sdk::ruma::TransactionId::new()
+            ruma::TransactionId::new()
         ));
         let base_id = base.to_str().unwrap().to_owned();
         let (core, _events) = Core::new(base_id.clone(), Box::new(MemorySessionStore::default()));
@@ -2638,8 +2674,6 @@ mod regression_tests {
         drop(client);
         std::fs::remove_dir_all(&store_id).unwrap();
     }
-
-    #[expect(clippy::unwrap_used, reason = "test code")]
     async fn logged_in_core() -> (tempfile::TempDir, Arc<Core>, PersistedAccount) {
         use crate::session::{AccountRegistry, current_session};
         let (_store, server, _, room) = core_with_room().await;
@@ -2665,8 +2699,6 @@ mod regression_tests {
             )
             .is_ok_and(|tokens| tokens.is_some())
     }
-
-    #[expect(clippy::unwrap_used, reason = "test code")]
     async fn restorable_core() -> (
         MatrixMockServer,
         tempfile::TempDir,
@@ -2832,8 +2864,7 @@ mod regression_tests {
         core.write_registry(&registry).await.unwrap();
 
         let saved = core.sessions.load().await.unwrap().unwrap();
-        let (saved, _) =
-            crate::session::AccountRegistry::from_bytes(&saved, &core.store_id).unwrap();
+        let (saved, _) = session::AccountRegistry::from_bytes(&saved, &core.store_id).unwrap();
         let tokens = |id: &str| {
             saved
                 .accounts
@@ -2870,10 +2901,7 @@ mod regression_tests {
         assert!(!has_login_file(&base, &account));
     }
 
-    fn saved_refresh_token(
-        core: &Core,
-        account: &crate::session::PersistedAccount,
-    ) -> Option<String> {
+    fn saved_refresh_token(core: &Core, account: &PersistedAccount) -> Option<String> {
         crate::credentials::LoginTokens::new(std::path::Path::new(&core.store_id))
             .read(
                 &account.account_id,
@@ -2980,7 +3008,7 @@ mod regression_tests {
             server.server().uri(),
             "second".to_owned(),
             &generation,
-            &crate::session::store_lease("unused").await,
+            &session::store_lease("unused").await,
         )
         .await
         .expect_err("switch must report the failed registry write");
@@ -3129,19 +3157,49 @@ mod regression_tests {
     }
 
     #[tokio::test]
-    async fn session_teardown_waits_for_in_flight_timeline_builders() {
+    async fn a_slow_timeline_build_blocks_neither_another_room_nor_the_teardown() {
         let (_store, server, core, room) = core_with_room().await;
-        server.mock_room_state_encryption().plain().mount().await;
-        let room_id = room.room_id().to_owned();
-        let cache = core.timelines.lock().await;
-        let mut build = std::pin::pin!(core.live_timeline(&room_id, false));
-        assert!(futures_util::poll!(build.as_mut()).is_pending());
-        drop(cache);
+        let slow = room.room_id().to_owned();
+        let fast = room_id!("!fast:example.org").to_owned();
+        server.sync_joined_room(&room.client(), &fast).await;
+        let requests = std::sync::atomic::AtomicUsize::new(0);
+        server
+            .mock_room_state_encryption()
+            .respond_with(move |_: &wiremock::Request| {
+                let response = ResponseTemplate::new(404).set_body_json(
+                    serde_json::json!({"errcode":"M_NOT_FOUND", "error":"not found"}),
+                );
+                if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    response.set_delay(std::time::Duration::from_secs(3))
+                } else {
+                    response
+                }
+            })
+            .mount()
+            .await;
 
-        let mut teardown = std::pin::pin!(core.take_session());
-        assert!(futures_util::poll!(teardown.as_mut()).is_pending());
-        build.await.unwrap();
-        assert!(teardown.await.is_some());
+        let mut slow_build = std::pin::pin!(core.live_timeline(&slow, false));
+        assert!(futures_util::poll!(slow_build.as_mut()).is_pending());
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            core.live_timeline(&fast, false),
+        )
+        .await
+        .expect("another room must open while one builds")
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), core.take_session())
+            .await
+            .expect("the teardown must not wait for a build")
+            .unwrap();
+
+        assert!(matches!(
+            slow_build.await,
+            Err(RpcError {
+                code: RpcCode::NotLoggedIn,
+                ..
+            })
+        ));
         assert!(core.timelines.lock().await.is_empty());
     }
 

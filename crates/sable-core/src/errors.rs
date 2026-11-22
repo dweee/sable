@@ -18,16 +18,13 @@ use crate::protocol::{
 use crate::Core;
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) type Cause = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type Cause = Box<dyn Error + Send + Sync>;
 #[cfg(target_family = "wasm")]
-pub(crate) type Cause = Box<dyn std::error::Error>;
+pub(crate) type Cause = Box<dyn Error>;
 
-pub(crate) trait Source:
-    std::error::Error + SendOutsideWasm + SyncOutsideWasm + 'static
-{
-}
+pub(crate) trait Source: Error + SendOutsideWasm + SyncOutsideWasm + 'static {}
 
-impl<T: std::error::Error + SendOutsideWasm + SyncOutsideWasm + 'static> Source for T {}
+impl<T: Error + SendOutsideWasm + SyncOutsideWasm + 'static> Source for T {}
 
 /// One layer of a failure. SDK errors are not `Send` on the web, so a report
 /// keeps what each error said rather than the error.
@@ -55,7 +52,7 @@ impl Layer {
     }
 }
 
-impl std::fmt::Display for Layer {
+impl Display for Layer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
     }
@@ -178,7 +175,7 @@ impl CoreError {
     }
 }
 
-impl std::fmt::Display for CoreError {
+impl Display for CoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let messages: Vec<_> = self.layers().map(|layer| layer.message.as_str()).collect();
         formatter.write_str(&messages.join(": "))
@@ -283,7 +280,7 @@ fn http_failure(error: &(dyn Error + 'static)) -> Option<HttpFailureView> {
     }
     let transport = match http_error(error) {
         Some(matrix_sdk::HttpError::Reqwest(transport)) => Some(transport),
-        _ => error.downcast_ref::<matrix_sdk::reqwest::Error>(),
+        _ => error.downcast_ref::<reqwest::Error>(),
     }?;
     Some(HttpFailureView {
         status: transport.status().map(|status| status.as_u16()),
@@ -401,9 +398,37 @@ fn http_error<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a matrix_sdk::Ht
     }
 }
 
-fn client_api_error<'a>(
-    error: &'a (dyn Error + 'static),
-) -> Option<&'a matrix_sdk::ruma::api::error::Error> {
+fn refresh_error<'error>(
+    error: &'error (dyn Error + 'static),
+) -> Option<&'error matrix_sdk::RefreshTokenError> {
+    match http_error(error) {
+        Some(matrix_sdk::HttpError::RefreshToken(refresh)) => Some(refresh),
+        _ => error.downcast_ref::<matrix_sdk::RefreshTokenError>(),
+    }
+}
+
+/// Mirrors the SDK's private `session_rejection`: these end the session for good.
+fn rejects_session(refresh: &matrix_sdk::RefreshTokenError) -> bool {
+    use matrix_sdk::RefreshTokenError;
+    use matrix_sdk::authentication::oauth::error::BasicErrorResponseType;
+    match refresh {
+        RefreshTokenError::RefreshTokenRequired => true,
+        RefreshTokenError::MatrixAuth(http) => matches!(
+            http.client_api_error_kind(),
+            Some(ErrorKind::UnknownToken(_))
+        ),
+        RefreshTokenError::OAuth(oauth) => matches!(
+            &**oauth,
+            OAuthError::RefreshToken(RequestTokenError::ServerResponse(response))
+                if matches!(
+                    response.error(),
+                    BasicErrorResponseType::InvalidGrant | BasicErrorResponseType::InvalidClient
+                )
+        ),
+    }
+}
+
+fn client_api_error<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a ruma::api::error::Error> {
     error.downcast_ref::<matrix_sdk::Error>().map_or_else(
         || {
             error
@@ -414,7 +439,7 @@ fn client_api_error<'a>(
     )
 }
 
-fn classify_api_error(api_error: &matrix_sdk::ruma::api::error::Error) -> Option<Expected> {
+fn classify_api_error(api_error: &ruma::api::error::Error) -> Option<Expected> {
     use tracing::Level;
 
     let status = api_error.status_code;
@@ -515,6 +540,23 @@ fn classify_one(error: &(dyn Error + 'static)) -> Option<Expected> {
             "the event is too large to queue",
         ));
     }
+    if let Some(refresh) = refresh_error(error) {
+        return Some(if rejects_session(refresh) {
+            Expected::new(
+                RpcCode::NotLoggedIn,
+                Level::DEBUG,
+                "auth",
+                "the session can no longer be refreshed",
+            )
+        } else {
+            Expected::new(
+                RpcCode::Unavailable,
+                Level::WARN,
+                "server",
+                "the access token could not be refreshed",
+            )
+        });
+    }
     if let Some(expected) = client_api_error(error).and_then(classify_api_error) {
         return Some(expected);
     }
@@ -526,6 +568,38 @@ fn classify_one(error: &(dyn Error + 'static)) -> Option<Expected> {
             Level::WARN,
             "network",
             "homeserver request failed",
+        ));
+    }
+    // matrix-sdk-sqlite keeps its error type private, so its message is the only handle.
+    if error.to_string() == "The store is closed" {
+        return Some(Expected::new(
+            RpcCode::Unavailable,
+            Level::DEBUG,
+            "store_closed",
+            "the stores are closed while the app is suspended",
+        ));
+    }
+    if matches!(
+        error.downcast_ref::<matrix_sdk::paginators::PaginatorError>(),
+        Some(matrix_sdk::paginators::PaginatorError::EventNotFound(_))
+    ) {
+        return Some(Expected::new(
+            RpcCode::NotFound,
+            Level::DEBUG,
+            "missing_event",
+            "the event is gone or out of reach",
+        ));
+    }
+    if matches!(
+        error.downcast_ref::<matrix_sdk::Error>(),
+        Some(matrix_sdk::Error::ConcurrentRequestFailed)
+    ) {
+        // The request it waited on failed, and that one was logged where it ran.
+        return Some(Expected::new(
+            RpcCode::Unavailable,
+            Level::WARN,
+            "network",
+            "a shared homeserver request failed",
         ));
     }
     if matches!(
@@ -739,7 +813,7 @@ mod tests {
         let body: StandardErrorBody =
             serde_json::from_value(serde_json::json!({ "errcode": errcode, "error": "refused" }))
                 .unwrap();
-        let error = matrix_sdk::ruma::api::error::Error::new(
+        let error = ruma::api::error::Error::new(
             http::StatusCode::from_u16(status).unwrap(),
             ErrorBody::Standard(body),
         );
@@ -793,7 +867,7 @@ mod tests {
 
     #[test]
     fn what_a_homeserver_answers_is_classified_below_error() {
-        let cases: [(HttpError, Check, &str); 11] = [
+        let cases: [(HttpError, Check, &str); 13] = [
             (
                 api_error(401, "M_UNKNOWN_TOKEN"),
                 |e| matches!(e, RpcCode::NotLoggedIn),
@@ -849,6 +923,18 @@ mod tests {
                 |e| matches!(e, RpcCode::AccountLocked),
                 "WARN",
             ),
+            (
+                HttpError::RefreshToken(matrix_sdk::RefreshTokenError::RefreshTokenRequired),
+                |e| matches!(e, RpcCode::NotLoggedIn),
+                "DEBUG",
+            ),
+            (
+                HttpError::RefreshToken(matrix_sdk::RefreshTokenError::MatrixAuth(Arc::new(
+                    api_error(503, "M_UNKNOWN"),
+                ))),
+                |e| matches!(e, RpcCode::Unavailable),
+                "WARN",
+            ),
         ];
         for (error, expected, level) in cases {
             let text = error.to_string();
@@ -897,6 +983,18 @@ mod tests {
             })
         ));
         assert!(log.contains("WARN"), "{log}");
+        assert!(!log.contains("ERROR"), "{log}");
+
+        let (shared, log) = capture(|core| {
+            Err::<(), _>(matrix_sdk::Error::ConcurrentRequestFailed).or_failed(core, "room_members")
+        });
+        assert!(matches!(
+            shared,
+            Err(RpcError {
+                code: RpcCode::Unavailable,
+                ..
+            })
+        ));
         assert!(!log.contains("ERROR"), "{log}");
     }
 
@@ -965,6 +1063,43 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_read_while_the_stores_are_closed_is_unavailable() {
+        let closed = matrix_sdk::Error::StateStore(Box::new(
+            matrix_sdk_base::store::StoreError::Backend("The store is closed".into()),
+        ));
+        let (result, log) = capture(|core| Err::<(), _>(closed).or_failed(core, "room_members"));
+
+        assert!(matches!(
+            result,
+            Err(RpcError {
+                code: RpcCode::Unavailable,
+                ..
+            })
+        ));
+        assert!(!log.contains("ERROR"), "{log}");
+    }
+
+    #[test]
+    fn a_jump_to_a_missing_event_is_not_found() {
+        let missing = super::TimelineError::from(matrix_sdk_ui::timeline::PaginationError::from(
+            matrix_sdk::paginators::PaginatorError::EventNotFound(
+                matrix_sdk::ruma::owned_event_id!("$gone:example.org"),
+            ),
+        ));
+        let (result, log) =
+            capture(|core| Err::<(), _>(missing).or_failed(core, "build_focused_timeline"));
+
+        assert!(matches!(
+            result,
+            Err(RpcError {
+                code: RpcCode::NotFound,
+                ..
+            })
+        ));
+        assert!(!log.contains("ERROR"), "{log}");
     }
 
     #[test]
@@ -1210,7 +1345,7 @@ mod tests {
     #[test]
     fn a_huge_body_is_cut_and_only_the_root_cause_keeps_its_debug() {
         let body = "x".repeat(3 * super::DETAIL_LIMIT);
-        let error = matrix_sdk::ruma::api::error::Error::new(
+        let error = ruma::api::error::Error::new(
             http::StatusCode::BAD_GATEWAY,
             ErrorBody::NotJson {
                 bytes: body.into(),

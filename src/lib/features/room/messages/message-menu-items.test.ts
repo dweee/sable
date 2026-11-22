@@ -25,10 +25,15 @@ test('message permalinks are labelled separately from body links', () => {
 });
 
 test('a link under the cursor adds a row beside the message permalink', () => {
-  const rows = messageMenuRows({ onCopyHref: () => {}, onCopyLink: () => {} });
+  const rows = messageMenuRows({
+    onCopyHref: () => {},
+    onShareHref: () => {},
+    onCopyLink: () => {},
+  });
 
   expect(rows.map((row) => [row.key, row.label])).toEqual([
     ['href', 'timeline.copyLink'],
+    ['share-href', 'timeline.shareLink'],
     ['link', 'timeline.copyMessageLink'],
   ]);
 });
@@ -64,4 +69,13 @@ test('the gif row reads back whether the gif is already saved', () => {
 
   expect(saved[0]?.label).toBe('composer.gifUnfavorite');
   expect(unsaved[0]?.label).toBe('composer.gifFavorite');
+});
+
+test('banning the sender with Meowlnir sits with report, marked as destructive', () => {
+  const rows = messageMenuRows({ onReport: () => {}, onMeowlnirBan: () => {} });
+
+  expect(rows.map((row) => [row.key, row.destructive ?? false, row.separated ?? false])).toEqual([
+    ['report', false, true],
+    ['meowlnir-ban', true, false],
+  ]);
 });

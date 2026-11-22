@@ -36,7 +36,11 @@ internal enum class PushOutcome {
     FETCH_FAILED,
     DIAGNOSTIC_RECEIVED,
     ACTIVE_ELSEWHERE,
+    IN_APP,
     POSTED,
+    APP_DISMISSED,
+    APP_DISMISS_IGNORED,
+    ALL_DISMISSED,
 }
 
 internal data class PushTrace(

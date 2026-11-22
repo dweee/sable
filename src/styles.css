@@ -1,5 +1,6 @@
 @import url('@fontsource-variable/nunito');
 @import url('@fontsource-variable/cascadia-code');
+@import url('@fontsource-variable/vazirmatn');
 @import url('@sableclient/twemoji-font');
 @import url('./lib/ui/primitives/selection.css');
 @import url('./lib/ui/primitives/settings-nav.css');
@@ -538,7 +539,7 @@ html {
 
   /* Font families */
   --font-family-emoji: 'Twemoji_DISABLED';
-  --font-family-base: 'Nunito Variable', var(--font-family-emoji), sans-serif;
+  --font-family-base: 'Nunito Variable', var(--font-family-emoji), 'Vazirmatn Variable', sans-serif;
   --font-family: var(--font-family-base);
   --font-family-mono-base: 'Cascadia Code Variable', monospace;
   --font-family-mono: var(--font-family-mono-base);
@@ -568,10 +569,23 @@ html {
   --safe-right: var(--safe-area-inset-right);
   --safe-bottom: max(var(--safe-area-inset-bottom), var(--keyboard-height, 0px));
   --safe-left: var(--safe-area-inset-left);
+  --safe-inline-start: var(--safe-left);
+  --safe-inline-end: var(--safe-right);
+  --inline-sign: 1;
   --keyboard-overlap: var(--keyboard-height, 0px);
   --edge-inset-top: 0px;
   --edge-inset-bottom: 0px;
   --sheet-inset-bottom: 0px;
+}
+
+:root[dir='rtl'] {
+  --safe-inline-start: var(--safe-right);
+  --safe-inline-end: var(--safe-left);
+  --inline-sign: -1;
+}
+
+:root[dir='rtl'] .mirror-rtl {
+  scale: -1 1;
 }
 
 :root,
@@ -749,12 +763,15 @@ body {
   font-weight: var(--font-weight-normal);
   line-height: var(--line-height-body);
   margin: 0;
+  /* stylelint-disable-next-line csstools/use-logical, declaration-no-important -- overrides the bits-ui scroll lock padding, the body never scrolls */
+  padding-right: 0 !important;
   user-select: none;
 }
 
 input,
 textarea {
   caret-color: var(--primary-main);
+  unicode-bidi: plaintext;
 }
 
 body.remote-theme {
@@ -798,6 +815,26 @@ input[type='checkbox'] {
   position: absolute;
   white-space: nowrap;
   width: 1px;
+}
+
+.empty-text {
+  color: var(--surface-var-on-container);
+  font-size: var(--font-size-small);
+  margin: 0;
+}
+
+.scrollbar-hidden {
+  scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
 }
 
 :focus-visible {
@@ -966,8 +1003,28 @@ a:not([class]):hover {
   scroll-padding-block: var(--space-500);
 }
 
+[data-scroll-more-x] {
+  --scroll-fade-start: 0px;
+  --scroll-fade-end: 0px;
+  --scroll-fade-direction: to right;
+
+  mask-image: linear-gradient(
+    var(--scroll-fade-direction),
+    transparent,
+    black var(--scroll-fade-start),
+    black calc(100% - var(--scroll-fade-end)),
+    transparent
+  );
+  scroll-padding-inline: var(--space-500);
+}
+
+[data-scroll-more-x]:dir(rtl) {
+  --scroll-fade-direction: to left;
+}
+
 @media (forced-colors: active) {
-  [data-scroll-more] {
+  [data-scroll-more],
+  [data-scroll-more-x] {
     mask-image: none;
   }
 }
@@ -978,6 +1035,14 @@ a:not([class]):hover {
 
 [data-scroll-more~='bottom'] {
   --scroll-fade-bottom: var(--space-500);
+}
+
+[data-scroll-more-x~='start'] {
+  --scroll-fade-start: var(--space-500);
+}
+
+[data-scroll-more-x~='end'] {
+  --scroll-fade-end: var(--space-500);
 }
 
 @supports not (color: color-mix(in srgb, black, white)) {

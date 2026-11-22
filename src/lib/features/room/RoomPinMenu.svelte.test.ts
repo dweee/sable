@@ -75,6 +75,8 @@ const image = {
   per_message_profile: null,
   bundled_link_previews: [],
   link_previews_removed: null,
+  shared_by: null,
+  redacted_on_ban: null,
   mention: 'none',
   forwarded: null,
   forum_title: null,
@@ -170,22 +172,135 @@ test('shows the total pin count on the button, even once the pins are read', asy
 
 test('reports the unread pin count and clears it once the pins are seen', async () => {
   const user = userEvent.setup({ delay: null });
-  const onUnread = vi.fn();
   render(RoomPinMenuHarness, {
     menu: {
       roomId: '!room:example.org',
       members: [],
       canPin: false,
       onJump: vi.fn(),
-      onUnread,
     },
   });
 
+  const unread = screen.getByTestId('pins-unread');
   await vi.waitFor(() => {
-    expect(onUnread).toHaveBeenLastCalledWith(2);
+    expect(unread).toHaveTextContent('2');
   });
   await user.click(screen.getByRole('button', { name: 'Pinned messages' }));
   await vi.waitFor(() => {
-    expect(onUnread).toHaveBeenLastCalledWith(0);
+    expect(unread).toHaveTextContent('0');
   });
+});
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function menuFor(roomId: string) {
+  return { roomId, members: [], canPin: false, onJump: vi.fn() };
+}
+
+function countRefreshes(roomId: string): number {
+  return timeline.pinReadState.mock.calls.filter(([request]) => request.room_id === roomId).length;
+}
+
+test('a pin count refresh while the list loads still shows the pins', async () => {
+  const user = userEvent.setup({ delay: null });
+  const ids = deferred<string[]>();
+  timeline.pinnedEvents.mockImplementationOnce(() => ids.promise);
+  const menu = menuFor('!refresh-during-load:example.org');
+  const { rerender } = render(RoomPinMenuHarness, { menu });
+
+  await user.click(screen.getByRole('button', { name: 'Pinned messages' }));
+  await vi.waitFor(() => {
+    expect(timeline.pinnedEvents).toHaveBeenLastCalledWith({ room_id: menu.roomId });
+  });
+  await rerender({ revision: '$pin' });
+  await vi.waitFor(() => {
+    expect(countRefreshes(menu.roomId)).toBe(2);
+  });
+  ids.resolve(['$image', '$second']);
+
+  expect(await screen.findByRole('button', { name: 'Open photo.png' })).toBeInTheDocument();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});
+
+test('a pin count refresh while pins resolve still fills their rows', async () => {
+  const user = userEvent.setup({ delay: null });
+  const items = deferred<TimelineItemView[]>();
+  timeline.eventItems.mockImplementationOnce(() => items.promise);
+  const menu = menuFor('!refresh-during-resolve:example.org');
+  const { rerender } = render(RoomPinMenuHarness, { menu });
+
+  await user.click(screen.getByRole('button', { name: 'Pinned messages' }));
+  await vi.waitFor(() => {
+    expect(timeline.eventItems).toHaveBeenLastCalledWith({
+      room_id: menu.roomId,
+      event_ids: ['$second', '$image'],
+    });
+  });
+  await rerender({ revision: '$pin' });
+  await vi.waitFor(() => {
+    expect(countRefreshes(menu.roomId)).toBe(2);
+  });
+  items.resolve([image, secondImage]);
+
+  expect(await screen.findByRole('button', { name: 'Open photo.png' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Open second.png' })).toBeInTheDocument();
+});
+
+test('switching rooms while open drops the previous room pins', async () => {
+  const user = userEvent.setup({ delay: null });
+  const menu = menuFor('!switch-from:example.org');
+  const { rerender } = render(RoomPinMenuHarness, { menu });
+
+  await user.click(screen.getByRole('button', { name: 'Pinned messages' }));
+  await screen.findByRole('button', { name: 'Open photo.png' });
+  const next = deferred<string[]>();
+  timeline.pinnedEvents.mockImplementationOnce(() => next.promise);
+  await rerender({ menu: { ...menu, roomId: '!switch-to:example.org' } });
+
+  await vi.waitFor(() => {
+    expect(screen.queryByRole('button', { name: 'Open photo.png' })).not.toBeInTheDocument();
+  });
+  next.resolve([]);
+});
+
+test('ignores a late pins-seen reply from the previous room', async () => {
+  const user = userEvent.setup({ delay: null });
+  const seen = deferred<{ pinned_ids: string[]; unread: number; fresh_ids: string[] }>();
+  timeline.markPinsSeen.mockImplementationOnce(() => seen.promise);
+  const menu = menuFor('!late-from:example.org');
+  const { rerender } = render(RoomPinMenuHarness, { menu });
+
+  await user.click(screen.getByRole('button', { name: 'Pinned messages' }));
+  await vi.waitFor(() => {
+    expect(timeline.markPinsSeen).toHaveBeenLastCalledWith({
+      room_id: menu.roomId,
+      pinned_ids: ['$image', '$second'],
+    });
+  });
+  const nextIds = ['$image', '$second', '$third'];
+  timeline.pinReadState.mockResolvedValueOnce({ pinned_ids: nextIds, unread: 3, fresh_ids: [] });
+  timeline.pinnedEvents.mockResolvedValueOnce(nextIds);
+  await rerender({ menu: { ...menu, roomId: '!late-to:example.org' } });
+  const button = screen.getByRole('button', { name: 'Pinned messages' });
+  await vi.waitFor(() => {
+    expect(timeline.markPinsSeen).toHaveBeenLastCalledWith({
+      room_id: '!late-to:example.org',
+      pinned_ids: nextIds,
+    });
+    expect(button).toHaveTextContent('3');
+    expect(screen.getByTestId('pins-unread')).toHaveTextContent('0');
+  });
+
+  seen.resolve({ pinned_ids: ['$image'], unread: 4, fresh_ids: [] });
+  await seen.promise;
+  await Promise.resolve();
+
+  expect(button).toHaveTextContent('3');
+  expect(screen.getByTestId('pins-unread')).toHaveTextContent('0');
 });

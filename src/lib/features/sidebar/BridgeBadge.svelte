@@ -11,14 +11,16 @@
   let { bridge, ...rest }: Props = $props();
 </script>
 
-<span
-  {...rest}
-  class="bridge-badge"
-  role="img"
-  aria-label={i18n.t('nav.bridgedFrom', { network: bridge.network })}
->
-  <Avatar src={bridge.avatar_url} name={bridge.network} size="tiny" />
-</span>
+{#if bridge.avatar_url}
+  <span
+    {...rest}
+    class="bridge-badge"
+    role="img"
+    aria-label={i18n.t('nav.bridgedFrom', { network: bridge.network })}
+  >
+    <Avatar src={bridge.avatar_url} name={bridge.network} size="tiny" />
+  </span>
+{/if}
 
 <style>
   .bridge-badge {
@@ -26,7 +28,7 @@
     bottom: calc(-1 * var(--space-050));
     box-shadow: 0 0 0 var(--border-width-400) var(--presence-ring, var(--bg-container));
     display: flex;
-    left: calc(-1 * var(--space-050));
+    inset-inline-start: calc(-1 * var(--space-050));
     position: absolute;
   }
 

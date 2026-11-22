@@ -1,3 +1,4 @@
+import { clamp } from '#lib/clamp.js';
 import type {
   MediaPreviewsView,
   PresenceView,
@@ -9,7 +10,11 @@ import type { RoomSort } from '#lib/rooms/room-sort.js';
 import { SYSTEM_TIME_ZONE, timeZoneValues } from '#lib/ui/time-zones.js';
 import { languageValues, SYSTEM_LANGUAGE } from '#lib/locales.js';
 import { isNightlyBuild } from '#lib/platform/build-channel.js';
-import { customTitleBarDefault } from '#lib/platform/window-decorations.js';
+import {
+  customTitleBarDefault,
+  hardwareVideoEncodeDefault,
+} from '#lib/platform/window-decorations.js';
+import { isNativeMobile } from '#lib/platform/os.js';
 import type { BadgeNotificationMode } from '#lib/rooms/unread.js';
 
 export type { BadgeNotificationMode };
@@ -24,6 +29,7 @@ export type DateFormat = 'auto' | 'dmy' | 'mdy' | 'ymd';
 export type WeekStart = 'sunday' | 'monday' | 'saturday';
 export type ThemeMode = 'system' | 'dark' | 'light';
 export type ShowRoomIcon = 'always' | 'sometimes' | 'collapsed' | 'never';
+export type MessagePreviews = 'off' | 'direct' | 'rooms' | 'all';
 export type SearchIndexLimit = '128' | '256' | '512' | '1024' | '2048' | '4096';
 export type PersonaPickerSortOrder = 'manual' | 'alphabetical-asc' | 'alphabetical-desc' | 'recent';
 
@@ -208,6 +214,7 @@ interface Scope {
   account?: true;
   /** Stays on this device, settings sync leaves it alone. */
   device?: true;
+  /** Kept per account even when `device`. */
   perAccount?: true;
 }
 
@@ -267,6 +274,7 @@ const SETTINGS = {
     { account: true }
   ),
   theme: choice<ThemeMode>(['system', 'dark', 'light'], 'system', { account: true }),
+  deploymentTheme: toggle(true, { account: true }),
   quickCss: text(''),
   fontFamily: text('', { account: true, device: true }),
   fontFamilyMono: text('', { account: true, device: true }),
@@ -289,8 +297,14 @@ const SETTINGS = {
   showRoomIcon: choice<ShowRoomIcon>(['always', 'sometimes', 'collapsed', 'never'], 'always', {
     account: true,
   }),
+  showEncryptionStatusIcon: toggle(true, { account: true }),
+  voiceParticipantPlacement: choice(['both', 'below', 'inline'], 'both', { account: true }),
   showRoomBanners: toggle(true, { account: true }),
+  bannerFit: choice(['fixed', 'image'], 'fixed', { account: true }),
   showDmTopics: toggle(true, { account: true }),
+  messagePreviews: choice<MessagePreviews>(['off', 'direct', 'rooms', 'all'], 'off', {
+    account: true,
+  }),
   roomBannerHeight: range(56, 500, 190, { account: true, device: true }),
   subspaceHierarchyLimit: choice(SUBSPACE_DEPTHS, '3', { account: true }),
   searchIndexLimit: choice(SEARCH_INDEX_LIMITS, '512', { device: true }),
@@ -317,6 +331,7 @@ const SETTINGS = {
   tintRoomIcons: toggle(false, { account: true }),
   showBridgeBadges: toggle(true, { account: true }),
   showSpaceEvents: toggle(true, { account: true }),
+  showAlertZoo: toggle(false),
 
   hour24Clock: toggle(false, { account: true }),
   dateFormat: choice<DateFormat>(['auto', 'dmy', 'mdy', 'ymd'], 'auto', { account: true }),
@@ -327,6 +342,7 @@ const SETTINGS = {
   hideProfileChanges: toggle(true, { account: true }),
   hideTopicChanges: toggle(false, { account: true }),
   hideMemberInReadOnly: toggle(true, { account: true }),
+  hideSentBeforeJoined: toggle(false, { account: true }),
   showTombstoneEvents: toggle(true, { account: true }),
   openRoomsAtUnread: toggle(true, { account: true }),
   jumpToLatestOnSend: toggle(false, { account: true }),
@@ -352,8 +368,12 @@ const SETTINGS = {
   memberSort: choice<MemberSort>(['name-asc', 'name-desc', 'newest', 'oldest'], 'name-asc', {
     account: true,
   }),
-  roomSort: choice<RoomSort>(['recent', 'name-asc', 'name-desc'], 'recent', { account: true }),
-  directSort: choice<RoomSort>(['recent', 'name-asc', 'name-desc'], 'recent', { account: true }),
+  roomSort: choice<RoomSort>(['recent', 'unread-first', 'name-asc', 'name-desc'], 'recent', {
+    account: true,
+  }),
+  directSort: choice<RoomSort>(['recent', 'unread-first', 'name-asc', 'name-desc'], 'recent', {
+    account: true,
+  }),
   groupMembersByPresence: toggle(true, { account: true }),
   filterPronounsByLanguage: toggle(true, { account: true }),
   showPronouns: toggle(true, { account: true }),
@@ -368,6 +388,7 @@ const SETTINGS = {
     device: true,
   }),
   sedEdits: toggle(false, { account: true }),
+  linkMscReferences: choice(['ask', 'always', 'never'], 'ask', { account: true }),
   inlineEditing: toggle(false, { account: true }),
   mentionInReplies: toggle(true, { account: true }),
   formattingToolbar: toggle(false, { account: true }),
@@ -427,6 +448,7 @@ const SETTINGS = {
   pauseAnimationsWhenInactive: toggle(false, { account: true }),
   autoplayStickers: toggle(true, { account: true }),
   gifProvider: choice<GifProviderSetting>(['default', 'klipy', 'tenor', 'giphy'], 'default'),
+  reuploadGifs: toggle(false, { account: true }),
   urlPreviews: toggle(false, { account: true, perAccount: true }),
   themeFileCards: toggle(true, { account: true }),
   encryptedUrlPreviews: toggle(false, { perAccount: true }),
@@ -440,6 +462,7 @@ const SETTINGS = {
   instagramEmbeds: toggle(false),
 
   systemNotifications: toggle(true, { device: true }),
+  inAppBanners: toggle(isNativeMobile(), { device: true }),
   badgeDefaultDirect: choice<BadgeNotificationMode>(['all', 'mentions', 'quiet'], 'all', {
     account: true,
   }),
@@ -471,16 +494,17 @@ const SETTINGS = {
   incomingVoiceIsolation: toggle(false, { device: true }),
   echoCancellation: toggle(true, { device: true }),
   autoGainControl: toggle(true, { device: true }),
+  microphoneVolume: range(0, 2.0, 1, { device: true }),
   audioInputDevice: text('', { device: true }),
   audioOutputDevice: text('', { device: true }),
   videoInputDevice: text('', { device: true }),
   callCameraResolution: choice(CALL_VIDEO_RESOLUTIONS, 'auto'),
   callCameraBitrate: choice(CALL_VIDEO_BITRATES, 'auto'),
   callCameraCodec: choice(CALL_VIDEO_CODECS, 'auto'),
-  callScreenResolution: choice(CALL_VIDEO_RESOLUTIONS, '720'),
+  callScreenResolution: choice(CALL_VIDEO_RESOLUTIONS, '1080'),
   callScreenBitrate: choice(CALL_VIDEO_BITRATES, 'auto'),
   callScreenFramerate: choice(CALL_SCREEN_FRAMERATES, '30'),
-  callScreenCodec: choice(CALL_VIDEO_CODECS, 'h264'),
+  callScreenCodec: choice(CALL_VIDEO_CODECS, 'vp8'),
   callSimulcast: toggle(true),
 
   /** Empty falls back to `config.json`; see `hasCompleteOverride`. */
@@ -517,7 +541,7 @@ const SETTINGS = {
   showSystemTrayIcon: toggle(true, { device: true }),
   useCustomTitleBar: toggle(customTitleBarDefault(), { device: true }),
   hardwareAcceleration: toggle(true, { device: true }),
-  hardwareVideoEncode: toggle(true, { device: true }),
+  hardwareVideoEncode: toggle(hardwareVideoEncodeDefault(), { device: true }),
   hardwareVideoDecode: toggle(true, { device: true }),
   smoothScrolling: toggle(true, { device: true }),
   webRtcIpPolicy: choice(WEBRTC_IP_POLICIES, 'default', { device: true }),
@@ -558,6 +582,7 @@ export type TimelinePreferences = Pick<
   | 'hideProfileChanges'
   | 'hideTopicChanges'
   | 'hideMemberInReadOnly'
+  | 'hideSentBeforeJoined'
   | 'showTombstoneEvents'
   | 'showHiddenEvents'
   | 'hiddenEventEdits'
@@ -583,8 +608,8 @@ export const PREFERENCE_RANGES = Object.fromEntries(
 ) as Record<RangePreference, { min: number; max: number }>;
 
 export const ACCOUNT_PREFERENCES = PREFERENCE_KEYS.filter((key) => SETTINGS[key].account);
-export const PER_ACCOUNT_PREFERENCES: ReadonlySet<keyof Preferences> = new Set(
-  PREFERENCE_KEYS.filter((key) => SETTINGS[key].perAccount)
+export const ACCOUNT_STORED_PREFERENCES: ReadonlySet<keyof Preferences> = new Set(
+  PREFERENCE_KEYS.filter((key) => SETTINGS[key].perAccount || !SETTINGS[key].device)
 );
 export const NON_SYNCABLE_KEYS: ReadonlySet<keyof Preferences> = new Set(
   PREFERENCE_KEYS.filter((key) => SETTINGS[key].device)
@@ -618,7 +643,7 @@ export function sanitize(stored: Record<string, unknown>, base: Preferences): Pr
         break;
       case 'number':
         if (typeof value === 'number' && Number.isFinite(value))
-          next[key] = Math.min(setting.max, Math.max(setting.min, value));
+          next[key] = clamp(value, setting.min, setting.max);
         break;
       case 'text':
         if (typeof value === 'string') next[key] = value;

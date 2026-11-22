@@ -9,7 +9,6 @@
   import CircleDashedIcon from 'phosphor-svelte/lib/CircleDashedIcon';
   import ChecksIcon from 'phosphor-svelte/lib/ChecksIcon';
   import DotsThreeVerticalIcon from 'phosphor-svelte/lib/DotsThreeVerticalIcon';
-  import EyeIcon from 'phosphor-svelte/lib/EyeIcon';
   import EyeSlashIcon from 'phosphor-svelte/lib/EyeSlashIcon';
   import FingerprintIcon from 'phosphor-svelte/lib/FingerprintIcon';
   import FlagIcon from 'phosphor-svelte/lib/FlagIcon';
@@ -17,6 +16,7 @@
   import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
   import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
   import ListBulletsIcon from 'phosphor-svelte/lib/ListBulletsIcon';
+  import PushPinIcon from 'phosphor-svelte/lib/PushPinIcon';
   import PushPinSlashIcon from 'phosphor-svelte/lib/PushPinSlashIcon';
   import SignInIcon from 'phosphor-svelte/lib/SignInIcon';
   import SignOutIcon from 'phosphor-svelte/lib/SignOutIcon';
@@ -32,7 +32,7 @@
   import { joinRoom } from '#lib/core/api/rooms.js';
   import { i18n } from '#lib/i18n.js';
   import { copyRoomLink } from '#lib/rooms/permalink.js';
-  import { isQuiet, setQuiet } from '#lib/rooms/quiet-rooms.svelte.js';
+  import { setUnreadDot, unreadDot, type UnreadDot } from '#lib/rooms/quiet-rooms.svelte.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
@@ -63,6 +63,7 @@
     onLobby?: (room: RoomListItemView) => void;
     onMoveUp?: () => void;
     onMoveDown?: () => void;
+    onPin?: () => void;
     onUnpin?: () => void;
     onRemoveFromFolder?: () => void;
     onChangeIcon?: () => void;
@@ -80,6 +81,7 @@
     onLobby,
     onMoveUp,
     onMoveDown,
+    onPin,
     onUnpin,
     onRemoveFromFolder,
     onChangeIcon,
@@ -114,8 +116,13 @@
   let unread = $derived(
     readable.some((entry) => entry.unread > 0 || entry.highlight > 0 || entry.marked_unread)
   );
-  let quiet = $derived(isQuiet(room.room_id));
-  let quietBySpace = $derived(!quiet && roomList.quietRoomIds.has(room.room_id));
+  const unreadDotChoices: { dot: UnreadDot; label: string }[] = [
+    { dot: 'default', label: 'room.unreadDotDefault' },
+    { dot: 'show', label: 'room.unreadDotShow' },
+    { dot: 'hide', label: 'room.unreadDotHide' },
+  ];
+  let dot = $derived(unreadDot(room.room_id));
+  let quietBySpace = $derived(dot === 'default' && roomList.quietRoomIds.has(room.room_id));
 
   const manageable = new SvelteSet<string>();
   let manageableRun = 0;
@@ -229,11 +236,8 @@
       });
   }
 
-  /** One-directional, like v1: a DM becomes a group. */
-  function convertToGroup(): void {
-    void core.rpc.account
-      .setDirect({ room_id: room.room_id, direct: false, user_id: null })
-      .catch(report);
+  function setDirect(direct: boolean): void {
+    void core.rpc.account.setDirect({ room_id: room.room_id, direct, user_id: null }).catch(report);
   }
 
   function addToSpaces(spaceIds: string[]): void {
@@ -269,11 +273,6 @@
     markRoomUnread(room.room_id, core.rpc.timeline);
   }
 
-  async function copyLink(): Promise<void> {
-    if (!(await copyRoomLink(core, room))) toasts.error(i18n.t('errors.copyFailed'));
-    else toasts.info(i18n.t('timeline.linkCopied'));
-  }
-
   async function copyId(): Promise<void> {
     try {
       await copyText(room.room_id);
@@ -303,7 +302,6 @@
   {anchor}
   {side}
   {align}
-  preventScroll={false}
   trigger={anchor ? undefined : optionsTrigger}
 >
   <IconContext values={{ 'aria-hidden': 'true' }}>
@@ -327,28 +325,44 @@
       <StarIcon weight={favourite ? 'fill' : 'regular'} />
       {i18n.t('room.menuFavourite')}
     </ActionMenuItem>
-    <ActionMenuItem
-      disabled={quietBySpace}
-      onSelect={() => {
-        setQuiet(room.room_id, !quiet);
-      }}
-    >
-      {#if quiet || quietBySpace}
-        <EyeIcon />
-      {:else}
+    <ActionMenuSub label={i18n.t('room.menuUnreadDot')} class="room-options-menu">
+      {#snippet trigger()}
         <EyeSlashIcon />
-      {/if}
-      {quietBySpace
-        ? i18n.t('room.menuUnreadHiddenBySpace')
-        : quiet
-          ? i18n.t('room.menuShowUnread')
-          : i18n.t('room.menuHideUnread')}
-    </ActionMenuItem>
+        {i18n.t('room.menuUnreadDot')}
+      {/snippet}
+      {#each unreadDotChoices as choice (choice.dot)}
+        {@const selected = dot === choice.dot}
+        {@const hiddenBySpace = quietBySpace && choice.dot === 'hide'}
+        <ActionMenuItem
+          checked={selected}
+          disabled={hiddenBySpace}
+          onSelect={() => {
+            setUnreadDot(room.room_id, choice.dot);
+          }}
+        >
+          <span class="menu-check" aria-hidden="true">{selected ? '✓' : ''}</span>
+          <span>{i18n.t(hiddenBySpace ? 'room.menuUnreadHiddenBySpace' : choice.label)}</span>
+        </ActionMenuItem>
+      {/each}
+    </ActionMenuSub>
 
     {#if room.is_direct}
-      <ActionMenuItem onSelect={convertToGroup}>
+      <ActionMenuItem
+        onSelect={() => {
+          setDirect(false);
+        }}
+      >
         <ChatCircleIcon />
         {i18n.t('room.menuConvertToGroup')}
+      </ActionMenuItem>
+    {:else if room.room_kind !== 'space'}
+      <ActionMenuItem
+        onSelect={() => {
+          setDirect(true);
+        }}
+      >
+        <ChatCircleIcon />
+        {i18n.t('room.menuConvertToDirect')}
       </ActionMenuItem>
     {/if}
 
@@ -384,9 +398,13 @@
         {i18n.t('room.menuShowSpaceTimeline')}
       </ActionMenuItem>
     {/if}
-    <ActionMenuItem onSelect={copyLink}>
+    <ActionMenuItem onSelect={() => void copyRoomLink(core, room, null, 'matrix')}>
       <LinkIcon />
-      {i18n.t('room.menuCopyLink')}
+      {i18n.t('timeline.copyMatrixLink')}
+    </ActionMenuItem>
+    <ActionMenuItem onSelect={() => void copyRoomLink(core, room, null, 'external')}>
+      <LinkIcon />
+      {i18n.t('timeline.copyExternalLink')}
     </ActionMenuItem>
     {#if preferences.developerTools}
       <ActionMenuItem onSelect={copyId}>
@@ -413,6 +431,12 @@
       <ActionMenuItem onSelect={onMoveDown}>
         <ArrowDownIcon />
         {i18n.t('room.menuMoveDown')}
+      </ActionMenuItem>
+    {/if}
+    {#if onPin}
+      <ActionMenuItem onSelect={onPin}>
+        <PushPinIcon />
+        {i18n.t('nav.pinToSidebar')}
       </ActionMenuItem>
     {/if}
     {#if onUnpin}
