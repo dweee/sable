@@ -5,30 +5,30 @@ let
   pnpmNative = pkgs.fetchurl (
     {
       x86_64-linux = {
-        url = "https://registry.npmjs.org/@pnpm/exe.linux-x64/-/exe.linux-x64-12.17.0.tgz";
-        hash = "sha512-vQAusDzMofc/Ee4KOUYjE6FWeHOlMGQyvhR7W39QSamVeJWS16co/n+bhjdjwjI3UFh8IWOpamvTS+b4lvQUog==";
+        url = "https://registry.npmjs.org/@pnpm/exe.linux-x64/-/exe.linux-x64-12.21.0.tgz";
+        hash = "sha512-8eufCjHXspKbNS/kh8q4Q0gqJoOuvC4Q5pgos6XS8By/nAMtP+jf8F1Cw9er840kfAX+PJ/ts+A9qnLE91rvXQ==";
       };
       aarch64-linux = {
-        url = "https://registry.npmjs.org/@pnpm/exe.linux-arm64/-/exe.linux-arm64-12.17.0.tgz";
-        hash = "sha512-Cj2nIzWTVm6ZuhQHqL9SiJ11scBnEGxJyNg7tYQPzh9fVF5UVRkv+LbyfwdftnAtJerK/7HDpK/55WeQqp8OkA==";
+        url = "https://registry.npmjs.org/@pnpm/exe.linux-arm64/-/exe.linux-arm64-12.21.0.tgz";
+        hash = "sha512-4Oj/iF2TDCe2lcH0n4TupPR5sSdrNLclJB6xBElLMPCUOAvBhdf2rRlSaO5M4erJ6g4Fyy7YTXTpcmfFsKyxEA==";
       };
       x86_64-darwin = {
-        url = "https://registry.npmjs.org/@pnpm/exe.darwin-x64/-/exe.darwin-x64-12.17.0.tgz";
-        hash = "sha512-w89cboNi4KCzmt/dSKrE4ijVNKICKiZsE9TcIWf77Tz+VpoDfuhPSmWPZK+iCHBvlI/9dIN+M3HiPPVsFnAx4Q==";
+        url = "https://registry.npmjs.org/@pnpm/exe.darwin-x64/-/exe.darwin-x64-12.21.0.tgz";
+        hash = "sha512-EzpvcsaE6hrrgYeEiAFYd2rSgFybYyxXhkAY7K3y6Hg3loVfcyJ81hHczpFzi8lW5RXtUlFECRPZ8ZAMRFQYYg==";
       };
       aarch64-darwin = {
-        url = "https://registry.npmjs.org/@pnpm/exe.darwin-arm64/-/exe.darwin-arm64-12.17.0.tgz";
-        hash = "sha512-0nkEqRLIbrm7dWl+p2EPpmyNKyM0bbdPEovdtMhHYbhkO+Vls38S+6emkx8kSTAr75BNXYXkCl4RtGinGG4Erg==";
+        url = "https://registry.npmjs.org/@pnpm/exe.darwin-arm64/-/exe.darwin-arm64-12.21.0.tgz";
+        hash = "sha512-F5OyMX/6zLSowpTZEQRojbCmPS1Pq+fyRaIinslsIe6Glh3qbyQ52u+Fe0eEzSaRuIbWZkXmAAXSWh6Q5Wrlgg==";
       };
     }
     .${pkgs.stdenv.hostPlatform.system}
   );
   pnpm = pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
     pname = "pnpm";
-    version = "12.17.0";
+    version = "12.21.0";
     src = pkgs.fetchurl {
-      url = "https://registry.npmjs.org/pnpm/-/pnpm-12.17.0.tgz";
-      hash = "sha512-uNIj6+wEtYContIG2qcdG8y2oe4dUu+pXMOw23UnFWHfjw2OLEOt05xewIAYr3qKlRCOcJD5Win4hye3pA/VPQ==";
+      url = "https://registry.npmjs.org/pnpm/-/pnpm-12.21.0.tgz";
+      hash = "sha512-Zv2CeO4ok1zpUXktNDZ/869cQyonVkRYIwKVM4NbjaUpu+C+UTCv1W7QcT+4eJ5Hutgtk71a4v5UsVVi1idu8A==";
     };
     nativeBuildInputs = [
       pkgs.makeWrapper
