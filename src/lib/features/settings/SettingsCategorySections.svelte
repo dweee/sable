@@ -12,7 +12,12 @@
   import { panelsFor } from './category-panels.js';
   import Switch from '#lib/ui/primitives/Switch.svelte';
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
-  import { settingFocusId, settingsCategories, settingsContext } from '#lib/settings/registry.js';
+  import {
+    settingFocusId,
+    settingShown,
+    settingsCategories,
+    settingsContext,
+  } from '#lib/settings/registry.js';
   import type { SettingDefinition, SettingsCategory } from '#lib/settings/registry.js';
   import {
     isLockedPreference,
@@ -21,6 +26,7 @@
   } from '#lib/settings/preferences.svelte.js';
   import { PREFERENCE_RANGES } from '#lib/settings/definitions.js';
   import type { Preferences } from '#lib/settings/definitions.js';
+  import TextInput from '#lib/ui/primitives/TextInput.svelte';
 
   interface Props {
     category: SettingsCategory;
@@ -34,7 +40,10 @@
 
   const items = $derived(
     category.items.filter(
-      (setting) => setting.supported?.(context) !== false && setting.panel === undefined
+      (setting) =>
+        setting.supported?.(context) !== false &&
+        setting.panel === undefined &&
+        settingShown(setting, preferences)
     )
   );
 
@@ -190,6 +199,15 @@
               /><span class="range-suffix" aria-hidden="true">%</span>
             </label>
           </div>
+        {:else if setting.type === 'text'}
+          {@const key = setting.key}
+          <TextInput
+            {disabled}
+            aria-label={i18n.t(setting.name)}
+            value={preferences[key]}
+            placeholder={setting.placeholder && i18n.t(setting.placeholder)}
+            oninput={(event) => setPreference(key, event.currentTarget.value)}
+          />
         {:else}
           {@const key = setting.key}
           <Switch

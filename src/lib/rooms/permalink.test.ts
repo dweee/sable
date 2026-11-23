@@ -5,6 +5,7 @@ vi.mock('#lib/i18n.js', () => import('#lib/test-support/i18n.js'));
 import type { RoomListItemView } from '#src/generated/protocol';
 
 import { parseMatrixLink } from '#lib/rooms/matrix-link.js';
+import { preferences } from '#lib/settings/preferences.svelte.js';
 import { roomView } from '#lib/test-support/room-views.js';
 
 import {
@@ -17,7 +18,7 @@ import {
   permalinkTarget,
   roomSectionPath,
   setSidebarSpaceOrder,
-  viaFor,
+  toRoute,
 } from './permalink';
 
 function room(roomId: string, overrides: Partial<RoomListItemView> = {}): RoomListItemView {
@@ -33,7 +34,14 @@ function room(roomId: string, overrides: Partial<RoomListItemView> = {}): RoomLi
 }
 
 function child(roomId: string) {
-  return { room_id: roomId, via: [], order: null, origin_server_ts: 0, suggested: false };
+  return {
+    room_id: roomId,
+    via: [],
+    order: null,
+    origin_server_ts: 0,
+    suggested: false,
+    private: false,
+  };
 }
 
 test('a plain joined room lands under rooms', () => {
@@ -213,25 +221,40 @@ test('via inside the fragment does not leak into the room id', () => {
 /* A room id is not routable on its own, so a link to one must advertise
    servers; a canonical alias carries its own and must not. */
 test('a room id link advertises its via servers', () => {
-  expect(matrixToUrl('!somewhere:example.org', ['elsewhere.ca'])).toBe(
+  expect(matrixToUrl({ roomId: '!somewhere:example.org', via: ['elsewhere.ca'] })).toBe(
     'https://link.sable.moe/#/!somewhere%3Aexample.org?via=elsewhere.ca'
   );
 });
 
 test('an alias link carries no via, being routable already', () => {
-  expect(matrixToUrl('#lobby:example.org', ['elsewhere.ca'])).toBe(
+  expect(matrixToUrl({ alias: '#lobby:example.org' })).toBe(
     'https://link.sable.moe/#/%23lobby%3Aexample.org'
   );
 });
 
 test('an event link nests the event under the room', () => {
-  expect(matrixToUrl('!somewhere:example.org', ['a.example', 'b.example'], '$event')).toBe(
-    'https://link.sable.moe/#/!somewhere%3Aexample.org/%24event?via=a.example&via=b.example'
+  expect(
+    matrixToUrl({ roomId: '!somewhere:example.org', via: ['a.example', 'b.example'] }, '$event')
+  ).toBe('https://link.sable.moe/#/!somewhere%3Aexample.org/%24event?via=a.example&via=b.example');
+});
+
+test.each([
+  ['sable', '', 'link.sable.moe'],
+  ['matrix', 'links.example.org', 'matrix.to'],
+  ['custom', 'links.example.org', 'links.example.org'],
+  ['custom', ' https://links.example.org/path ', 'links.example.org'],
+  ['custom', '', 'matrix.to'],
+  ['custom', 'not a host', 'matrix.to'],
+] as const)('the %s link host with %j writes %s', (selector, custom, host) => {
+  preferences.matrixLinkSelector = selector;
+  preferences.matrixLinkCustom = custom;
+  expect(matrixToUrl({ alias: '#lobby:example.org' })).toBe(
+    `https://${host}/#/%23lobby%3Aexample.org`
   );
 });
 
 test('a link the app generates parses back to what it named', () => {
-  const url = matrixToUrl('!somewhere:example.org', ['elsewhere.ca'], '$event');
+  const url = matrixToUrl({ roomId: '!somewhere:example.org', via: ['elsewhere.ca'] }, '$event');
   expect(parseMatrixLink(url)).toEqual({
     kind: 'event',
     room_id: '!somewhere:example.org',
@@ -260,9 +283,9 @@ test('a fragment that names nothing resolvable is rejected', () => {
   expect(permalinkTarget([], 'not-an-id')).toBeNull();
 });
 
-test('only a room id is given routing help; an alias resolves itself', () => {
-  expect(viaFor('!somewhere:example.org', ['a.example'])).toEqual(['a.example']);
-  expect(viaFor('#lobby:example.org', ['a.example'])).toEqual([]);
+test('a route holds one to three distinct servers', () => {
+  expect(toRoute([])).toBeNull();
+  expect(toRoute(['a', 'a', 'b', 'c', 'd'])).toEqual(['a', 'b', 'c']);
 });
 
 function viaCore() {
@@ -291,6 +314,8 @@ test('a via naming only our server adds the parent space members', async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  preferences.matrixLinkSelector = 'sable';
+  preferences.matrixLinkCustom = '';
 });
 
 function linkCore(via: string[] | Error) {
@@ -326,6 +351,19 @@ test('copying an external event link copies a web link carrying the event', asyn
     'https://link.sable.moe/#/!room%3Aexample.org/%24event?via=a.example'
   );
 });
+
+test.each(['external', 'matrix'] as const)(
+  'a %s link is not copied without a route',
+  async (format) => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const { core } = linkCore([]);
+    const target = { room_id: '!room:example.org', canonical_alias: null };
+
+    await expect(copyRoomLink(core, target, null, format)).resolves.toBe(false);
+    expect(writeText).not.toHaveBeenCalled();
+  }
+);
 
 test('copying an aliased room link skips the via lookup', async () => {
   const writeText = vi.fn(() => Promise.resolve());

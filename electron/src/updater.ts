@@ -42,7 +42,9 @@ export function supportsAutoUpdate(): boolean {
     !updatesDisabled() &&
     !process.mas &&
     installMethod() !== 'flatpak' &&
-    (process.platform !== 'linux' || installMethod() === 'appimage')
+    (process.platform === 'darwin' ||
+      process.platform === 'win32' ||
+      installMethod() === 'appimage')
   );
 }
 

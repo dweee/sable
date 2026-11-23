@@ -81,6 +81,30 @@ fn compatibility_and_matrix2_membership_shapes_match_deployed_element_call() {
 }
 
 #[test]
+fn an_sfu_url_is_published_as_an_msc4195_transport() {
+    let mut compatibility = member(CallMode::Compatibility, 7, &["wss://sfu.example.org"]);
+    compatibility.member_id = Some("@user:example.org:DEVICE".to_owned());
+    let compatibility = content(
+        &"!room:example.org".try_into().unwrap(),
+        &compatibility,
+        None,
+    );
+    assert_eq!(
+        compatibility["foci_preferred"],
+        serde_json::json!([{"type": "livekit", "url": "wss://sfu.example.org"}])
+    );
+    assert_eq!(compatibility["membershipID"], "@user:example.org:DEVICE");
+
+    let mut sticky = member(CallMode::Matrix2, 8, &["wss://sfu.example.org"]);
+    sticky.member_id = Some("member".to_owned());
+    let sticky = content(&"!room:example.org".try_into().unwrap(), &sticky, None);
+    assert_eq!(
+        sticky["transports"]["published"],
+        serde_json::json!([{"type": "livekit", "url": "wss://sfu.example.org"}])
+    );
+}
+
+#[test]
 fn legacy_content_uses_the_room_call_shape_with_an_empty_call_id() {
     let legacy = content(
         &"!room:example.org".try_into().unwrap(),
@@ -100,6 +124,8 @@ fn matrix2_and_legacy_membership_content_differ_in_shape() {
     let room_id = owned_room_id!("!room:example.org");
     let mut own = member(CallMode::Matrix2, 1_000, &["https://sfu.example.org"]);
     own.member_id = Some("m1".to_owned());
+    own.identity =
+        crate::calls::membership::sticky_identity(&own.user_id, own.own_device_id(), "m1");
     own.screen_sharing = true;
     assert_eq!(
         content_at(&room_id, &own, Some(CallIntent::Video), 2_000),
@@ -116,7 +142,13 @@ fn matrix2_and_legacy_membership_content_differ_in_shape() {
             "org.sable.screen_sharing": true,
         })
     );
+    own.identity = "@user:example.org:DEVICE".to_owned();
+    assert!(
+        content(&room_id, &own, None).get("versions").is_none(),
+        "only older Element Call reads the sticky identity, and it requires versions"
+    );
     own.mode = CallMode::Compatibility;
+    own.member_id = Some(own.identity.clone());
     own.screen_sharing = false;
     assert_eq!(
         content_at(&room_id, &own, Some(CallIntent::Audio), 2_000),
