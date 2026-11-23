@@ -29,7 +29,8 @@ export function supportsAutoUpdate(): boolean {
 
 export function supportsDesktopUpdateChecks(): boolean {
   if (import.meta.env.VITE_SABLE_DISABLE_UPDATER === '1') return false;
-  return supportsAutoUpdate() || electronBridge()?.platform === 'linux';
+  const platform = electronBridge()?.platform;
+  return supportsAutoUpdate() || platform === 'linux' || platform === 'freebsd';
 }
 
 export function updatePlatform(): 'desktop' | 'mobile' | 'web' {

@@ -12,8 +12,9 @@ use matrix_sdk::ruma::api::client::room::Visibility;
 use matrix_sdk::ruma::api::client::room::aliases;
 use matrix_sdk::ruma::api::client::room::create_room::{self, v3::RoomPreset};
 use matrix_sdk::ruma::api::client::room::upgrade_room;
-use matrix_sdk::ruma::events::InitialStateEvent;
+use matrix_sdk::ruma::events::{AnyInitialStateEvent, InitialStateEvent};
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
+use matrix_sdk::ruma::events::space::parent::SpaceParentEventContent;
 use matrix_sdk::ruma::events::tag::{TagInfo, TagName};
 use matrix_sdk::ruma::room::RoomType;
 use matrix_sdk::ruma::serde::Raw;
@@ -46,6 +47,7 @@ domain! {
     join,
     knock,
     via_servers,
+    upgrade_servers,
     leave,
     invite,
     create,
@@ -306,7 +308,31 @@ impl Handler for ViaServersParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<Vec<String>, RpcError> {
         let room = core.room(&self.room_id).await?;
-        core.room_via_servers(&room).await
+        Ok(crate::routing::Route::of(&room)
+            .await
+            .map(|route| route.to_strings())
+            .unwrap_or_default())
+    }
+}
+
+/// The servers to join a tombstoned room's successor through. Not for links.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct UpgradeServersParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+}
+
+impl Handler for UpgradeServersParams {
+    type Ok = Vec<String>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Vec<String>, RpcError> {
+        let room = core.room(&self.room_id).await?;
+        Ok(crate::routing::upgrade_servers(&room)
+            .await
+            .iter()
+            .map(ToString::to_string)
+            .collect())
     }
 }
 
@@ -414,6 +440,23 @@ fn creation_content(
     creation.into()
 }
 
+async fn canonical_parent(
+    client: &matrix_sdk::Client,
+    space_id: Option<&OwnedRoomId>,
+) -> Option<Raw<AnyInitialStateEvent>> {
+    let space_id = space_id?;
+    let via = match client.get_room(space_id) {
+        Some(space) => crate::routing::Route::cached(&space)
+            .await
+            .map(crate::routing::Route::into_servers)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let mut parent = SpaceParentEventContent::new(via);
+    parent.canonical = true;
+    Some(InitialStateEvent::new(space_id.clone(), parent).to_raw_any())
+}
+
 impl Handler for CreateParams {
     type Ok = String;
 
@@ -471,6 +514,7 @@ impl Handler for CreateParams {
         if let Some(rules) = core.delegated_rules_state(self.parent_space.as_ref()).await {
             request.initial_state.push(rules);
         }
+        request.initial_state.extend(canonical_parent(&client, self.parent_space.as_ref()).await);
 
         if matches!(self.kind, RoomKind::Voice) {
             // The override is a shallow merge: naming `events` drops the
